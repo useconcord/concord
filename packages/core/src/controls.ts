@@ -98,7 +98,7 @@ export interface ControlsOptions {
   /** How long after approval an instruction may be executed. Default 72h. */
   windowMs?: number;
   /** ISO-8601 time the chain is indexed up to. Instructions past their window before it are breaks. */
-  asOf?: string;
+  asOf: string;
 }
 
 /**
