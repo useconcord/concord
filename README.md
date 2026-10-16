@@ -42,7 +42,8 @@ suit light use. Point `CONCORD_MAINNET_RPC_URLS` at a provider for anything more
 - People sign in with **email and password**, or with **Google** when
   `CONCORD_GOOGLE_CLIENT_ID` and `CONCORD_GOOGLE_CLIENT_SECRET` are set. Concord sends no email:
   an owner creates an invitation link and passes it on, and a forgotten password is reset with a
-  link from `pnpm concord reset-link EMAIL`.
+  link from `pnpm concord reset-link EMAIL`. See the [Google sign-in setup guide](./docs/google-signin.md)
+  to configure Google or understand how it works with existing accounts, invitations and sign-up codes.
 - **Owners** invite and remove people, stop watching assets and can delete the workspace.
   **Members** do everything else. Whoever signs off a break is recorded from their session.
 - `CONCORD_SIGNUP=open` lets anyone create a workspace. `CONCORD_SIGNUP=code` requires a code
