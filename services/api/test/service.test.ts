@@ -1,7 +1,7 @@
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { decodeEvent } from "../src/chain.js";
-import { Concord } from "../src/concord.js";
+import { Concord, NotFound } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
@@ -76,6 +76,28 @@ describe("Concord", () => {
     expect(h.supply).toBe("1144.00025");
     expect(h.holders.find((x) => x.address === h2)).toMatchObject({ units: "55", status: "frozen" });
     expect(concord.asset("FUND").syncedLedger).toBe(100);
+  });
+
+  it("rejects reconciliation when no register has been imported", async () => {
+    await expect(concord.reconcile("FUND")).rejects.toThrow(new NotFound("no register imported for this asset"));
+  });
+
+  it("defaults to the latest register by as-of time rather than import order", async () => {
+    const csv = `holder_id,account,units\nA,${h1},90\nB,${h2},55\n`;
+    const latest = concord.importRegister("FUND", { csv, asOf: at(40) });
+    const older = concord.importRegister("FUND", { csv, asOf: at(10) });
+
+    expect(latest.registerId).toBe(1);
+    expect(older.registerId).toBeGreaterThan(latest.registerId);
+    expect(await concord.reconcile("FUND")).toMatchObject({ registerId: latest.registerId, asOf: at(40) });
+  });
+
+  it("rejects a register from another asset and an unknown register id", async () => {
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    await concord.watchAsset({ network: "testnet", asset: `OTHER:${issuer}`, fromLedger: 1 });
+
+    await expect(concord.reconcile("OTHER", reg.registerId)).rejects.toThrow(new NotFound("no register imported for this asset"));
+    await expect(concord.reconcile("FUND", 999)).rejects.toThrow(new NotFound("no register imported for this asset"));
   });
 
   it("reconciles a register at its as-of time and ages breaks", async () => {
