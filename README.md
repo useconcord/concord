@@ -16,7 +16,7 @@ customer has used it. The product brief and kill criteria are in [`BRIEF.md`](./
 
 ## Run it
 
-Needs Node 24+ and pnpm 9+. Nothing else: storage is SQLite through `node:sqlite`.
+Needs Node 24+ and pnpm 10.22 (pinned in `package.json`). Nothing else: storage is SQLite through `node:sqlite`.
 
 ```sh
 pnpm install
