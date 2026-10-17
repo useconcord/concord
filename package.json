@@ -5,7 +5,7 @@
   "description": "Reconciliation between tokenized securities on Stellar and the official register.",
   "engines": {
     "node": ">=24",
-    "pnpm": ">=9"
+    "pnpm": ">=10.22.0"
   },
   "packageManager": "pnpm@10.22.0",
   "scripts": {
