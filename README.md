@@ -96,6 +96,9 @@ Fly.io, or a VPS) and remove that variable.
 | `services/api` | RPC indexer, SQLite stores, accounts and workspaces, HTTP API, CLI |
 | `apps/web` | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team |
 
+The tables in `control.db` and in each workspace database are described in
+[`docs/schema.md`](./docs/schema.md).
+
 ## Input files
 
 All CSV with a header row. Amounts are decimals in whole units; more precision than the asset
