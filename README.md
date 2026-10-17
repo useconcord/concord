@@ -68,6 +68,8 @@ pnpm concord backup ./backup-2026-10-08
 pnpm concord --help
 ```
 
+The audit pack format (JSON sections, CSV columns, period rules and file names) is documented in [`docs/audit-pack.md`](./docs/audit-pack.md).
+
 ## Deploying
 
 The [`Dockerfile`](./Dockerfile) builds one image that serves the API and the dashboard. Give it
@@ -90,11 +92,11 @@ Fly.io, or a VPS) and remove that variable.
 
 ## Layout
 
-| Path | What it is |
-|---|---|
+| Path            | What it is                                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `packages/core` | The accounting, with no I/O: holdings replay, position and movement reconciliation, entitlements, controls matching |
-| `services/api` | RPC indexer, SQLite stores, accounts and workspaces, HTTP API, CLI |
-| `apps/web` | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team |
+| `services/api`  | RPC indexer, SQLite stores, accounts and workspaces, HTTP API, CLI                                                  |
+| `apps/web`      | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team              |
 
 ## Input files
 
@@ -102,10 +104,10 @@ All CSV with a header row. Amounts are decimals in whole units; more precision t
 carries is rejected, not rounded. Rows that cannot be read are listed with their line number and
 the reason, and the rest of the file is loaded. Each import form offers a blank template.
 
-| File | Columns |
-|---|---|
-| Register | `holder_id`, `units`, and optionally `holder_name`, `account`, `status` (`active` or `frozen`). Several holders may share one `account` (omnibus). |
-| Journal | `ref`, `date`, `type` (`issue`, `transfer`, `redeem`, `clawback`), `units`, and optionally `from_account`, `to_account`, `tx_hash` |
+| File         | Columns                                                                                                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Register     | `holder_id`, `units`, and optionally `holder_name`, `account`, `status` (`active` or `frozen`). Several holders may share one `account` (omnibus).               |
+| Journal      | `ref`, `date`, `type` (`issue`, `transfer`, `redeem`, `clawback`), `units`, and optionally `from_account`, `to_account`, `tx_hash`                               |
 | Instructions | `ref`, `type` (`authorize`, `freeze`, `unfreeze`, `clawback`), `account`, `issued_at`, and optionally `units` (required for a clawback), `approved_by`, `reason` |
 
 ## What it flags
@@ -186,13 +188,13 @@ It was a web search, with several sources read only as summaries, so treat it as
 
 ## What it does
 
-| Module | Job |
-|---|---|
-| Indexer | Read CAP-67 events for a watched set of regulated assets (classic and SEP-41) |
-| Reconciler | Match on-chain holdings and movements against each register export as it is imported, and on demand; flag breaks |
-| Corporate actions | Record-date snapshots; dividend, split and redemption reconciliation |
-| Controls log | Every freeze, authorisation change and clawback, tied to the instruction that caused it |
-| Audit export | Regulator- and auditor-ready reports |
+| Module            | Job                                                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Indexer           | Read CAP-67 events for a watched set of regulated assets (classic and SEP-41)                                    |
+| Reconciler        | Match on-chain holdings and movements against each register export as it is imported, and on demand; flag breaks |
+| Corporate actions | Record-date snapshots; dividend, split and redemption reconciliation                                             |
+| Controls log      | Every freeze, authorisation change and clawback, tied to the instruction that caused it                          |
+| Audit export      | Regulator- and auditor-ready reports                                                                             |
 
 Read-only. Concord never holds keys or moves money.
 
