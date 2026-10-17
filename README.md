@@ -159,20 +159,11 @@ with the chain in known ways to `data/demo/`, and prints what to watch. The scri
 Concord database: you watch the asset with the network set to Testnet and upload the files by
 hand, the way a user would. The books it writes are invented, and exist for development only.
 
-## Prior-art check (2026-10-06)
+## Prior-art check
 
-The brief's first kill criterion is that someone already ships this for Stellar. A desk check
-found no vendor selling register-against-chain or corporate-action reconciliation for Stellar.
-It was a web search, with several sources read only as summaries, so treat it as a first pass.
-
-- StellarExpert, Mercury/Zephyr and SDF Hubble provide data and indexing, not reconciliation.
-- Securitize and Vertalo reconcile inside their own transfer-agent stacks; no Stellar product found.
-- Allium is the closest: a Stellar RWA transfers table and content aimed at transfer agents, but
-  no balances, control events, register comparison or corporate actions.
-- Franklin Templeton's transfer agent reportedly reconciles BENJI daily with in-house tooling,
-  which confirms the workflow exists.
-- DTCC's release promises "corporate actions and reporting" for its H1 2027 Stellar connection.
-  If that includes participant-facing reconciliation, the criterion triggers for DTC-eligible assets.
+The brief's first kill criterion is that someone already ships this for Stellar. The check, a dated
+source for every finding, the kill criteria and the re-check schedule are kept in
+[`docs/prior-art.md`](./docs/prior-art.md).
 
 ## Why now
 
