@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
 import { loadConfig } from "../src/config.js";
@@ -7,6 +7,18 @@ import { Db } from "../src/db.js";
 import { CONTROL_MIGRATIONS, ORG_MIGRATIONS } from "../src/schema.js";
 import { Tenants, memoryStore } from "../src/tenants.js";
 import { Client, FakeChain, MAINNET_PASSPHRASE, ORIGIN, PASSPHRASE, at, harness, key, u, type Harness } from "./helpers.js";
+
+// This suite is run with `--sequence.shuffle` in CI to expose inter-test coupling.
+// When a shuffled run fails, replay it with the printed seed:
+//   npx vitest run services/api/test/tenancy.test.ts --sequence.shuffle --sequence.seed=<seed>
+// The seed is also echoed below on failure so it is easy to copy out of CI logs.
+const shuffleSeed = process.env.VITEST_SEQUENCE_SEED ?? process.env.VITEST_SEED ?? "unknown";
+afterAll(() => {
+  if (process.env.VITEST_SEQUENCE_SHUFFLE === "true") {
+    // Printed unconditionally so a green run's seed is available for replay too.
+    console.info(`[tenancy.test] shuffled run seed: ${shuffleSeed}`);
+  }
+});
 
 /** Strings that exist only in workspace A. None may ever reach workspace B. */
 const MARKERS = ["ALPHA-HOLDER-7", "Northgate Secret Trust", "alpha sign-off note", "J-ALPHA", "I-ALPHA", "Alpha Capital"];

@@ -28,3 +28,7 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+      # Second pass with randomised test order to expose inter-test coupling.
+      # Replay a failing seed with: pnpm test --sequence.shuffle --sequence.seed=<seed>
+      - name: Test (shuffled order)
+        run: pnpm test --sequence.shuffle --sequence.seed=${{ github.run_id }}
