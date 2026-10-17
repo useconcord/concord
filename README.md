@@ -47,6 +47,8 @@ suit light use. Point `CONCORD_MAINNET_RPC_URLS` at a provider for anything more
   **Members** do everything else. Whoever signs off a break is recorded from their session.
 - `CONCORD_SIGNUP=open` lets anyone create a workspace. `CONCORD_SIGNUP=code` requires a code
   from `pnpm concord signup-code`.
+  The [operator guide](./docs/operator-guide.md) covers codes, reset links and deleting a
+  workspace.
 
 ## Command line
 
