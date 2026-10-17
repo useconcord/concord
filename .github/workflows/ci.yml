@@ -28,3 +28,57 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t concord:ci .
+
+      - name: Start container
+        run: |
+          docker volume create concord-data
+          docker run -d --name concord -p 4400:4400 \
+            -v concord-data:/data \
+            --health-interval=5s --health-start-period=5s \
+            concord:ci
+
+      - name: Wait for healthy (60s max)
+        run: |
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' concord)" = "healthy" ] && exit 0
+            sleep 2
+          done
+          echo "Image did not become healthy within 60s"
+          exit 1
+
+      - name: Probe / and /api/health
+        run: |
+          curl -fsS http://localhost:4400/api/health
+          curl -fsS http://localhost:4400/ | grep -qi "<html"
+
+      - name: Restart and confirm data persists
+        run: |
+          docker exec concord sh -c 'echo persisted > /data/smoke-marker'
+          docker rm -f concord
+          docker run -d --name concord -p 4400:4400 \
+            -v concord-data:/data \
+            --health-interval=5s --health-start-period=5s \
+            concord:ci
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' concord)" = "healthy" ] && break
+            sleep 2
+          done
+          test "$(docker exec concord cat /data/smoke-marker)" = "persisted"
+          curl -fsS http://localhost:4400/api/health
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs concord
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f concord || true
