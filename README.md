@@ -68,6 +68,8 @@ pnpm concord backup ./backup-2026-10-08
 pnpm concord --help
 ```
 
+Every command, option and exit code is in the [command-line reference](./docs/cli.md).
+
 ## Deploying
 
 The [`Dockerfile`](./Dockerfile) builds one image that serves the API and the dashboard. Give it
