@@ -26,7 +26,8 @@ pnpm start            # API and dashboard on http://127.0.0.1:4400
 
 Open the address, create a workspace, and watch an asset. Mainnet and testnet are both served;
 the switch is at the top left. A new workspace is empty. Concord ships no sample data: the chain
-side comes from the ledger, and the register side is the file you upload.
+side comes from the ledger, and the register side is the file you upload. The
+[dashboard user guide](./docs/user-guide.md) walks through each tab.
 
 `pnpm test` runs the unit and service tests. `pnpm dev` runs the API and the dashboard with reload.
 
