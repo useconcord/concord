@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { decodeEvent } from "../src/chain.js";
@@ -339,5 +341,38 @@ describe("Concord", () => {
     expect(await csv.text()).toContain(h1);
     const template = await client.call("/api/templates/register.csv");
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
+  });
+});
+
+describe("documented input files", () => {
+  const readme = readFileSync(fileURLToPath(new URL("../../../README.md", import.meta.url)), "utf8");
+
+  /** The column names in one README Input-files row. Parenthesised value enumerations go. */
+  function documentedColumns(row: string): string[] {
+    const columnWords = row.replace(/\([^)]*\)/g, "");
+    return [...new Set([...columnWords.matchAll(/`([A-Za-z_]+)`/g)].map((m) => m[1]!))].sort();
+  }
+
+  it("lists the same columns as the CSV templates the API serves", async () => {
+    const client = await new Client(harness().app).signUp("docs@example.test", "Docs");
+    const rows = readme.split("\n").filter((line) => line.startsWith("| "));
+    const files = [
+      ["register", "Register"],
+      ["journal", "Journal"],
+      ["instructions", "Instructions"],
+    ] as const;
+    for (const [kind, file] of files) {
+      const res = await client.call(`/api/templates/${kind}.csv`);
+      expect(res.status, `${kind} template`).toBe(200);
+      const headers = (await res.text())
+        .trim()
+        .split(/\r?\n/)[0]!
+        .split(",")
+        .map((h) => h.trim())
+        .sort();
+      const row = rows.find((line) => line.startsWith(`| ${file} |`));
+      expect(row, `the README has no ${file} row in its Input files table`).toBeTruthy();
+      expect(documentedColumns(row!), `${kind} template vs the README ${file} row`).toEqual(headers);
+    }
   });
 });
