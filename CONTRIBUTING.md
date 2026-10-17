@@ -59,8 +59,31 @@ at your own RPC provider.
 1. For anything larger than a small fix, open an issue first so we can agree on the approach.
 2. Branch from `main`. Keep one concern per pull request.
 3. Add or update tests with the change. A bug fix should come with a test that fails without it.
-4. Run `pnpm build && pnpm test && pnpm typecheck` before you push. CI runs the same.
+4. Run `pnpm build && pnpm test && pnpm typecheck` before you push. CI runs the same on
+   multiple Node 24 targets (see below).
 5. Open the pull request and fill in the template. Link the issue it closes.
+
+### Continuous integration matrix and branch protection
+
+The [CI workflow](./.github/workflows/ci.yml) runs the same frozen-lockfile
+install, build, typecheck and test commands on three independent targets:
+
+| Stable check name | Runner | Runtime |
+| --- | --- | --- |
+| `Ubuntu / Node 24.10.x` | `ubuntu-latest` | latest patch of Node 24.10 |
+| `Ubuntu / Node 24.x` | `ubuntu-latest` | latest available Node 24 |
+| `macOS / Node 24.x` | `macos-latest` | latest available Node 24 |
+
+Each job times out after 25 minutes. Matrix `fail-fast: false` ensures a
+failure on one platform does not hide results on the others. Node 24 is
+intentional: the API uses the built-in `node:sqlite` module.
+
+**Branch protection:** if maintainers enable required status checks, require
+all three exact check names above. Previously, the single job was named
+`check`; after this change, protection rules referring to that old check
+must be updated by an authorized maintainer. This documentation does not
+modify repository settings or imply that protection is currently enabled.
+
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) with the
 scope being the package: `fix(core): ...`, `feat(api): ...`, `feat(web): ...`, `docs: ...`,
