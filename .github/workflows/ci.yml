@@ -28,3 +28,15 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+      - name: Core coverage
+        run: pnpm --filter @concord/core test:coverage
+      - name: API coverage
+        run: pnpm --filter @concord/api test:coverage
+      - name: Upload lcov reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: |
+            packages/core/coverage/lcov.info
+            services/api/coverage/lcov.info
+          if-no-files-found: error
