@@ -34,6 +34,9 @@ Configuration is by environment variable, or a `.env` file beside `package.json`
 [`.env.example`](./.env.example). With nothing set, mainnet uses free public RPC endpoints, which
 suit light use. Point `CONCORD_MAINNET_RPC_URLS` at a provider for anything more.
 
+Where the databases live, and what is safe to delete, is in
+[`docs/data-directory.md`](./docs/data-directory.md).
+
 ## Accounts and workspaces
 
 - A **workspace** holds the assets an organisation watches and the books it uploads. Each one is
