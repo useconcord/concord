@@ -88,6 +88,9 @@ spins down after fifteen idle minutes. `CONCORD_EPHEMERAL=1` makes the dashboard
 page. For anything people should come back to, use a paid instance with a disk at `/data` (or
 Fly.io, or a VPS) and remove that variable.
 
+Upgrading an existing instance, including how migrations run, taking a backup and rolling back, is
+covered in [`docs/upgrading.md`](./docs/upgrading.md).
+
 ## Layout
 
 | Path | What it is |
