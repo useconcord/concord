@@ -92,6 +92,14 @@ Once the chain has passed that time, `reconcileAction` takes holdings at the rec
 computes expected entitlements, observes the actual flows in the execution window, and diffs
 them. An action recorded ahead of its record time is picked up by `reconcileDue`.
 
+## Audit pack contract
+
+The JSON returned by `GET /api/assets/:id/export` is the artifact auditors keep. Its shape is
+published as a versioned JSON Schema: [`audit-pack.schema.json`](./audit-pack.schema.json) (v1).
+`services/api/test/service.test.ts` generates a pack from the service fixture, validates it with
+Ajv, and snapshots its key paths, so adding or removing a field requires a schema change and a new
+schema version.
+
 ## Testing
 
 `vitest` in `packages/core` and `services/api`. API tests build a real `Concord` with an in-memory
