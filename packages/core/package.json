@@ -16,6 +16,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
+    "bench": "vitest bench --run"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
