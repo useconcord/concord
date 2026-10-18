@@ -38,7 +38,8 @@ suit light use. Point `CONCORD_MAINNET_RPC_URLS` at a provider for anything more
 
 - A **workspace** holds the assets an organisation watches and the books it uploads. Each one is
   a SQLite file of its own under `data/orgs/`, so nothing a workspace stores can be reached from
-  another. Accounts, memberships and sessions live in `data/control.db`.
+  another. Accounts, memberships and sessions live in `data/control.db`. Why one file per
+  workspace: [`docs/adr/0001-sqlite-per-tenant.md`](./docs/adr/0001-sqlite-per-tenant.md).
 - People sign in with **email and password**, or with **Google** when
   `CONCORD_GOOGLE_CLIENT_ID` and `CONCORD_GOOGLE_CLIENT_SECRET` are set. Concord sends no email:
   an owner creates an invitation link and passes it on, and a forgotten password is reset with a
