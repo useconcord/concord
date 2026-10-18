@@ -90,6 +90,10 @@ docker build -t concord .
 docker run -p 4400:4400 -v concord-data:/data -e CONCORD_PUBLIC_URL=https://concord.example.com concord
 ```
 
+For a long-running host, [`deploy/docker-compose.yml`](./deploy/docker-compose.yml) does the same
+with a named volume, a restart policy and the health check. Copy `.env.example` to `.env` at the
+repository root, then run `docker compose -f deploy/docker-compose.yml up -d --build` from there.
+
 Concord is a single process with a background indexer and SQLite files, so it needs one
 always-on instance with a local disk. It does not fit serverless hosts.
 
