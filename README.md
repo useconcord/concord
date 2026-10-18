@@ -129,6 +129,9 @@ reconciles on a timer: a new day's comparison needs that day's register.
 
 ## Limits
 
+Which of these are next to fall, and what never will, is in
+[`docs/ROADMAP.md`](./docs/ROADMAP.md).
+
 - **History.** Stellar RPC keeps about seven days of events. A classic asset is therefore
   watched from opening balances: every trustline's balance from Horizon, then events from that
   ledger on. Horizon does not list balances held by liquidity pools, claimable balances or
