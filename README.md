@@ -16,7 +16,7 @@ customer has used it. The product brief and kill criteria are in [`BRIEF.md`](./
 
 ## Run it
 
-Needs Node 24+ and pnpm 9+. Nothing else: storage is SQLite through `node:sqlite`.
+Needs Node 24+ and pnpm 10.22 (pinned in `package.json`). Nothing else: storage is SQLite through `node:sqlite`.
 
 ```sh
 pnpm install
@@ -26,7 +26,8 @@ pnpm start            # API and dashboard on http://127.0.0.1:4400
 
 Open the address, create a workspace, and watch an asset. Mainnet and testnet are both served;
 the switch is at the top left. A new workspace is empty. Concord ships no sample data: the chain
-side comes from the ledger, and the register side is the file you upload.
+side comes from the ledger, and the register side is the file you upload. The
+[dashboard user guide](./docs/user-guide.md) walks through each tab.
 
 `pnpm test` runs the unit and service tests. `pnpm dev` runs the API and the dashboard with reload.
 
@@ -97,6 +98,9 @@ no persistent disk: every account, upload and sign-off is erased when the servic
 spins down after fifteen idle minutes. `CONCORD_EPHEMERAL=1` makes the dashboard say so on every
 page. For anything people should come back to, use a paid instance with a disk at `/data` (or
 Fly.io, or a VPS) and remove that variable.
+
+Upgrading an existing instance, including how migrations run, taking a backup and rolling back, is
+covered in [`docs/upgrading.md`](./docs/upgrading.md).
 
 ## Layout
 
@@ -172,20 +176,11 @@ with the chain in known ways to `data/demo/`, and prints what to watch. The scri
 Concord database: you watch the asset with the network set to Testnet and upload the files by
 hand, the way a user would. The books it writes are invented, and exist for development only.
 
-## Prior-art check (2026-10-06)
+## Prior-art check
 
-The brief's first kill criterion is that someone already ships this for Stellar. A desk check
-found no vendor selling register-against-chain or corporate-action reconciliation for Stellar.
-It was a web search, with several sources read only as summaries, so treat it as a first pass.
-
-- StellarExpert, Mercury/Zephyr and SDF Hubble provide data and indexing, not reconciliation.
-- Securitize and Vertalo reconcile inside their own transfer-agent stacks; no Stellar product found.
-- Allium is the closest: a Stellar RWA transfers table and content aimed at transfer agents, but
-  no balances, control events, register comparison or corporate actions.
-- Franklin Templeton's transfer agent reportedly reconciles BENJI daily with in-house tooling,
-  which confirms the workflow exists.
-- DTCC's release promises "corporate actions and reporting" for its H1 2027 Stellar connection.
-  If that includes participant-facing reconciliation, the criterion triggers for DTC-eligible assets.
+The brief's first kill criterion is that someone already ships this for Stellar. The check, a dated
+source for every finding, the kill criteria and the re-check schedule are kept in
+[`docs/prior-art.md`](./docs/prior-art.md).
 
 ## Why now
 
@@ -218,7 +213,9 @@ software: per asset and per seat.
 
 Contributions are welcome. Start with [`CONTRIBUTING.md`](./CONTRIBUTING.md) for setup and the
 rules that matter, and [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for how the code fits
-together. Report security problems privately, as described in [`SECURITY.md`](./SECURITY.md).
+together. To read the ledger from a new source, see
+[`docs/contributing/chain-source.md`](./docs/contributing/chain-source.md). Report security problems
+privately, as described in [`SECURITY.md`](./SECURITY.md).
 Everyone taking part is expected to follow the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## License
