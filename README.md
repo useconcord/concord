@@ -34,6 +34,9 @@ Configuration is by environment variable, or a `.env` file beside `package.json`
 [`.env.example`](./.env.example). With nothing set, mainnet uses free public RPC endpoints, which
 suit light use. Point `CONCORD_MAINNET_RPC_URLS` at a provider for anything more.
 
+Where the databases live, and what is safe to delete, is in
+[`docs/data-directory.md`](./docs/data-directory.md).
+
 ## Accounts and workspaces
 
 - A **workspace** holds the assets an organisation watches and the books it uploads. Each one is
@@ -42,11 +45,14 @@ suit light use. Point `CONCORD_MAINNET_RPC_URLS` at a provider for anything more
 - People sign in with **email and password**, or with **Google** when
   `CONCORD_GOOGLE_CLIENT_ID` and `CONCORD_GOOGLE_CLIENT_SECRET` are set. Concord sends no email:
   an owner creates an invitation link and passes it on, and a forgotten password is reset with a
-  link from `pnpm concord reset-link EMAIL`.
+  link from `pnpm concord reset-link EMAIL`. See the [Google sign-in setup guide](./docs/google-signin.md)
+  to configure Google or understand how it works with existing accounts, invitations and sign-up codes.
 - **Owners** invite and remove people, stop watching assets and can delete the workspace.
   **Members** do everything else. Whoever signs off a break is recorded from their session.
 - `CONCORD_SIGNUP=open` lets anyone create a workspace. `CONCORD_SIGNUP=code` requires a code
   from `pnpm concord signup-code`.
+  The [operator guide](./docs/operator-guide.md) covers codes, reset links and deleting a
+  workspace.
 
 ## Command line
 
@@ -67,6 +73,10 @@ pnpm concord export FUND --out audit.json
 pnpm concord backup ./backup-2026-10-08
 pnpm concord --help
 ```
+
+Every command, option and exit code is in the [command-line reference](./docs/cli.md).
+
+The audit pack format (JSON sections, CSV columns, period rules and file names) is documented in [`docs/audit-pack.md`](./docs/audit-pack.md).
 
 ## Deploying
 
@@ -95,6 +105,9 @@ Fly.io, or a VPS) and remove that variable.
 | `packages/core` | The accounting, with no I/O: holdings replay, position and movement reconciliation, entitlements, controls matching |
 | `services/api` | RPC indexer, SQLite stores, accounts and workspaces, HTTP API, CLI |
 | `apps/web` | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team |
+
+The tables in `control.db` and in each workspace database are described in
+[`docs/schema.md`](./docs/schema.md).
 
 ## Input files
 

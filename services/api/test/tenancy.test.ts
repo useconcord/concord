@@ -1,24 +1,14 @@
-import { readFileSync } from "node:fs";
-import { afterAll, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 import { StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
 import { loadConfig } from "../src/config.js";
 import { Db } from "../src/db.js";
 import { CONTROL_MIGRATIONS, ORG_MIGRATIONS } from "../src/schema.js";
-import { Tenants, memoryStore } from "../src/tenants.js";
+import { Tenants, fileStore, memoryStore } from "../src/tenants.js";
 import { Client, FakeChain, MAINNET_PASSPHRASE, ORIGIN, PASSPHRASE, at, harness, key, u, type Harness } from "./helpers.js";
-
-// This suite is run with `--sequence.shuffle` in CI to expose inter-test coupling.
-// When a shuffled run fails, replay it with the printed seed:
-//   npx vitest run services/api/test/tenancy.test.ts --sequence.shuffle --sequence.seed=<seed>
-// The seed is also echoed below on failure so it is easy to copy out of CI logs.
-const shuffleSeed = process.env.VITEST_SEQUENCE_SEED ?? process.env.VITEST_SEED ?? "unknown";
-afterAll(() => {
-  if (process.env.VITEST_SEQUENCE_SHUFFLE === "true") {
-    // Printed unconditionally so a green run's seed is available for replay too.
-    console.info(`[tenancy.test] shuffled run seed: ${shuffleSeed}`);
-  }
-});
 
 /** Strings that exist only in workspace A. None may ever reach workspace B. */
 const MARKERS = ["ALPHA-HOLDER-7", "Northgate Secret Trust", "alpha sign-off note", "J-ALPHA", "I-ALPHA", "Alpha Capital"];
@@ -220,6 +210,57 @@ describe("workspace isolation", () => {
     tenants.forOrg("aaaaaaaaaaaaaaaa");
     const again = new Tenants({ open: () => shared, remove: () => {} }, {}, () => true, () => []);
     expect(() => again.forOrg("bbbbbbbbbbbbbbbb")).toThrow(/belongs to aaaaaaaaaaaaaaaa/);
+  });
+
+  it("deletes SQLite db/WAL/SHM files and only reopens an explicitly known org (#500)", () => {
+    // Exercise the real file store, not the in-memory store used for route tests.
+    const temp = mkdtempSync(join(tmpdir(), "concord-tenant-drop-"));
+    const orgDir = join(temp, "orgs");
+    const alpha = "aaaaaaaaaaaaaaaa";
+    const beta = "bbbbbbbbbbbbbbbb";
+    const stale = "cccccccccccccccc";
+    const known = new Set([alpha, beta]);
+    const tenants = new Tenants(fileStore(temp), {}, (id) => known.has(id), () => [...known]);
+    const paths = (id: string) => [`${id}.db`, `${id}.db-wal`, `${id}.db-shm`];
+    const files = () => readdirSync(orgDir).sort();
+
+    try {
+      const alphaDb = tenants.forOrg(alpha).db;
+      const betaDb = tenants.forOrg(beta).db;
+      alphaDb.run("INSERT INTO meta (key, value) VALUES ('sample', 'ALPHA ONLY')");
+      betaDb.run("INSERT INTO meta (key, value) VALUES ('sample', 'BETA ONLY')");
+
+      // SQLite holds its WAL and shared-memory files while both handles are open.
+      expect(files()).toEqual([...paths(alpha), ...paths(beta)].sort());
+
+      // Invalid path-like ids cannot delete an unrelated file.
+      const sentinel = join(temp, "x.db");
+      writeFileSync(sentinel, "not a workspace");
+      tenants.drop("../x");
+      expect(existsSync(sentinel)).toBe(true);
+      expect(files()).toEqual([...paths(alpha), ...paths(beta)].sort());
+
+      tenants.drop(alpha);
+      expect(files()).toEqual(paths(beta).sort());
+      expect(betaDb.get<{ value: string }>("SELECT value FROM meta WHERE key = 'sample'")?.value).toBe("BETA ONLY");
+
+      known.delete(alpha);
+      expect(() => tenants.forOrg(alpha)).toThrow(/no such workspace/);
+      expect(files()).toEqual(paths(beta).sort()); // rejected reopen creates nothing
+
+      known.add(alpha);
+      const fresh = tenants.forOrg(alpha).db;
+      expect(fresh.get("SELECT value FROM meta WHERE key = 'sample'")).toBeUndefined();
+      expect(files()).toEqual([...paths(alpha), ...paths(beta)].sort());
+
+      // A never-opened id can still have stale on-disk artifacts after a crash.
+      for (const name of paths(stale)) writeFileSync(join(orgDir, name), "stale");
+      tenants.drop(stale);
+      expect(files()).toEqual([...paths(alpha), ...paths(beta)].sort());
+    } finally {
+      tenants.close();
+      rmSync(temp, { recursive: true, force: true });
+    }
   });
 
   it("deletes a workspace without touching its neighbour", async () => {

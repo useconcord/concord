@@ -32,3 +32,52 @@ jobs:
       # Replay a failing seed with: pnpm test --sequence.shuffle --sequence.seed=<seed>
       - name: Test (shuffled order)
         run: pnpm test --sequence.shuffle --sequence.seed=${{ github.run_id }}
+
+      - name: Core coverage
+        run: pnpm --filter @concord/core test:coverage
+      - name: API coverage
+        run: pnpm --filter @concord/api test:coverage
+      - name: Upload lcov reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: |
+            packages/core/coverage/lcov.info
+            services/api/coverage/lcov.info
+          if-no-files-found: error
+
+      - name: Install Chromium for accessibility checks
+        run: pnpm --filter @concord/web exec playwright install --with-deps chromium
+      - name: Run dashboard accessibility checks
+        run: |
+          pnpm --filter @concord/web exec vite --host 127.0.0.1 --port 4173 > /tmp/concord-web.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --silent --fail http://127.0.0.1:4173/ > /dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:4173/ > /dev/null
+          pnpm --filter @concord/web test:a11y
+
+
+# Advisory: reports numbers, never fails the build.
+  bench:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run benchmarks
+        run: pnpm --filter ./packages/core bench --reporter=verbose | tee bench.txt
+      - name: Publish results to job summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat bench.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

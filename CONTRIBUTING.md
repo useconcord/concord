@@ -21,6 +21,14 @@ pnpm dev          # API and dashboard with reload, http://127.0.0.1:4400
 `services/api`, because that package imports `@concord/core` from its `dist/` folder. After you
 change `packages/core`, rebuild it.
 
+CI runs the tests a second time in a random order, so tests that depend on each other fail
+there. The seed is the workflow run id and appears in the log as `Running tests with seed "..."`.
+To replay a failing run, take that seed and run
+
+```sh
+pnpm test --sequence.shuffle --sequence.seed=<seed>
+```
+
 Everything is optional to configure. See [`.env.example`](./.env.example) if you want to point
 at your own RPC provider.
 
