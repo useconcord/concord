@@ -13,6 +13,7 @@ private workspace per organisation. It has been exercised against Stellar mainne
 Franklin Templeton's BENJI, Concord's unit total matched Horizon's own figure to the last decimal,
 and a register built from the chain's holdings reconciled clean across all 1,005 positions. No
 customer has used it. The product brief and kill criteria are in [`BRIEF.md`](./BRIEF.md).
+Questions, bug reports and what to expect back: [`SUPPORT.md`](./SUPPORT.md).
 
 ## Run it
 
