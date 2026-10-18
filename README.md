@@ -212,6 +212,11 @@ Everyone taking part is expected to follow the [Code of Conduct](./CODE_OF_CONDU
 
 [MIT](./LICENSE).
 
+## Changelog
+
+User-visible and schema changes are listed in [`CHANGELOG.md`](./CHANGELOG.md), Keep a
+Changelog format.
+
 ## Relationship to other projects
 
 Concord is a stand-alone company. It was split from the Ballast idea set on 2026-09-16 because

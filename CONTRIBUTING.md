@@ -67,6 +67,11 @@ scope being the package: `fix(core): ...`, `feat(api): ...`, `feat(web): ...`, `
 `build: ...`, `test(api): ...`. Keep the subject short and say why in the body when it is not
 obvious.
 
+If the change is user-visible or touches a schema (`CONTROL_MIGRATIONS` or `ORG_MIGRATIONS` in
+`services/api/src/schema.ts`), add a line to the `Unreleased` section of
+[`CHANGELOG.md`](./CHANGELOG.md) in the same pull request; that file says how commit types map
+to sections. Internal refactorings and docs-only changes need no entry.
+
 ## Adding a break type
 
 Search for an existing type, such as `STATUS_MISMATCH`, to find every place that has to change.
