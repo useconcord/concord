@@ -141,21 +141,22 @@ the reason, and the rest of the file is loaded. Each import form offers a blank 
 
 ## What it flags
 
-- `Positions:` quantity mismatch, holder on chain but not on the register, holder on the
+- **Positions:** quantity mismatch, holder on chain but not on the register, holder on the
   register but not on chain, register holder with no address, frozen/active disagreement, total
   supply mismatch.
-- `Movements` (when a journal is loaded): on-chain movement missing from the journal, journal
+- **Movements** (when a journal is loaded): on-chain movement missing from the journal, journal
   entry with no ledger event, entry whose cited transaction moved a different amount.
-- `Corporate actions:` per holder, entitlement at the record time against what the ledger
+- **Corporate actions:** per holder, entitlement at the record time against what the ledger
   showed in the execution window: missing, short, excess, or paid to someone not entitled. An
   action recorded ahead of its record time is reconciled by itself once the chain passes it.
-- `Controls:` a freeze, authorisation or clawback with no instruction issued in the 72 hours
+- **Controls:** a freeze, authorisation or clawback with no instruction issued in the 72 hours
   before it, and an instruction that was never executed.
 
 A break can be acknowledged or resolved with a note. The sign-off holds only while the figures it
 was written against are unchanged; if the break moves, it reopens. See
-[`docs/signoff.md`](./docs/signoff.md) for how notes attach to breaks, what a fingerprint
-captures, and when a note becomes stale.
+[`docs/signoff.md`](./docs/signoff.md) for what a note is attached to, what the fingerprint captures
+per scope, and when a sign-off goes stale, and [`docs/breaks.md`](./docs/breaks.md) for the complete
+break-type glossary, root causes and investigation steps.
 
 A reconciliation runs when a register is imported and whenever someone re-runs it. Nothing
 reconciles on a timer: a new day's comparison needs that day's register.
@@ -175,10 +176,10 @@ Which of these are next to fall, and what never will, is in
   balances to read, so its holdings count only movements from the oldest ledger the RPC keeps.
   The dashboard says so on every page of such an asset. Tokens that do not emit the standard
   `set_authorized` and `clawback` events will show an empty controls log.
-- `Gaps.` If the indexer is down for longer than RPC retention, the events in between are
+- **Gaps.** If the indexer is down for longer than RPC retention, the events in between are
   lost. Concord detects this, stops indexing the asset and says why; **Rebuild history** in the
   asset's settings starts it again from fresh opening balances and keeps the uploaded books.
-- `Decimals.` Classic assets carry seven. A contract token's are read from the contract; one
+- **Decimals.** Classic assets carry seven. A contract token's are read from the contract; one
   that does not state them has to be told when it is watched.
 - **Email.** None is sent. Addresses are not verified at sign-up, invitations travel by link, and
   password resets go through the operator. See [`docs/adr/0003-no-email.md`](./docs/adr/0003-no-email.md) for the
@@ -186,15 +187,15 @@ Which of these are next to fall, and what never will, is in
 - **Scale.** One process, one SQLite file per workspace, holdings replayed from events in
   memory. It has run an asset with a thousand holders and seven thousand events comfortably; it
   has not been load-tested beyond that.
-- `Splits.` Fractions of the smallest unit are dropped; cash in lieu is not modelled.
+- **Splits.** Fractions of the smallest unit are dropped; cash in lieu is not modelled.
 
 ## Practice asset on testnet
 
 `pnpm demo:testnet` issues a regulated fund share on testnet (auth required, revocable, clawback
 enabled) and runs subscriptions, a cash dividend, a transfer, a freeze, a clawback, a redemption
 and a 2:1 split against it. It then writes a register, journal and instruction file that disagree
-with the chain in known ways to `data/demo/`, and prints what to watch. The script never opens
-a Concord database: you watch the asset with the network set to Testnet and upload the files by
+with the chain in known ways to `data/demo/`, and prints what to watch. The script never opens a
+Concord database: you watch the asset with the network set to Testnet and upload the files by
 hand, the way a user would. The books it writes are invented, and exist for development only.
 [`docs/demo-testnet.md`](./docs/demo-testnet.md) walks through the whole flow: what the script
 prints, what to watch for on the chain, how to load the books, and why each break appears.
@@ -208,7 +209,7 @@ source for every finding, the kill criteria and the re-check schedule are kept i
 ## Why now
 
 - DTCC's tokenization service plans to connect to Stellar in **H1 2027**. First assets: Russell
-  1000 stocks, major index EDTs, US Treasuries (DTCC press release, 2026-05-27).
+  1000 stocks, major index ETFs, US Treasuries (DTCC press release, 2026-05-27).
 - Stellar already holds about **$4B** of tokenized RWAs (SDF Dune dashboard, 2026-08-29). Spiko,
   Franklin Templeton (BENJI), Ondo and WisdomTree all keep official registers alongside the chain.
 - CAP-67 (Final, Protocol 23) makes classic Stellar operations emit `transfer`, `mint`, `burn`,
@@ -254,4 +255,6 @@ Changelog format.
 
 ## Relationship to other projects
 
-Concor
+Concord is a stand-alone company. It was split from the Ballast idea set on 2026-09-16 because
+it shares no buyer, balance sheet or regulatory load with Ballast. See
+`../ballast/README.md` for the reasoning.
