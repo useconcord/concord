@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { decodeEvent } from "../src/chain.js";
+import { ChainError, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
 import { Db } from "../src/db.js";
@@ -108,6 +108,31 @@ describe("decodeEvent", () => {
       amount: 0n,
     });
   });
+});
+
+describe("cursorLedger", () => {
+  it("decodes valid TOID cursors with or without index", () => {
+    // 100 << 32 = 429496729600n
+    expect(cursorLedger("429496729600-0000000001")).toBe(100);
+    expect(cursorLedger("429496729600-1")).toBe(100);
+    expect(cursorLedger("429496729600")).toBe(100);
+  });
+
+  const invalidCases = [
+    { label: "empty string", input: "" },
+    { label: "negative number", input: "-5" },
+    { label: "non-numeric string", input: "abc-1" },
+    { label: "invalid characters", input: "123a-45" },
+    { label: "multiple hyphens", input: "123-45-67" },
+    { label: "trailing hyphen", input: "123-" },
+  ];
+
+  for (const { label, input } of invalidCases) {
+    it(`throws ChainError on ${label} (${JSON.stringify(input)})`, () => {
+      expect(() => cursorLedger(input)).toThrow(ChainError);
+      expect(() => cursorLedger(input)).toThrow(/invalid cursor/);
+    });
+  }
 });
 
 describe("Concord", () => {

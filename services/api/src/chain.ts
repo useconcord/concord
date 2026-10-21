@@ -528,7 +528,12 @@ export function describeInstance(entryXdr: string, passphrase: string, contractI
   return out;
 }
 
-/** Ledger sequence encoded in an RPC event id or cursor (a TOID followed by an index). */
+/** Ledger sequence encoded in an RPC event id or cursor (a TOID followed by an optional index). */
 export function cursorLedger(cursor: string): number {
-  return Number(BigInt(cursor.split("-")[0]!) >> 32n);
+  if (!/^\d+(-\d+)?$/.test(cursor)) {
+    throw new ChainError(`invalid cursor: ${cursor}`, "rejected");
+  }
+  const toidPart = cursor.split("-")[0]!;
+  return Number(BigInt(toidPart) >> 32n);
 }
+
