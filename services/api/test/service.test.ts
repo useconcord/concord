@@ -78,6 +78,36 @@ describe("decodeEvent", () => {
     expect(() => decodeEvent(invalidDateRaw)).not.toThrow();
     expect(decodeEvent(invalidDateRaw)).toBeUndefined();
   });
+
+  it("rejects negative amounts and accepts zero amounts for transfer, mint, burn, and clawback", () => {
+    // transfer
+    expect(decodeEvent(raw([sym("transfer"), addr(a), addr(b), str(`FUND:${a}`)], i128(-5n)))).toBeUndefined();
+    expect(decodeEvent(raw([sym("transfer"), addr(a), addr(b), str(`FUND:${a}`)], i128(0n)))).toMatchObject({
+      kind: "transfer",
+      amount: 0n,
+    });
+
+    // mint
+    expect(decodeEvent(raw([sym("mint"), addr(b), str(`FUND:${a}`)], i128(-5n)))).toBeUndefined();
+    expect(decodeEvent(raw([sym("mint"), addr(b), str(`FUND:${a}`)], i128(0n)))).toMatchObject({
+      kind: "mint",
+      amount: 0n,
+    });
+
+    // burn
+    expect(decodeEvent(raw([sym("burn"), addr(b), str(`FUND:${a}`)], i128(-5n)))).toBeUndefined();
+    expect(decodeEvent(raw([sym("burn"), addr(b), str(`FUND:${a}`)], i128(0n)))).toMatchObject({
+      kind: "burn",
+      amount: 0n,
+    });
+
+    // clawback
+    expect(decodeEvent(raw([sym("clawback"), addr(b), str(`FUND:${a}`)], i128(-5n)))).toBeUndefined();
+    expect(decodeEvent(raw([sym("clawback"), addr(b), str(`FUND:${a}`)], i128(0n)))).toMatchObject({
+      kind: "clawback",
+      amount: 0n,
+    });
+  });
 });
 
 describe("Concord", () => {

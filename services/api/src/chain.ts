@@ -137,7 +137,7 @@ export function decodeEvent(raw: RawEvent): AssetEvent | undefined {
   }
   // A muxed destination turns the value into a map carrying the amount.
   const amount = typeof value === "object" && value !== null ? (value as { amount?: unknown }).amount : value;
-  if (typeof amount !== "bigint") return undefined;
+  if (typeof amount !== "bigint" || amount < 0n) return undefined;
   event.amount = amount;
   if (kind === "transfer") {
     if (addresses.length < 2) return undefined;
