@@ -708,11 +708,32 @@ describe("chain endpoints", () => {
   it("does not retry a request the RPC rejected", async () => {
     const a = "https://a.example";
     const { calls, deps } = scripted({
-      [a]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { message: "startLedger must be within the ledger range" } }))],
+      [a]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32602, message: "startLedger must be within the ledger range" } }))],
     });
     const source = new StellarSource(network([a, "https://b.example"]), deps);
     await expect(source.getEvents("C", { startLedger: 1 }, 10)).rejects.toThrow(/ledger range/);
     expect(calls).toHaveLength(1);
+  });
+
+  it("fails over and rests an endpoint on transient JSON-RPC errors like rate limiting", async () => {
+    const a = "https://a.example";
+    const b = "https://b.example";
+    const { calls, deps } = scripted({
+      [a]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { message: "rate limit exceeded" } }))],
+      [b]: [health, health],
+    });
+    const source = new StellarSource(network([a, b]), deps);
+    const head = await source.latestLedger();
+    expect(head.latest).toBe(50);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.url).toBe(a);
+    expect(calls[1]!.url).toBe(b);
+
+    // Endpoint `a` was rested, so next call goes directly to `b`
+    const head2 = await source.latestLedger();
+    expect(head2.latest).toBe(50);
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.url).toBe(b);
   });
 
   it("does not rest an endpoint on request faults (400, 404, 422)", async () => {

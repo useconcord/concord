@@ -325,8 +325,36 @@ export class StellarSource implements ChainSource {
         },
         timeoutMs,
       );
-      const body = await this.json<{ result?: T; error?: { message: string } }>(res);
-      if (body.error) throw new ChainError(`Stellar RPC ${method}: ${body.error.message}`, "rejected");
+      const body = await this.json<{ result?: T; error?: { code?: number; message: string } }>(res);
+      if (body.error) {
+        const msg = body.error.message ?? "";
+        const code = body.error.code;
+        const lower = msg.toLowerCase();
+        const isRequestError =
+          code === -32600 || // Invalid Request
+          code === -32601 || // Method not found
+          code === -32602 || // Invalid params
+          lower.includes("ledger range") ||
+          lower.includes("invalid param") ||
+          lower.includes("not found");
+
+        const isTransient =
+          !isRequestError &&
+          (lower.includes("rate limit") ||
+            lower.includes("too many requests") ||
+            lower.includes("behind") ||
+            lower.includes("internal") ||
+            lower.includes("timeout") ||
+            lower.includes("unavailable") ||
+            (code !== undefined && code !== -32600 && code !== -32601 && code !== -32602));
+
+        if (isTransient) {
+          const limited = lower.includes("rate limit") || lower.includes("too many requests");
+          throw new EndpointFailure(msg || `RPC error ${code}`, { limited });
+        }
+
+        throw new ChainError(`Stellar RPC ${method}: ${msg}`, "rejected");
+      }
       return body.result as T;
     });
   }
