@@ -1,4 +1,4 @@
-# Architecture Decision Records (ADRs
+# Architecture Decision Records (ADRs)
 
 This directory holds the Architecture Decision Records (ADRs) for this repository. An ADR is a short, immutable document that captures a significant technical decision, the context around it, and its consequences. ADRs explain *why* the code is the way it is, so contributors do not have to reverse-engineer the reasoning from the source.
 
@@ -8,10 +8,12 @@ ADRs are numbered sequentially and never reused or renumbered. Add a row to this
 
 | ADR | Title | Status | Date |
 | --- | ----- | ------ | ---- |
-| [ADR-0003](\0003-no-email.md) | No email | Accepted | - |
-| [ADR-0004](\0004-read-only.md) | Read-only | Accepted | - |
+| [ADR-0001](./0001-sqlite-per-tenant.md) | One SQLite database per workspace | Accepted | 2026-10-18 |
+| [ADR-0002](./0002-bigint-amounts.md) | Amounts are `bigint` in the smallest unit and parsing never rounds | Accepted | 2026-10-18 |
+| [ADR-0003](./0003-no-email.md) | Concord sends no email | Accepted | 2026-10-18 |
+| [ADR-0004](./0004-read-only.md) | Read-only by design: no keys, no transactions | Accepted | 2026-10-18 |
 
-The next ADR you add should use the next unused number. At the time of writing, `0003` and `0004` are taken on `main`, and other open pull requests add `0001`, `0002` and `0005`. Check the directory and open pull requests before choosing a number, and add the corresponding row above.
+The next ADR you add should use the next unused number. Check the directory and open pull requests before choosing a number, and add the corresponding row above.
 
 ## When an ADR is required
 
