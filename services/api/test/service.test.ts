@@ -635,6 +635,28 @@ describe("Concord", () => {
     expect(concord.asset(assetId).id).toBe(assetId);
   });
 
+  it("handles concurrent watchAsset calls gracefully without UNIQUE constraint failure", async () => {
+    const assetCode = `CONC:${key()}`;
+    const origDescribe = chain.describe?.bind(chain);
+    chain.describe = async (candidate) => {
+      await new Promise((r) => setTimeout(r, 25));
+      return origDescribe ? origDescribe(candidate) : { decimals: 7, name: "Concurrent Test" };
+    };
+
+    const [r1, r2] = await Promise.allSettled([
+      concord.watchAsset({ network: "testnet", asset: assetCode, fromLedger: 1 }),
+      concord.watchAsset({ network: "testnet", asset: assetCode, fromLedger: 1 }),
+    ]);
+
+    const successes = [r1, r2].filter((r) => r.status === "fulfilled");
+    const rejections = [r1, r2].filter((r) => r.status === "rejected");
+
+    expect(successes).toHaveLength(1);
+    expect(rejections).toHaveLength(1);
+    expect((rejections[0] as PromiseRejectedResult).reason).toBeInstanceOf(Invalid);
+    expect((rejections[0] as PromiseRejectedResult).reason.message).toContain("is already watched");
+  });
+
   it("validates decimals for classic and contract assets", async () => {
     const classicIssuer = key();
     // Classic asset rejects decimals !== 7
