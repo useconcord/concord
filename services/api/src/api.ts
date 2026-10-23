@@ -149,7 +149,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     const { session } = c.var;
     // Anyone may leave; removing someone else takes an owner.
     if (c.req.param("userId") !== session.user.id) owner(c);
-    auth.removeMember(session.org.id, c.req.param("userId"));
+    auth.removeMember(session.org.id, c.req.param("userId"), session.user.id);
     return c.json({ ok: true });
   });
   priv.patch("/org", async (c) => {

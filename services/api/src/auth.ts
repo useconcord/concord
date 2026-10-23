@@ -344,10 +344,14 @@ export class Auth {
     this.db.write("DELETE FROM users WHERE id NOT IN (SELECT user_id FROM memberships)");
   }
 
-  removeMember(orgId: string, userId: string): void {
+  removeMember(orgId: string, userId: string, actorId: string): void {
     this.db.tx(() => {
       const member = this.db.get<{ role: Role }>("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?", orgId, userId);
       if (!member) throw new Rejected("That person is not in this workspace.");
+      if (actorId === userId) {
+        const count = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM memberships WHERE user_id = ?", userId)?.n ?? 0;
+        if (count <= 1) throw new Rejected("You cannot leave your only workspace. Join another first.");
+      }
       if (member.role === "owner" && this.owners(orgId) === 1) {
         throw new Rejected("A workspace needs an owner. Make someone else an owner first, or delete the workspace.");
       }
