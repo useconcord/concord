@@ -264,6 +264,24 @@ describe("Concord", () => {
     expect((await concord.reconcileAction(split.id)).state).toBe("clean");
   });
 
+  it("reconciles reverse splits executed as burns rather than clawbacks", async () => {
+    chain.push(assetId, "burn", 7, { from: h1, amount: u(50) });
+    chain.push(assetId, "burn", 7, { from: h2, amount: u(25) });
+    const split = await concord.createAction("FUND", {
+      type: "split",
+      recordTime: at(5),
+      windowTo: at(9),
+      num: "1",
+      den: "2",
+    });
+    expect(split.state).toBe("clean");
+    expect(split.result?.summary).toMatchObject({
+      expectedTotal: "-75",
+      observedTotal: "-75",
+      breakCount: 0,
+    });
+  });
+
   it("rejects non-address payer and warns on a silent payer", async () => {
     await expect(
       concord.createAction("FUND", {

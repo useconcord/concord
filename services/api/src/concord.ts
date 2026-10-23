@@ -1282,7 +1282,8 @@ export class Concord {
       if (type === "split") {
         expected = splitDeltas(snapshot, ratio, exclude);
         plus = ["mint"];
-        minus = ["clawback"];
+        // Reverse splits can retire units via burn as well as issuer clawback.
+        minus = ["burn", "clawback"];
       } else {
         expected = redemptionDeltas(snapshot, ratio, exclude);
         plus = [];
