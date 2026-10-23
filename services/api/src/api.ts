@@ -88,6 +88,9 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     if (!session) throw new Unauthorized("Sign in to continue.");
     // A tab still showing another workspace must not act on this one.
     const shown = c.req.header("x-concord-org");
+    const browserMutation =
+      c.req.header("sec-fetch-site") !== undefined && !["GET", "HEAD", "OPTIONS"].includes(c.req.method);
+    if (browserMutation && !shown) throw new Conflict("This browser tab is missing its workspace context. Reload it.");
     if (shown && shown !== session.org.id) throw new Conflict("This tab is showing a different workspace. Reload it.");
     c.set("session", session);
     c.set("ws", tenants.forOrg(session.org.id));
