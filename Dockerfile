@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build everything with the full toolchain.
-FROM node:24-slim AS build
+FROM node:26-slim AS build
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -15,7 +15,7 @@ COPY apps apps
 RUN pnpm build
 
 # Run with only what the server needs: its production dependencies and the built output.
-FROM node:24-slim
+FROM node:26-slim
 WORKDIR /app
 ENV NODE_ENV=production
 RUN corepack enable
