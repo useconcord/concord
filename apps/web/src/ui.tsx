@@ -54,7 +54,7 @@ export function useAction() {
       await fn();
       return true;
     } catch (e) {
-      setError((e as Error).message);
+      setError(e instanceof Error ? e.message : String(e));
       return false;
     } finally {
       setBusy(false);
