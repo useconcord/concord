@@ -95,6 +95,7 @@ function Password({
     >
       <span className="flex gap-2">
         <input
+          aria-label={label}
           type={shown ? "text" : "password"}
           value={value}
           onChange={(e) => onChange(e.target.value)}
