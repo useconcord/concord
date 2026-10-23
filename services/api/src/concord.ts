@@ -1522,7 +1522,7 @@ export class Concord {
       },
       period: { from, to },
       holdings: (() => {
-        const { beforeHistory, warnings, ...rest } = this.holdings(asset.id, to);
+        const { beforeHistory: _beforeHistory, warnings: _warnings, ...rest } = this.holdings(asset.id, to);
         return rest;
       })(),
       reconciliations: runs,
