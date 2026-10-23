@@ -107,8 +107,10 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return out;
   };
   const numeric = (c: Context, name: string) => {
-    const n = Number(c.req.param(name));
-    if (!Number.isInteger(n)) throw new NotFound("not found");
+    const raw = c.req.param(name) ?? "";
+    if (!/^[1-9]\d{0,9}$/.test(raw)) throw new NotFound("not found");
+    const n = Number(raw);
+    if (!Number.isSafeInteger(n)) throw new NotFound("not found");
     return n;
   };
   const id = (c: Context) => c.req.param("id") ?? "";
