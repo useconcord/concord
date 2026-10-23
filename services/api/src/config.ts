@@ -153,11 +153,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // Render names the service's own address in RENDER_EXTERNAL_URL.
   let publicUrl =
     env.CONCORD_PUBLIC_URL || env.RENDER_EXTERNAL_URL || `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
+  let parsedPublicUrl: URL;
   try {
-    publicUrl = new URL(publicUrl).origin;
+    parsedPublicUrl = new URL(publicUrl);
   } catch {
     throw new Error("CONCORD_PUBLIC_URL must be a URL such as https://concord.example.com");
   }
+  // Everything past the origin used to be dropped silently (…/concord became
+  // the bare origin), so cookies, the Google redirect URI and invite links on
+  // a sub-path deployment pointed at the wrong place with no explanation.
+  // Concord serves from "/", so a sub-path is a configuration error worth
+  // naming, not trimming. A bare trailing slash parses to pathname "/" and
+  // stays accepted.
+  if (parsedPublicUrl.pathname !== "/" || parsedPublicUrl.search !== "" || parsedPublicUrl.hash !== "") {
+    throw new Error(
+      `CONCORD_PUBLIC_URL must not carry a path, query or fragment — Concord serves from the root ` +
+        `and sub-path hosting is not supported. Got "${publicUrl}"; use "${parsedPublicUrl.origin}".`,
+    );
+  }
+  publicUrl = parsedPublicUrl.origin;
 
   const config: Config = {
     networks: { mainnet: network("mainnet"), testnet: network("testnet") },

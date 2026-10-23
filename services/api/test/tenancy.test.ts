@@ -621,6 +621,20 @@ describe("networks", () => {
     await expect(concord.watchAsset({ network: "devnet" as "testnet", asset: `FUND:${issuer}` })).rejects.toThrow(/mainnet or testnet/);
   });
 
+  it("rejects a CONCORD_PUBLIC_URL with a path instead of silently dropping it", () => {
+    // A sub-path used to be trimmed to the origin, so cookies and the OAuth
+    // redirect quietly pointed at the wrong place. Now it is named as the
+    // configuration error it is.
+    expect(() => loadConfig({ CONCORD_PUBLIC_URL: "https://x.example/concord" })).toThrow(
+      /sub-path hosting is not supported.*https:\/\/x\.example/,
+    );
+    expect(() => loadConfig({ CONCORD_PUBLIC_URL: "https://x.example/?tenant=a" })).toThrow(/query/);
+    // A trailing slash alone is still accepted, and still normalizes to the origin.
+    expect(loadConfig({ CONCORD_PUBLIC_URL: "https://x.example/" }).publicUrl).toBe("https://x.example");
+    expect(loadConfig({ CONCORD_PUBLIC_URL: "https://x.example" }).publicUrl).toBe("https://x.example");
+    expect(() => loadConfig({ CONCORD_PUBLIC_URL: "not a url" })).toThrow(/must be a URL/);
+  });
+
   it("serves both networks with public endpoints by default and names retired settings", () => {
     const config = loadConfig({});
     expect(config.defaultNetwork).toBe("mainnet");
