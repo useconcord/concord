@@ -102,6 +102,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     const out: { from?: string; to?: string } = {};
     const from = c.req.query("from");
     const to = c.req.query("to");
+    if (from && to && from > to) throw new Invalid("from must not be after to");
     if (from) out.from = from;
     if (to) out.to = to;
     return out;
