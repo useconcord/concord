@@ -219,7 +219,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
   });
   priv.post("/assets/:id/rebuild", async (c) => {
     const { ws } = c.var;
-    throttle(c, "watch", 20, 10 * 60_000);
+    throttle(c, "rebuild", 20, 10 * 60_000);
     return c.json(ws.assetSummary(await ws.rebuild(id(c), { defer: true })));
   });
 
