@@ -161,10 +161,11 @@ export function authRoutes(auth: Auth, options: ApiOptions): Hono {
   app.post("/signin", async (c) => {
     const input = await jsonBody<{ email: unknown; password: unknown }>(c);
     const email = typeof input.email === "string" ? input.email.trim().toLowerCase().slice(0, 254) : "";
-    limit(`signin:${clientIp(c, options.trustProxyHops)}`, 20, 10 * MINUTE);
     const failures = `signin-failed:${email}`;
     const locked = limiter.blocked(failures, 10);
     if (locked > 0) throw new TooMany(locked);
+    // A locked email must not drain the shared IP allowance for unrelated users.
+    limit(`signin:${clientIp(c, options.trustProxyHops)}`, 20, 10 * MINUTE);
     try {
       const { userId, orgId } = await auth.signIn(email, input.password);
       limiter.clear(failures);
