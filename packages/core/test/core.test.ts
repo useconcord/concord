@@ -32,6 +32,21 @@ describe("amounts", () => {
     expect(formatUnits(-1n)).toBe("-0.0000001");
     expect(parseUnits("5.10000000")).toBe(51_000_000n);
   });
+  it.each([
+    ["1,234", 12_340_000_000n],
+    ["12,345,678", 123_456_780_000_000n],
+    ["-1,234.5", -12_345_000_000n],
+  ])("accepts grouped amount %s", (raw, units) => {
+    expect(parseUnits(raw)).toBe(units);
+  });
+
+  it.each(["1,23", "12,3456", "1,50,000", ",5", "1,,000"])(
+    "rejects malformed grouping in %s",
+    (raw) => {
+      expect(() => parseUnits(raw)).toThrow(`not a decimal amount: "${raw}"`);
+    },
+  );
+
   it("refuses to round", () => {
     expect(() => parseUnits("0.00000001")).toThrow(/decimal places/);
     expect(() => parseUnits("1e5")).toThrow();
