@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
@@ -24,6 +25,17 @@ export interface ApiOptions {
 
 const MINUTE = 60_000;
 
+/** Normalize only genuine IPs, never let a reconnecting port become a new rate-limit bucket. */
+function normalizedIp(raw: string): string | undefined {
+  const value = raw.trim();
+  if (isIP(value)) return value;
+  const bracketed = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(value);
+  if (bracketed && isIP(bracketed[1] ?? "")) return bracketed[1];
+  const v4Port = /^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/.exec(value);
+  if (v4Port && isIP(v4Port[1] ?? "") === 4) return v4Port[1];
+  return undefined;
+}
+
 /** The address to hold rate limits against. Forwarded headers count only behind a known proxy. */
 export function clientIp(c: Context, trustProxyHops: number): string {
   if (trustProxyHops > 0) {
@@ -31,12 +43,14 @@ export function clientIp(c: Context, trustProxyHops: number): string {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-    // Each trusted proxy appends the address it saw; the entry before theirs is the client.
     const seen = hops[hops.length - trustProxyHops];
-    if (seen) return seen;
+    if (seen) {
+      const address = normalizedIp(seen);
+      if (address) return address;
+    }
   }
   try {
-    return getConnInfo(c).remote.address ?? "unknown";
+    return normalizedIp(getConnInfo(c).remote.address ?? "") ?? "unknown";
   } catch {
     return "unknown";
   }
