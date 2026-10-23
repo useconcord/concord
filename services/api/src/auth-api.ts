@@ -43,7 +43,8 @@ export function clientIp(c: Context, trustProxyHops: number): string {
 }
 
 export async function jsonBody<T>(c: Context): Promise<T> {
-  if (!(c.req.header("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+  const mediaType = (c.req.header("content-type") ?? "").split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json") {
     throw new Invalid("request body must be JSON");
   }
   let value: unknown;
