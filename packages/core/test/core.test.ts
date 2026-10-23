@@ -494,4 +494,29 @@ describe("controls log", () => {
     expect(log.records[0].instruction?.ref).toBe("I10");
     expect(log.breaks).toEqual([]);
   });
+
+  it("flags future-dated instructions as INSTRUCTION_IN_FUTURE breaks", () => {
+    const { instructions } = parseInstructionsCsv(
+      [
+        "ref,type,account,issued_at",
+        "I_FUTURE,freeze,A,2099-01-01T00:00:00Z",
+        "I_NORMAL,freeze,B,2026-10-06T00:00:00Z",
+      ].join("\n"),
+    );
+    const log = buildControlsLog([], instructions, {
+      asOf: "2026-10-06T12:00:00Z",
+    });
+    expect(log.breaks).toContainEqual(
+      expect.objectContaining({
+        type: "INSTRUCTION_IN_FUTURE",
+        severity: "medium",
+        key: "INSTRUCTION_IN_FUTURE:I_FUTURE",
+        address: "A",
+        ref: "I_FUTURE",
+      }),
+    );
+    // Normal pending instruction within window is in pending, not a future break
+    expect(log.pending.map((i) => i.ref)).toEqual(["I_NORMAL"]);
+    expect(log.breaks.filter((b) => b.type === "INSTRUCTION_IN_FUTURE")).toHaveLength(1);
+  });
 });

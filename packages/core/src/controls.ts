@@ -73,7 +73,7 @@ export interface ControlRecord {
   instruction?: Instruction;
 }
 
-export type ControlBreakType = "UNINSTRUCTED_CONTROL" | "UNEXECUTED_INSTRUCTION";
+export type ControlBreakType = "UNINSTRUCTED_CONTROL" | "UNEXECUTED_INSTRUCTION" | "INSTRUCTION_IN_FUTURE";
 
 export interface ControlBreak {
   type: ControlBreakType;
@@ -190,7 +190,19 @@ export function buildControlsLog(
   const pending: Instruction[] = [];
   for (const instruction of ordered) {
     if (used.has(instruction.ref)) continue;
-    if (Date.parse(instruction.issuedAt) + windowMs >= asOf) {
+    const issued = Date.parse(instruction.issuedAt);
+    if (issued > asOf) {
+      breaks.push({
+        type: "INSTRUCTION_IN_FUTURE",
+        severity: "medium",
+        key: `INSTRUCTION_IN_FUTURE:${instruction.ref}`,
+        address: instruction.account,
+        ref: instruction.ref,
+        message: `Instruction ${instruction.ref} (${instruction.type}) is dated in the future (${instruction.issuedAt}) relative to asOf`,
+      });
+      continue;
+    }
+    if (issued + windowMs >= asOf) {
       pending.push(instruction);
       continue;
     }
