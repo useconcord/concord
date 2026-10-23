@@ -48,6 +48,24 @@ describe("csv", () => {
   });
 });
 
+describe("clawback instruction units", () => {
+  it("reports non-positive clawback units and retains valid instructions", () => {
+    const csv = [
+      "ref,type,account,units,issued_at",
+      "I0,clawback,GA,0,2026-10-01T00:00:00Z",
+      "I1,clawback,GA,-1,2026-10-01T00:00:00Z",
+      "I2,clawback,GA,2,2026-10-01T00:00:00Z",
+    ].join("\n");
+    const { instructions, issues } = parseInstructionsCsv(csv);
+    expect(issues).toEqual([
+      { line: 2, message: "clawback units must be greater than zero" },
+      { line: 3, message: "clawback units must be greater than zero" },
+    ]);
+    expect(instructions).toHaveLength(1);
+    expect(instructions[0]).toMatchObject({ ref: "I2", units: parseUnits("2") });
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;

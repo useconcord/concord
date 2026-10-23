@@ -49,7 +49,9 @@ export function parseInstructionsCsv(
       };
       if (type === "clawback") {
         if (!values.units) throw new Error("clawback needs units");
-        instruction.units = parseUnits(values.units, decimals);
+        const units = parseUnits(values.units, decimals);
+        if (units <= 0n) throw new Error("clawback units must be greater than zero");
+        instruction.units = units;
       }
       if (values.approved_by) instruction.approvedBy = values.approved_by;
       if (values.reason) instruction.reason = values.reason;
