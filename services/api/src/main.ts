@@ -158,6 +158,19 @@ export function startServer(config: Config = loadConfig()): void {
     if (config.ephemeral) console.warn("CONCORD_EPHEMERAL is set: users are told their data does not survive a restart.");
   });
 
+  // Keep sessions, invitations and one-time tokens bounded even when nobody presents an expired token.
+  const purge = () => {
+    try {
+      const counts = runtime.auth.purgeExpired();
+      if (counts.sessions || counts.invites || counts.tokens) console.log("identity cleanup", counts);
+    } catch (err) {
+      console.error("identity cleanup failed", err);
+    }
+  };
+  purge();
+  const purgeTimer = setInterval(purge, 60 * 60_000);
+  purgeTimer.unref();
+
   let timer: NodeJS.Timeout | undefined;
   if (config.syncIntervalSec > 0) {
     let busy = false;
@@ -188,6 +201,7 @@ export function startServer(config: Config = loadConfig()): void {
     stopping = true;
     console.log(`${signal}: shutting down`);
     if (timer) clearInterval(timer);
+    clearInterval(purgeTimer);
     server.close(() => {
       runtime.close();
       process.exit(0);

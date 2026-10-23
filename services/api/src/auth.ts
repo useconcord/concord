@@ -82,6 +82,17 @@ export class Auth {
     return new Date(this.now() + offsetMs).toISOString();
   }
 
+  /** Remove abandoned identity records using the same clock as session validation. */
+  purgeExpired(): { sessions: number; invites: number; tokens: number } {
+    const now = this.iso();
+    const idle = this.iso(-SESSION_IDLE_MS);
+    return this.db.tx(() => ({
+      sessions: this.db.write("DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?", now, idle),
+      invites: this.db.write("DELETE FROM invites WHERE expires_at <= ?", now),
+      tokens: this.db.write("DELETE FROM one_time_tokens WHERE expires_at <= ? OR used_at IS NOT NULL", now),
+    }));
+  }
+
   // ── accounts ──────────────────────────────────────────────────────────────
 
   private createOrg(name: string): string {
