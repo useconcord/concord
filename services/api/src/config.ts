@@ -130,8 +130,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     try {
       // A .env beside package.json, when there is one. Variables already set take precedence.
       process.loadEnvFile(resolve(ROOT, ".env"));
-    } catch {
-      // No file: the environment is all there is.
+    } catch (err) {
+      // A missing .env is optional, but permission and parsing errors are configuration failures.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`Failed to load .env: ${(err as Error).message}`, { cause: err });
+      }
     }
   }
   for (const [name, advice] of Object.entries(RETIRED)) {
