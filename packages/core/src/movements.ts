@@ -156,7 +156,8 @@ export function reconcileMovements(
       pending.push(entry);
       continue;
     }
-    const sameTx = movements.filter((e) => e.txHash === entry.txHash && !used.has(e.id) && sameParties(entry, e));
+    const normalizedHash = entry.txHash.toLowerCase();
+    const sameTx = movements.filter((e) => e.txHash.toLowerCase() === normalizedHash && !used.has(e.id) && sameParties(entry, e));
     const exact = sameTx.find((e) => e.amount === entry.units);
     const hit = exact ?? sameTx[0];
     if (!hit) {
@@ -189,7 +190,7 @@ export function reconcileMovements(
         used.has(ev.id) ||
         ev.amount !== entry.units ||
         !sameParties(entry, ev) ||
-        (entry.txHash && ev.txHash !== entry.txHash)
+        (entry.txHash && ev.txHash.toLowerCase() !== entry.txHash.toLowerCase())
       ) {
         continue;
       }
