@@ -32,6 +32,21 @@ describe("amounts", () => {
     expect(formatUnits(-1n)).toBe("-0.0000001");
     expect(parseUnits("5.10000000")).toBe(51_000_000n);
   });
+  it.each([
+    [0n, 7, "0"],
+    [1n, 7, "0.0000001"],
+    [-1n, 7, "-0.0000001"],
+    [10_000_000n, 7, "1"],
+    [12_345_678n, 7, "1.2345678"],
+    [5n, 0, "5"],
+    [-5n, 0, "-5"],
+    [1n, 18, "0.000000000000000001"],
+  ])("formats %s units at %i decimals", (units, decimals, expected) => {
+    const formatted = formatUnits(units, decimals);
+    expect(formatted).toBe(expected);
+    expect(formatted).not.toMatch(/\.$|\.\d*0$/);
+  });
+
   it("refuses to round", () => {
     expect(() => parseUnits("0.00000001")).toThrow(/decimal places/);
     expect(() => parseUnits("1e5")).toThrow();
