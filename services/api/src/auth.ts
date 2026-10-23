@@ -300,6 +300,11 @@ export class Auth {
     return Boolean(this.db.get("SELECT 1 AS x FROM orgs WHERE id = ?", orgId));
   }
 
+  /** Cheap liveness check: do not materialize all workspace IDs on each probe. */
+  pingDb(): void {
+    this.db.get("SELECT 1");
+  }
+
   orgIds(): string[] {
     return this.db.all<{ id: string }>("SELECT id FROM orgs ORDER BY created_at").map((r) => r.id);
   }

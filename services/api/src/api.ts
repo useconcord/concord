@@ -74,7 +74,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
   });
 
   app.get("/api/health", (c) => {
-    auth.orgIds();
+    auth.pingDb();
     return c.json({ ok: true });
   });
 
