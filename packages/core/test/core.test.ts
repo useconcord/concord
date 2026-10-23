@@ -32,6 +32,14 @@ describe("amounts", () => {
     expect(formatUnits(-1n)).toBe("-0.0000001");
     expect(parseUnits("5.10000000")).toBe(51_000_000n);
   });
+  it.each([" 12 ", "\t12\n"])("accepts surrounding whitespace in %j", (value) => {
+    expect(parseUnits(value)).toBe(120_000_000n);
+  });
+
+  it.each(["1 000", "1\u00a0000", "- 5"])("rejects interior whitespace in %j", (value) => {
+    expect(() => parseUnits(value)).toThrow(`not a decimal amount: "${value}"`);
+  });
+
   it("refuses to round", () => {
     expect(() => parseUnits("0.00000001")).toThrow(/decimal places/);
     expect(() => parseUnits("1e5")).toThrow();
