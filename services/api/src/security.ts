@@ -69,9 +69,28 @@ export async function verifyPassword(password: string, stored: string): Promise<
   if (scheme !== "scrypt" || !salt || !hash) return false;
   const expected = Buffer.from(hash, "base64url");
   const cost = { N: Number(N), r: Number(r), p: Number(p) };
-  if (!Number.isInteger(cost.N) || !Number.isInteger(cost.r) || !Number.isInteger(cost.p)) return false;
-  const key = await derive(password, Buffer.from(salt, "base64url"), cost, expected.length);
-  return timingSafeEqual(key, expected);
+  // Stored hashes can be malformed or tampered with; never let their parameters crash sign-in.
+  if (
+    !Number.isSafeInteger(cost.N) ||
+    cost.N < 2 ** 10 ||
+    cost.N > 2 ** 17 ||
+    (cost.N & (cost.N - 1)) !== 0 ||
+    !Number.isSafeInteger(cost.r) ||
+    cost.r < 1 ||
+    cost.r > 16 ||
+    !Number.isSafeInteger(cost.p) ||
+    cost.p < 1 ||
+    cost.p > 16 ||
+    expected.length !== 32
+  ) return false;
+  const rawSalt = Buffer.from(salt, "base64url");
+  if (rawSalt.length !== 16) return false;
+  try {
+    const key = await derive(password, rawSalt, cost, expected.length);
+    return timingSafeEqual(key, expected);
+  } catch {
+    return false;
+  }
 }
 
 // ── signed values ───────────────────────────────────────────────────────────
