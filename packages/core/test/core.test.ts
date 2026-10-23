@@ -48,6 +48,24 @@ describe("csv", () => {
   });
 });
 
+describe("journal units validation", () => {
+  it("rejects zero and negative units while retaining positive movement rows", () => {
+    const csv = [
+      "ref,date,type,from_account,to_account,units",
+      "J0,2026-10-01,transfer,GA,GB,0",
+      "J1,2026-10-01,transfer,GA,GB,-5",
+      "J2,2026-10-01,transfer,GA,GB,1.5",
+    ].join("\n");
+    const { entries, issues } = parseJournalCsv(csv);
+    expect(issues).toEqual([
+      { line: 2, message: "units must be greater than zero" },
+      { line: 3, message: "units must be greater than zero" },
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ ref: "J2", units: parseUnits("1.5") });
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;

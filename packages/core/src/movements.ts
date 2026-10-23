@@ -57,11 +57,13 @@ export function parseJournalCsv(
       if (!type) throw new Error(`unknown type "${values.type}"`);
       if (!values.ref) throw new Error("missing ref");
       if (Number.isNaN(Date.parse(values.date!))) throw new Error(`bad date "${values.date}"`);
+      const units = parseUnits(values.units!, decimals);
+      if (units <= 0n) throw new Error("units must be greater than zero");
       const entry: JournalEntry = {
         ref: values.ref,
         date: values.date!,
         type,
-        units: parseUnits(values.units!, decimals),
+        units,
       };
       const from = values.from_account ?? values.from;
       const to = values.to_account ?? values.to;
