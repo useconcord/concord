@@ -394,6 +394,58 @@ describe("controls log", () => {
     expect(log.summary.uninstructed).toBe(1);
   });
 
+  it("folds a backdated approval into one LATE_INSTRUCTION break", () => {
+    // The freeze closes at ledger 100 (01:40); the instruction is written one
+    // minute later. One real-world action with a backdated paper trail used to
+    // surface as UNINSTRUCTED_CONTROL plus, once the window lapsed,
+    // UNEXECUTED_INSTRUCTION — two breaks for one thing.
+    const { instructions } = parseInstructionsCsv(
+      "ref,type,account,issued_at\nI8,freeze,A,2026-10-01T01:41:00Z\n",
+    );
+    const log = buildControlsLog(events.slice(1, 2), instructions, { asOf: "2026-10-06T12:00:00Z" });
+    expect(log.breaks).toHaveLength(1);
+    const b = log.breaks[0]!;
+    expect(b.type).toBe("LATE_INSTRUCTION");
+    expect(b.ref).toBe("I8");
+    expect(b.address).toBe("A");
+    expect(b.eventId).toBe(log.records[0]!.eventId);
+    // Consumed: not pending, not unexecuted — but the record is still not
+    // "instructed", because nothing stood behind the action when it happened.
+    expect(log.pending).toEqual([]);
+    expect(log.summary.unexecuted).toBe(0);
+    expect(log.records[0]!.instruction).toBeUndefined();
+  });
+
+  it("leaves an instruction issued beyond the window after the event as two breaks", () => {
+    // Four days after the freeze is not a backdated approval of it; both
+    // findings stand on their own.
+    const { instructions } = parseInstructionsCsv(
+      "ref,type,account,issued_at\nI9,freeze,A,2026-10-05T00:00:00Z\n",
+    );
+    const log = buildControlsLog(events.slice(1, 2), instructions, { asOf: "2026-10-10T00:00:00Z" });
+    expect(log.breaks.map((b) => b.type).sort()).toEqual([
+      "UNEXECUTED_INSTRUCTION",
+      "UNINSTRUCTED_CONTROL",
+    ]);
+  });
+
+  it("never lets an earlier event steal a later event's on-time instruction as late", () => {
+    const freezes = [
+      ev("set_authorized", 100, { from: "A", authorized: false }),
+      ev("set_authorized", 300, { from: "A", authorized: false }),
+    ];
+    // Issued 02:00 — after the first freeze (01:40), before the second (05:00):
+    // an on-time instruction for the second, which must win over a late
+    // pairing with the first.
+    const { instructions } = parseInstructionsCsv(
+      "ref,type,account,issued_at\nI10,freeze,A,2026-10-01T02:00:00Z\n",
+    );
+    const log = buildControlsLog(freezes, instructions, { asOf: "2026-10-06T12:00:00Z" });
+    expect(log.records[1]!.instruction?.ref).toBe("I10");
+    expect(log.breaks.map((b) => b.type)).toEqual(["UNINSTRUCTED_CONTROL"]);
+    expect(log.breaks[0]!.eventId).toBe(log.records[0]!.eventId);
+  });
+
   it("gives identical output for the same input on repeated calls", () => {
     const { instructions } = parseInstructionsCsv(
       "ref,type,account,issued_at\nI1,freeze,A,2026-10-01T00:00:00Z\n",
