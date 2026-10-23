@@ -48,6 +48,33 @@ describe("csv", () => {
   });
 });
 
+describe("journal column aliases", () => {
+  it("uses legacy from/to values when canonical account cells are blank", () => {
+    const csv = [
+      "ref,date,type,from,from_account,to,to_account,units",
+      "J1,2026-10-01,transfer,GA,,GB,,2",
+      "J2,2026-10-01,transfer,,GC,,GD,3",
+    ].join("\n");
+    const { entries, issues } = parseJournalCsv(csv);
+    expect(issues).toEqual([]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ ref: "J1", from: "GA", to: "GB", units: parseUnits("2") });
+    expect(entries[1]).toMatchObject({ ref: "J2", from: "GC", to: "GD", units: parseUnits("3") });
+  });
+
+  it.each([
+    ["from,to", "GA,GB"],
+    ["from_account,to_account", "GA,GB"],
+  ])("keeps single naming scheme %s working", (headers, accounts) => {
+    const { entries, issues } = parseJournalCsv(
+      `ref,date,type,${headers},units\nJ3,2026-10-01,transfer,${accounts},1\n`,
+    );
+    expect(issues).toEqual([]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ from: "GA", to: "GB", units: parseUnits("1") });
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;

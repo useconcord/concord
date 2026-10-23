@@ -63,8 +63,9 @@ export function parseJournalCsv(
         type,
         units: parseUnits(values.units!, decimals),
       };
-      const from = values.from_account ?? values.from;
-      const to = values.to_account ?? values.to;
+      // An empty canonical column should fall back to the populated legacy alias.
+      const from = values.from_account || values.from;
+      const to = values.to_account || values.to;
       if (from) entry.from = from;
       if (to) entry.to = to;
       if (values.tx_hash) entry.txHash = values.tx_hash.toLowerCase();
