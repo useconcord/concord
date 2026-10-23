@@ -111,7 +111,7 @@ always-on instance with a local disk. It does not fit serverless hosts. For oper
 no persistent disk: every account, upload and sign-off is erased when the service restarts or
 spins down after fifteen idle minutes. `CONCORD_EPHEMERAL=1` makes the dashboard say so on every
 page. For anything people should come back to, use a paid instance with a disk at `/data` (or
-[Fly.io](./docs/deploy/fly.md), or a VPS with [nginx](./docs/deploy/nginx.md) or [systemd](./docs/deploy/systemd.md)) and remove that variable.
+[Fly.io](./docs/deploy/fly.md) with the [single-machine template](./deploy/fly.toml), or a VPS with [nginx](./docs/deploy/nginx.md) or [systemd](./docs/deploy/systemd.md)) and remove that variable.
 
 Before upgrading, read [`docs/versioning.md`](./docs/versioning.md): what a version number
 promises, what counts as breaking for the input files, the audit pack and the database, and why a
