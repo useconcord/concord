@@ -708,11 +708,40 @@ describe("chain endpoints", () => {
   it("does not retry a request the RPC rejected", async () => {
     const a = "https://a.example";
     const { calls, deps } = scripted({
-      [a]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { message: "startLedger must be within the ledger range" } }))],
+      [a]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32602, message: "startLedger must be within the ledger range" } }))],
     });
     const source = new StellarSource(network([a, "https://b.example"]), deps);
     await expect(source.getEvents("C", { startLedger: 1 }, 10)).rejects.toThrow(/ledger range/);
     expect(calls).toHaveLength(1);
+  });
+
+  it("fails over to the next endpoint and rests the endpoint on rate-limit and transient JSON-RPC errors", async () => {
+    const a = "https://a.example";
+    const b = "https://b.example";
+    const { calls, deps } = scripted({
+      [a]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { message: "rate limit exceeded" } }))],
+      [b]: [health, health],
+    });
+    const source = new StellarSource(network([a, b]), deps);
+    const head = await source.latestLedger();
+    expect(head.latest).toBe(50);
+    expect(calls.map((c) => c.url)).toEqual([a, b]);
+
+    // Endpoint `a` was rested, so subsequent call goes directly to `b`
+    await source.latestLedger();
+    expect(calls.map((c) => c.url)).toEqual([a, b, b]);
+
+    // Also fails over on internal/behind error (-32603 or 'behind')
+    const c = "https://c.example";
+    const d = "https://d.example";
+    const script2 = scripted({
+      [c]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32603, message: "node is behind" } }))],
+      [d]: [health],
+    });
+    const source2 = new StellarSource(network([c, d]), script2.deps);
+    const head2 = await source2.latestLedger();
+    expect(head2.latest).toBe(50);
+    expect(script2.calls.map((call) => call.url)).toEqual([c, d]);
   });
 
   it("does not rest an endpoint on request faults (400, 404, 422)", async () => {

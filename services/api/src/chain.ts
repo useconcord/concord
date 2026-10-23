@@ -325,8 +325,39 @@ export class StellarSource implements ChainSource {
         },
         timeoutMs,
       );
-      const body = await this.json<{ result?: T; error?: { message: string } }>(res);
-      if (body.error) throw new ChainError(`Stellar RPC ${method}: ${body.error.message}`, "rejected");
+      const body = await this.json<{ result?: T; error?: { code?: number; message: string; data?: unknown } }>(res);
+      if (body.error) {
+        const { code, message } = body.error;
+        const msg = (message || "").toLowerCase();
+
+        const isRateLimit =
+          code === 429 ||
+          code === -32005 || // standard JSON-RPC Rate limit exceeded
+          msg.includes("rate limit") ||
+          msg.includes("too many requests");
+
+        if (isRateLimit) {
+          throw new EndpointFailure(message || "rate limit exceeded", { limited: true, restMs: REST_MS });
+        }
+
+        const isTransientProviderError =
+          code === -32603 || // Internal error
+          code === 500 ||
+          code === 502 ||
+          code === 503 ||
+          code === 504 ||
+          msg.includes("behind") ||
+          msg.includes("internal error") ||
+          msg.includes("service unavailable");
+
+        if (isTransientProviderError) {
+          throw new EndpointFailure(message || `RPC error ${code ?? ""}`.trim());
+        }
+
+        // Standard request errors (e.g. -32600, -32602, bad params, ledger range, invalid request)
+        // stay terminal ChainError and do not retry or fail over.
+        throw new ChainError(`Stellar RPC ${method}: ${message}`, "rejected");
+      }
       return body.result as T;
     });
   }
