@@ -558,6 +558,24 @@ describe("Google sign-in", () => {
     expect((await new Client(h.app).call("/api/auth/google/start?link=1")).status).toBe(401);
   });
 
+  it("normalizes long Google names and reports invalid email without a mismatch message", async () => {
+    const renamed = withGoogle(good("longname@example.test", { name: "N".repeat(140) }));
+    const first = new Client(renamed.h.app);
+    const start = await begin(renamed.h, first);
+    renamed.box.nonce = start.nonce;
+    const done = await first.call(`/api/auth/google/callback?code=abc&state=${start.state}`);
+    expect(done.headers.get("location")).toBe(`${ORIGIN}/#/`);
+    const me = await first.json<{ user: { name: string } }>("/api/auth/me");
+    expect(me.user.name).toBe("N".repeat(80));
+
+    const malformed = withGoogle(good("invalid-email", { email: "invalid-email" }));
+    const second = new Client(malformed.h.app);
+    const state = await begin(malformed.h, second);
+    malformed.box.nonce = state.nonce;
+    const failure = await second.call(`/api/auth/google/callback?code=abc&state=${state.state}`);
+    expect(failure.headers.get("location")).toBe(`${ORIGIN}/#/signin?error=google_invalid_email`);
+  });
+
   it("rejects a forged state, a stale token and an unverified address", async () => {
     const forged = withGoogle(good("gail@example.test"));
     const c1 = new Client(forged.h.app);

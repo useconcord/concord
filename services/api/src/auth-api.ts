@@ -328,7 +328,9 @@ export function authRoutes(auth: Auth, options: ApiOptions): Hono {
       return back(c, "/");
     } catch (err) {
       if (err instanceof Conflict) return failed("google_exists");
-      if (err instanceof Rejected) return failed("google_mismatch");
+      if (err instanceof Rejected) {
+        return failed(err.message.includes("valid email address") ? "google_invalid_email" : "google_mismatch");
+      }
       if (err instanceof Forbidden) return failed(profile.emailVerified ? "signup_code" : "google_unverified");
       console.error(err);
       return failed("google_failed");

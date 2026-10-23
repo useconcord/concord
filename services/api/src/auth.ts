@@ -505,7 +505,10 @@ export class Auth {
     if (this.userByEmail(email)) {
       throw new Conflict("An account with this email already exists. Sign in with its password, then connect Google under Settings.");
     }
-    const name = cleanName(profile.name || email.split("@")[0], "Your name");
+    // Google profile names may be longer than our local account-name limit.
+    const fallbackName = email.split("@")[0] ?? "Google user";
+    const displayName = (profile.name || fallbackName).trim().replace(/\s+/g, " ").slice(0, 80);
+    const name = cleanName(displayName || fallbackName.slice(0, 80), "Your name");
     return this.db.tx(() => {
       if (!invited) this.spendSignupCode(context.code);
       const userId = this.createUser(email, name, true);
