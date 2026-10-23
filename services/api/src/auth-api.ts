@@ -68,6 +68,8 @@ export function sessions(auth: Auth, options: ApiOptions) {
     },
     /** Returns the session it started. */
     start(c: Context, userId: string, orgId: string): SessionInfo | undefined {
+      // Re-authentication rotates the cookie and revokes the previous session on this browser.
+      auth.endSession(getCookie(c, name));
       const token = auth.startSession(userId, orgId);
       // Strict is enough: the page shell is static and every API call is a same-origin fetch.
       setCookie(c, name, token, {
