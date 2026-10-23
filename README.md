@@ -107,7 +107,7 @@ repository root, then run `docker compose -f deploy/docker-compose.yml up -d --b
 Concord is a single process with a background indexer and SQLite files, so it needs one
 always-on instance with a local disk. It does not fit serverless hosts. For operational logs, healthchecks, and indexer alerting, see [`docs/monitoring.md`](docs/monitoring.md).
 
-[`render.yaml`](./render.yaml) deploys it to Render's **free** plan for a preview. That plan has
+[`render.yaml`](./render.yaml) deploys it to Render's **free** plan for a preview. For durable deployments, follow the [paid Render disk and migration guide](./docs/deploy/render.md). That plan has
 no persistent disk: every account, upload and sign-off is erased when the service restarts or
 spins down after fifteen idle minutes. `CONCORD_EPHEMERAL=1` makes the dashboard say so on every
 page. For anything people should come back to, use a paid instance with a disk at `/data` (or
