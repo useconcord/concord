@@ -183,6 +183,48 @@ describe("position reconciliation", () => {
     const r = reconcilePositions(chain, positions, { tolerance: 1n, ignore: ["C"] });
     expect(r.breaks).toEqual([]);
   });
+
+  it("folds an incomplete holder's quantity breaks into INCOMPLETE_HISTORY", () => {
+    // A transfer with no earlier mint: X derives to -30, A to 30. One root
+    // cause — missing history — must not read as three independent breaks.
+    const partial = replay([ev("transfer", 5, { from: "X", to: "A", amount: u(30) })]);
+    expect(partial.incomplete).toEqual(["X"]);
+
+    const { positions } = parseRegisterCsv("holder_id,account,units\nH1,A,30\n");
+    const r = reconcilePositions(partial, positions);
+
+    // INCOMPLETE_HISTORY is the primary break, carrying X's quantity context.
+    const primary = r.breaks.filter((b) => !b.consequential);
+    expect(primary.map((b) => b.type)).toEqual(["INCOMPLETE_HISTORY"]);
+    expect(primary[0]).toMatchObject({
+      address: "X",
+      chainUnits: u(-30),
+      registerUnits: 0n,
+      difference: u(-30),
+    });
+
+    // No separate MISSING_IN_REGISTER for X; the supply mismatch remains but
+    // is flagged as a consequence of the missing history.
+    expect(r.breaks.some((b) => b.type === "MISSING_IN_REGISTER")).toBe(false);
+    const supply = r.breaks.find((b) => b.type === "SUPPLY_MISMATCH")!;
+    expect(supply.consequential).toBe(true);
+    expect(supply.message).toContain("incomplete history");
+
+    // A negative derived balance is an artifact, not a holder.
+    expect(r.summary.chainHolders).toBe(1);
+    expect(r.summary.chainSupply).toBe(0n);
+    // The line itself still shows the discrepancy for anyone drilling in.
+    const lineX = r.lines.find((l) => l.address === "X")!;
+    expect(lineX.matched).toBe(false);
+  });
+
+  it("keeps supply mismatches independent when every history is complete", () => {
+    const { positions } = parseRegisterCsv("holder_id,account,units\nH1,A,90\nH3,B,40\nH4,C,7\n");
+    const r = reconcilePositions(chain, positions);
+    const supply = r.breaks.find((b) => b.type === "SUPPLY_MISMATCH")!;
+    expect(supply.consequential).toBeUndefined();
+    expect(supply.message).not.toContain("incomplete");
+  });
 });
 
 describe("movement reconciliation", () => {
