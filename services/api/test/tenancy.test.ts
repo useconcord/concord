@@ -701,6 +701,28 @@ describe("chain endpoints", () => {
     return { calls, clock, deps };
   }
 
+  it.each([
+    ["600", 600_000],
+    [new Date(1_600_000).toUTCString(), 600_000],
+    ["not-a-retry-time", 30_000],
+    ["3600", 900_000],
+  ])("respects Retry-After %s for %s milliseconds", async (header, delay) => {
+    const url = "https://limited.example";
+    const { calls, clock, deps } = scripted({
+      [url]: [() => new Response("slow down", { status: 429, headers: { "retry-after": header } }), health],
+    });
+    const source = new StellarSource(network([url]), deps);
+    await expect(source.latestLedger()).rejects.toThrow(/rate limited/);
+    await expect(source.latestLedger()).rejects.toThrow(`trying again in ${delay / 1000}s`);
+    expect(calls).toHaveLength(1);
+    clock.value += delay - 1_000;
+    await expect(source.latestLedger()).rejects.toThrow(/not answering/);
+    expect(calls).toHaveLength(1);
+    clock.value += 1_000;
+    await expect(source.latestLedger()).resolves.toMatchObject({ latest: 50 });
+    expect(calls).toHaveLength(2);
+  });
+
   it("moves to the next endpoint when one is rate limited, and rests the first", async () => {
     const a = "https://a.example/secret-key-123";
     const b = "https://b.example";

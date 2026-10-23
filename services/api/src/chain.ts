@@ -181,7 +181,8 @@ const ATTEMPTS_PER_ENDPOINT = 2;
 /** Tries at one page of a long read before the whole read is given up. */
 const PAGE_ATTEMPTS = 3;
 const REST_MS = 30_000;
-const MAX_REST_MS = 60_000;
+/** Respect provider rate-limit backoffs, up to fifteen minutes per endpoint. */
+const MAX_REST_MS = 15 * 60_000;
 /** A request is abandoned after this long, however many endpoints remain. */
 const BUDGET_MS = 90_000;
 
