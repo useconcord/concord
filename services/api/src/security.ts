@@ -103,13 +103,22 @@ export class Signer {
 export class RateLimiter {
   private readonly windows = new Map<string, { count: number; resetAt: number }>();
 
-  constructor(private readonly now: () => number = () => Date.now()) {
-    setInterval(() => this.sweep(), 60_000).unref();
+  // Expired windows are removed lazily, so creating a limiter does not leak an interval.
+  private lastSweepAt = 0;
+
+  constructor(private readonly now: () => number = () => Date.now()) {}
+
+  dispose(): void {
+    this.windows.clear();
   }
 
   /** Counts one attempt. Returns 0 when allowed, else the seconds to wait. */
   hit(key: string, limit: number, windowMs: number): number {
     const at = this.now();
+    if (at - this.lastSweepAt >= 60_000) {
+      this.sweep();
+      this.lastSweepAt = at;
+    }
     let w = this.windows.get(key);
     if (!w || w.resetAt <= at) {
       if (this.windows.size > 50_000) this.sweep(true);
