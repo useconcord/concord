@@ -78,10 +78,14 @@ export async function verifyPassword(password: string, stored: string): Promise<
 
 /** Signs short-lived cookie payloads so a value planted from elsewhere is refused. */
 export class Signer {
-  constructor(private readonly secret: Buffer = randomBytes(32)) {}
+  constructor(
+    private readonly secret: Buffer = randomBytes(32),
+    private readonly now: () => number = () => Date.now(),
+  ) {}
 
   seal(value: unknown): string {
-    const body = Buffer.from(JSON.stringify(value)).toString("base64url");
+    // Cookie maxAge is client-controlled. Sign expiry with the state itself.
+    const body = Buffer.from(JSON.stringify({ value, exp: this.now() + 600_000 })).toString("base64url");
     return `${body}.${createHmac("sha256", this.secret).update(body).digest("base64url")}`;
   }
 
@@ -90,7 +94,18 @@ export class Signer {
     if (!body || !mac) return undefined;
     if (!sameText(mac, createHmac("sha256", this.secret).update(body).digest("base64url"))) return undefined;
     try {
-      return JSON.parse(Buffer.from(body, "base64url").toString()) as T;
+      const payload: unknown = JSON.parse(Buffer.from(body, "base64url").toString());
+      if (
+        !payload ||
+        typeof payload !== "object" ||
+        !("exp" in payload) ||
+        typeof payload.exp !== "number" ||
+        !Number.isFinite(payload.exp) ||
+        payload.exp <= this.now() ||
+        !("value" in payload)
+      )
+        return undefined;
+      return payload.value as T;
     } catch {
       return undefined;
     }
@@ -140,6 +155,8 @@ export class RateLimiter {
 
 export class TooMany extends Error {
   constructor(readonly retryAfter: number) {
-    super(`Too many attempts. Try again in ${retryAfter < 90 ? `${retryAfter} seconds` : `${Math.ceil(retryAfter / 60)} minutes`}.`);
+    super(
+      `Too many attempts. Try again in ${retryAfter < 90 ? `${retryAfter} seconds` : `${Math.ceil(retryAfter / 60)} minutes`}.`,
+    );
   }
 }
