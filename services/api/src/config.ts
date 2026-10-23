@@ -193,11 +193,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const config: Config = {
     networks: { mainnet: network("mainnet"), testnet: network("testnet") },
     defaultNetwork,
-    dataDir: resolve(env.CONCORD_DATA_DIR ?? resolve(ROOT, "data")),
+    dataDir: env.CONCORD_DATA_DIR ? resolve(ROOT, env.CONCORD_DATA_DIR) : resolve(ROOT, "data"),
     host,
     port,
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),
-    webDir: resolve(env.CONCORD_WEB_DIR ?? resolve(ROOT, "apps/web/dist")),
+    webDir: env.CONCORD_WEB_DIR ? resolve(ROOT, env.CONCORD_WEB_DIR) : resolve(ROOT, "apps/web/dist"),
     publicUrl,
     trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0),
     signup,

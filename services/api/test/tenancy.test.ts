@@ -1121,6 +1121,20 @@ describe("what ships", () => {
     }
   });
 
+  it("resolves relative CONCORD_DATA_DIR and CONCORD_WEB_DIR against the repo root", () => {
+    const cfg = loadConfig({
+      CONCORD_DATA_DIR: "./rel-data",
+      CONCORD_WEB_DIR: "./rel-web",
+    });
+    // Regardless of process.cwd(), relative paths resolve against ROOT (repo root)
+    expect(cfg.dataDir).not.toContain("services/api/rel-data");
+    expect(cfg.dataDir).not.toContain("services\\api\\rel-data");
+    expect(cfg.dataDir.endsWith("rel-data")).toBe(true);
+
+    expect(cfg.webDir).not.toContain("services/api/rel-web");
+    expect(cfg.webDir).not.toContain("services\\api\\rel-web");
+    expect(cfg.webDir.endsWith("rel-web")).toBe(true);
+  });
   it("serves static files with correct MIME types for Vite assets and falls back to octet-stream", async () => {
     const dir = mkdtempSync(join(tmpdir(), "concord-mime-"));
     const dataDir = join(dir, "data");
