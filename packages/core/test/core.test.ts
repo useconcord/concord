@@ -48,6 +48,29 @@ describe("csv", () => {
   });
 });
 
+describe("CSV escaping matrix", () => {
+  it.each([
+    ["comma", "a,b", '"a,b"'],
+    ["double quote", 'a"b', '"a""b"'],
+    ["carriage return", "a\rb", '"a\rb"'],
+    ["line feed", "a\nb", '"a\nb"'],
+    ["CRLF", "a\r\nb", '"a\r\nb"'],
+    ["leading spaces", " a", " a"],
+    ["trailing spaces", "a ", "a "],
+    ["empty string", "", ""],
+    ["null", null, ""],
+    ["undefined", undefined, ""],
+  ])("escapes %s values", (_kind, value, escaped) => {
+    expect(toCsv(["value"], [{ value }])).toBe(`value\n${escaped}\n`);
+  });
+
+  it("escapes CSV header cells by the same rules", () => {
+    const headers = ["first,name", 'say"hi', "line\nbreak"];
+    const row = { "first,name": "one", 'say"hi': "two", "line\nbreak": "three" };
+    expect(toCsv(headers, [row])).toBe('"first,name","say""hi","line\nbreak"\none,two,three\n');
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;
