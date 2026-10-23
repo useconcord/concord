@@ -107,13 +107,18 @@ function endpoints(urls: string[], headers: Record<string, Record<string, string
   return urls.map((url) => {
     let host: string;
     let hostname: string;
+    let hasCredentials = false;
     try {
       const parsed = new URL(url);
+      hasCredentials = Boolean(parsed.username || parsed.password);
       if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("not http");
       host = parsed.host;
       hostname = parsed.hostname;
     } catch {
       throw new Error(`${name} holds something that is not a URL`);
+    }
+    if (hasCredentials) {
+      throw new Error(`${name} must not contain URL credentials; configure Authorization via CONCORD_RPC_HEADERS`);
     }
     const endpoint: Endpoint = { url: url.replace(/\/+$/, "") };
     const h = headers[host] ?? headers[hostname];

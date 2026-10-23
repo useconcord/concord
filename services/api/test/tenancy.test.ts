@@ -654,6 +654,25 @@ describe("networks", () => {
     expect(withHeaders.networks.mainnet.rpc[0]?.headers).toEqual({ "x-api-key": "fallback-key" });
     expect(withHeaders.networks.mainnet.rpc[1]?.headers).toEqual({ "x-api-key": "exact-key" });
     expect(withHeaders.networks.mainnet.rpc[2]?.headers).toEqual({ "x-api-key": "standard-key" });
+    // Node fetch does not support userinfo URLs: fail configuration instead of retrying forever.
+    for (const url of [
+      "https://user:password@rpc.example/secret",
+      "https://user@rpc.example",
+      "https://:password@rpc.example",
+    ]) {
+      expect(() => loadConfig({ CONCORD_MAINNET_RPC_URLS: url })).toThrow(
+        /CONCORD_MAINNET_RPC_URLS must not contain URL credentials; configure Authorization via CONCORD_RPC_HEADERS/,
+      );
+    }
+    expect(() => loadConfig({ CONCORD_TESTNET_HORIZON_URLS: "https://u:p@horizon.example" })).toThrow(
+      /CONCORD_TESTNET_HORIZON_URLS must not contain URL credentials/,
+    );
+    expect(
+      loadConfig({
+        CONCORD_MAINNET_RPC_URLS: "https://rpc.example/secret",
+        CONCORD_RPC_HEADERS: JSON.stringify({ "rpc.example": { Authorization: "Bearer token" } }),
+      }).networks.mainnet.rpc[0]?.headers,
+    ).toEqual({ Authorization: "Bearer token" });
     for (const truthy of ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"]) {
       expect(loadConfig({ CONCORD_EPHEMERAL: truthy }).ephemeral, truthy).toBe(true);
     }
