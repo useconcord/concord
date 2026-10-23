@@ -13,6 +13,8 @@ export interface EventPage {
   latestLedger: number;
   /** ISO-8601 close time of latestLedger, when the RPC reports it. */
   latestLedgerClosedAt?: string;
+  /** Number of events skipped because of decoding failures or unparseable data. */
+  skipped?: number;
 }
 
 export interface Baseline {
@@ -101,8 +103,14 @@ export interface RawEvent {
 /** Account, contract, muxed account, liquidity pool or claimable balance. */
 const ADDRESS = /^[GCMLB][A-Z2-7]{55,}$/;
 
+const loggedMalformedEvents = new Set<string>();
+
 function native(b64: string): unknown {
-  return scValToNative(xdr.ScVal.fromXDR(b64, "base64"));
+  try {
+    return scValToNative(xdr.ScVal.fromXDR(b64, "base64"));
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -111,44 +119,52 @@ function native(b64: string): unknown {
  * always the last address.
  */
 export function decodeEvent(raw: RawEvent): AssetEvent | undefined {
-  const topics = raw.topic.map(native);
-  const kind = topics[0];
-  if (typeof kind !== "string" || !isEventKind(kind)) return undefined;
-  const addresses = topics.slice(1).filter((t): t is string => typeof t === "string" && ADDRESS.test(t));
-  const last = addresses.at(-1);
-  if (!last) return undefined;
-  const time = Date.parse(raw.ledgerClosedAt);
-  if (Number.isNaN(time)) return undefined;
-  const event: AssetEvent = {
-    id: raw.id,
-    assetId: raw.contractId,
-    kind,
-    ledger: raw.ledger,
-    closedAt: new Date(time).toISOString(),
-    txHash: raw.txHash,
-    amount: 0n,
-  };
-  const value = native(raw.value);
-  if (kind === "set_authorized") {
-    if (typeof value !== "boolean") return undefined;
-    event.from = last;
-    event.authorized = value;
+  try {
+    const topics = raw.topic.map(native);
+    const kind = topics[0];
+    if (typeof kind !== "string" || !isEventKind(kind)) return undefined;
+    const addresses = topics.slice(1).filter((t): t is string => typeof t === "string" && ADDRESS.test(t));
+    const last = addresses.at(-1);
+    if (!last) return undefined;
+    const time = Date.parse(raw.ledgerClosedAt);
+    if (Number.isNaN(time)) return undefined;
+    const event: AssetEvent = {
+      id: raw.id,
+      assetId: raw.contractId,
+      kind,
+      ledger: raw.ledger,
+      closedAt: new Date(time).toISOString(),
+      txHash: raw.txHash,
+      amount: 0n,
+    };
+    const value = native(raw.value);
+    if (kind === "set_authorized") {
+      if (typeof value !== "boolean") return undefined;
+      event.from = last;
+      event.authorized = value;
+      return event;
+    }
+    // A muxed destination turns the value into a map carrying the amount.
+    const amount = typeof value === "object" && value !== null ? (value as { amount?: unknown }).amount : value;
+    if (typeof amount !== "bigint") return undefined;
+    event.amount = amount;
+    if (kind === "transfer") {
+      if (addresses.length < 2) return undefined;
+      event.from = addresses[0]!;
+      event.to = addresses[1]!;
+    } else if (kind === "mint") {
+      event.to = last;
+    } else {
+      event.from = last;
+    }
     return event;
+  } catch (err) {
+    if (raw?.id && !loggedMalformedEvents.has(raw.id)) {
+      loggedMalformedEvents.add(raw.id);
+      console.warn(`malformed XDR in event ${raw.id}: ${(err as Error).message}`);
+    }
+    return undefined;
   }
-  // A muxed destination turns the value into a map carrying the amount.
-  const amount = typeof value === "object" && value !== null ? (value as { amount?: unknown }).amount : value;
-  if (typeof amount !== "bigint") return undefined;
-  event.amount = amount;
-  if (kind === "transfer") {
-    if (addresses.length < 2) return undefined;
-    event.from = addresses[0]!;
-    event.to = addresses[1]!;
-  } else if (kind === "mint") {
-    event.to = last;
-  } else {
-    event.from = last;
-  }
-  return event;
 }
 
 /** This endpoint failed in a way another one, or a later attempt, might not. */
@@ -367,11 +383,20 @@ export class StellarSource implements ChainSource {
       latestLedgerCloseTime?: string;
     }>("getEvents", params, PAGE_TIMEOUT_MS);
     const events: AssetEvent[] = [];
+    let skipped = 0;
     for (const raw of res.events ?? []) {
       const ev = decodeEvent(raw);
-      if (ev) events.push(ev);
+      if (ev) {
+        events.push(ev);
+      } else {
+        skipped++;
+        if (raw?.id && !loggedMalformedEvents.has(raw.id)) {
+          loggedMalformedEvents.add(raw.id);
+          console.warn(`skipping unparseable or malformed event ${raw.id}`);
+        }
+      }
     }
-    const page: EventPage = { events, latestLedger: res.latestLedger };
+    const page: EventPage = { events, latestLedger: res.latestLedger, skipped };
     const closed = Number(res.latestLedgerCloseTime);
     if (closed > 0) page.latestLedgerClosedAt = new Date(closed * 1000).toISOString();
     if (res.cursor) page.cursor = res.cursor;

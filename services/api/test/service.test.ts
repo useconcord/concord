@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { decodeEvent } from "../src/chain.js";
+import { decodeEvent, StellarSource } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
 import { Db } from "../src/db.js";
@@ -77,6 +77,61 @@ describe("decodeEvent", () => {
     };
     expect(() => decodeEvent(invalidDateRaw)).not.toThrow();
     expect(decodeEvent(invalidDateRaw)).toBeUndefined();
+  });
+
+  it("returns undefined without throwing when topic or value contains malformed XDR", () => {
+    // Malformed topic (not valid base64 / ScVal)
+    const badTopicRaw = {
+      ...raw(["!!!notxdr", addr(a), addr(b), str(`FUND:${a}`)], i128(5n)),
+    };
+    expect(() => decodeEvent(badTopicRaw)).not.toThrow();
+    expect(decodeEvent(badTopicRaw)).toBeUndefined();
+
+    // Truncated / malformed value XDR
+    const truncatedValueRaw = {
+      ...raw([sym("transfer"), addr(a), addr(b), str(`FUND:${a}`)], "AAAA"),
+    };
+    expect(() => decodeEvent(truncatedValueRaw)).not.toThrow();
+    expect(decodeEvent(truncatedValueRaw)).toBeUndefined();
+  });
+
+  it("skips malformed events and returns the remaining good events in getEvents", async () => {
+    const goodRaw = raw([sym("transfer"), addr(a), addr(b), str(`FUND:${a}`)], i128(5n));
+    const badRaw = {
+      ...raw(["!!!notxdr", addr(a), addr(b), str(`FUND:${a}`)], i128(5n)),
+      id: "0000000429496729600-0000000002",
+    };
+    const network = {
+      name: "testnet" as const,
+      passphrase: "test",
+      rpc: [{ url: "https://rpc.example" }],
+      horizon: [{ url: "https://horizon.example" }],
+    };
+    const deps = {
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              events: [badRaw, goodRaw],
+              latestLedger: 100,
+              cursor: "cursor-1",
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      now: () => 0,
+      sleep: async () => {},
+    };
+    const source = new StellarSource(network, deps);
+    const page = await source.getEvents("CASSET", { startLedger: 1 }, 10);
+    expect(page.events).toHaveLength(1);
+    expect(page.events[0]!.kind).toBe("transfer");
+    expect(page.events[0]!.amount).toBe(5n);
+    expect(page.skipped).toBe(1);
+    expect(page.latestLedger).toBe(100);
+    expect(page.cursor).toBe("cursor-1");
   });
 });
 
