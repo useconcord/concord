@@ -126,7 +126,7 @@ covered in [`docs/upgrading.md`](./docs/upgrading.md).
 |---|---|
 | `packages/core` | The accounting, with no I/O: holdings replay, position and movement reconciliation, entitlements, controls matching |
 | `services/api` | RPC indexer, SQLite stores, accounts and workspaces ([how they are isolated](./docs/tenancy.md)), HTTP API, CLI |
-| `apps/web` | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team |
+| [`apps/web`](./apps/web/README.md) | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team |
 
 The tables in `control.db` and in each workspace database are described in
 [`docs/schema.md`](./docs/schema.md). Core Stellar blockchain concepts (CAP-67, SEP-41, trustlines,
