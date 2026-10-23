@@ -45,7 +45,17 @@ const WRONG = "Wrong email or password.";
 
 function cleanEmail(input: unknown): string {
   const email = typeof input === "string" ? input.trim().toLowerCase() : "";
-  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Rejected("Enter a valid email address.");
+  const [local = "", domain = "", extra] = email.split("@");
+  const validLocal =
+    local.length <= 64 && /^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/.test(local) && !local.includes("..");
+  const labels = domain.split(".");
+  const validDomain =
+    labels.length >= 2 &&
+    labels.every((label) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label) && label.length <= 63) &&
+    /^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "");
+  if (email.length > 254 || extra !== undefined || !validLocal || !validDomain) {
+    throw new Rejected("Enter a valid email address.");
+  }
   return email;
 }
 
