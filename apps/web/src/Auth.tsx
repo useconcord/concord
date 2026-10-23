@@ -103,7 +103,7 @@ function Password({
           className={inputClass}
           required
         />
-        <Button onClick={() => setShown(!shown)} aria-pressed={shown} className="shrink-0">
+        <Button onClick={() => setShown(!shown)} className="shrink-0">
           {shown ? "Hide" : "Show"}
         </Button>
       </span>
