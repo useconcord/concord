@@ -4,6 +4,7 @@ export function parseCsv(text: string): string[][] {
   let row: string[] = [];
   let field = "";
   let quoted = false;
+  let afterQuote = false;
   const src = text.replace(/^﻿/, "");
   for (let i = 0; i < src.length; i++) {
     const c = src[i]!;
@@ -14,19 +15,28 @@ export function parseCsv(text: string): string[][] {
           i++;
         } else {
           quoted = false;
+          afterQuote = true;
         }
       } else {
         field += c;
       }
+    } else if (afterQuote && (c === " " || c === "\t")) {
+      // Ignore optional spaces after a closed quoted field.
+    } else if (afterQuote && c !== "," && c !== "\n" && c !== "\r") {
+      const lines = src.slice(0, i).split(/\r\n|\r|\n/);
+      const column = lines[lines.length - 1]!.length + 1;
+      throw new Error("unexpected character after closing quote at line " + lines.length + ", column " + column);
     } else if (c === '"' && field === "") {
       quoted = true;
     } else if (c === ",") {
       row.push(field);
       field = "";
+      afterQuote = false;
     } else if (c === "\n" || c === "\r") {
       if (c === "\r" && src[i + 1] === "\n") i++;
       row.push(field);
       field = "";
+      afterQuote = false;
       rows.push(row);
       row = [];
     } else {

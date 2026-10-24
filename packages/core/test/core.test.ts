@@ -48,6 +48,19 @@ describe("csv", () => {
   });
 });
 
+describe("CSV closing quote validation", () => {
+  it("rejects non-whitespace characters after a closing quote with location", () => {
+    expect(() => parseCsv('"ab"cd,e')).toThrow("unexpected character after closing quote at line 1, column 5");
+    expect(() => parseCsv('a,b\n"x"q,c')).toThrow("unexpected character after closing quote at line 2, column 4");
+  });
+
+  it("allows whitespace followed by a delimiter or line ending", () => {
+    expect(parseCsv('"ab" ,c\n')).toEqual([["ab", "c"]]);
+    expect(parseCsv('"ab"\n')).toEqual([["ab"]]);
+    expect(parseCsv('"ab"\t,tail\r\n')).toEqual([["ab", "tail"]]);
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;
