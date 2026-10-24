@@ -173,6 +173,27 @@ describe("position reconciliation", () => {
     expect(r.lines[0]!.holderIds).toEqual(["H1", "H2"]);
   });
 
+  it("excludes ignored treasury accounts from registerHolders and chainHolders (#33)", () => {
+    const holdings = replay([
+      ev("mint", 1, { to: "H", amount: u(100) }),
+      ev("mint", 2, { to: "TRE", amount: u(5) }),
+    ]);
+    const { positions, issues } = parseRegisterCsv(
+      "holder_id,account,units\nH1,H,100\nT1,TRE,5\n",
+    );
+    expect(issues).toEqual([]);
+
+    const result = reconcilePositions(holdings, positions, { ignore: ["TRE"] });
+    expect(result.summary.registerHolders).toBe(1);
+    expect(result.summary.chainHolders).toBe(1);
+    expect(result.summary.registerTotal).toBe(u(100));
+    expect(result.breaks).toEqual([]);
+
+    const unfiltered = reconcilePositions(holdings, positions);
+    expect(unfiltered.summary.registerHolders).toBe(2);
+    expect(unfiltered.summary.chainHolders).toBe(2);
+  });
+
   it("flags every kind of break", () => {
     const { positions, issues } = parseRegisterCsv(
       "Holder ID,Name,Address,Shares,Status\nH1,Ann,A,90,active\nH3,Bo,B,40,active\nH5,Di,D,3,\nH6,Ed,,2,\nH7,Bad,E,x,\n",
