@@ -99,6 +99,9 @@ export interface ObservedFlow {
 }
 
 export function observeFlows(events: AssetEvent[], window: FlowWindow): Map<string, ObservedFlow> {
+  if (window.plus.includes("transfer") && !window.payer) {
+    throw new Error("transfer flows require a payer");
+  }
   const out = new Map<string, ObservedFlow>();
   const add = (address: string | undefined, delta: bigint, txHash: string) => {
     if (!address) return;

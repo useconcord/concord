@@ -48,6 +48,21 @@ describe("csv", () => {
   });
 });
 
+describe("transfer distribution payer validation", () => {
+  it("rejects transfer observation without a payer rather than silently dropping events", () => {
+    const events = [ev("transfer", 7, { from: "PAY", to: "H", amount: u(5) })];
+    expect(() => observeFlows(events, { plus: ["transfer"], minus: [] }))
+      .toThrow("transfer flows require a payer");
+    expect(observeFlows(events, { plus: ["transfer"], minus: [], payer: "PAY" }).get("H")?.amount)
+      .toBe(u(5));
+  });
+
+  it("allows payer-free mint observations", () => {
+    const events = [ev("mint", 8, { to: "H", amount: u(3) })];
+    expect(observeFlows(events, { plus: ["mint"], minus: [] }).get("H")?.amount).toBe(u(3));
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;
