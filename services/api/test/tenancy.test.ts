@@ -964,6 +964,39 @@ describe("what ships", () => {
     expect(() => new Db(":memory:", [...ORG_MIGRATIONS, "CREATE TABLE broken (x REFERENCES nowhere (y)); INSERT INTO broken VALUES (1);"])).toThrow();
   });
 
+  it("locks a WAL write transaction before reading to prevent stale snapshot writes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "concord-db-busy-"));
+    const file = join(dir, "shared.db");
+    const schema = ["CREATE TABLE tally (n INTEGER NOT NULL); INSERT INTO tally VALUES (0);"];
+    let first: Db | undefined;
+    let second: Db | undefined;
+    try {
+      first = new Db(file, schema);
+      second = new Db(file, schema);
+      // Keep contention tests fast: waiting longer cannot help a nested synchronous write.
+      first.raw.exec("PRAGMA busy_timeout = 1");
+      second.raw.exec("PRAGMA busy_timeout = 1");
+      for (let i = 0; i < 20; i++) {
+        first.tx(() => {
+          const n = first!.get<{ n: number }>("SELECT n FROM tally")!.n;
+          expect(() => second!.write("UPDATE tally SET n = n + 1")).toThrow(/locked/i);
+          first!.write("UPDATE tally SET n = ?", n + 1);
+        });
+        second.tx(() => {
+          const n = second!.get<{ n: number }>("SELECT n FROM tally")!.n;
+          expect(() => first!.write("UPDATE tally SET n = n + 1")).toThrow(/locked/i);
+          second!.write("UPDATE tally SET n = ?", n + 1);
+        });
+      }
+      expect(first.get<{ n: number }>("SELECT n FROM tally")?.n).toBe(40);
+      expect(second.get<{ n: number }>("SELECT n FROM tally")?.n).toBe(40);
+    } finally {
+      first?.close();
+      second?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not mask the original error when rollback fails in tx and migrate", () => {
     // 1. In migrate: COMMIT inside migration followed by invalid statement
     expect(() => {

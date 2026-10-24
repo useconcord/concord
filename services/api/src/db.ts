@@ -98,7 +98,9 @@ export class Db {
   }
 
   tx<T>(fn: () => T): T {
-    this.raw.exec("BEGIN");
+    // Reserve the write lock before reading: WAL read-to-write upgrades can otherwise
+    // fail immediately with SQLITE_BUSY_SNAPSHOT after another connection commits.
+    this.raw.exec("BEGIN IMMEDIATE");
     try {
       const out = fn();
       this.raw.exec("COMMIT");
