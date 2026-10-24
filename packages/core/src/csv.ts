@@ -63,7 +63,20 @@ export function parseCsvTable(text: string): CsvTable {
 }
 
 function escape(value: unknown): string {
-  const s = value === null || value === undefined ? "" : String(value);
+  let s: string;
+  if (value === null || value === undefined) {
+    s = "";
+  } else if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw new Error("cannot export invalid Date to CSV");
+    s = value.toISOString();
+  } else if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("cannot export non-finite number to CSV");
+    s = String(value);
+  } else if (typeof value === "object") {
+    throw new Error("cannot export object or array to CSV");
+  } else {
+    s = String(value);
+  }
   return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 }
 

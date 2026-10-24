@@ -48,6 +48,28 @@ describe("csv", () => {
   });
 });
 
+describe("CSV value safety", () => {
+  it("serializes dates as stable UTC ISO strings and bigints exactly", () => {
+    expect(toCsv(["value"], [{ value: new Date(0) }]))
+      .toBe("value\n1970-01-01T00:00:00.000Z\n");
+    expect(toCsv(["value"], [{ value: 10n }, { value: 1.5 }, { value: true }, { value: null }]))
+      .toBe("value\n10\n1.5\ntrue\n\n");
+  });
+
+  it.each([NaN, Infinity, -Infinity])("rejects non-finite numbers (%s)", (value) => {
+    expect(() => toCsv(["value"], [{ value }])).toThrow("cannot export non-finite number to CSV");
+  });
+
+  it.each([{}, { a: 1 }, [1, 2]])("rejects object and array values", (value) => {
+    expect(() => toCsv(["value"], [{ value }])).toThrow("cannot export object or array to CSV");
+  });
+
+  it("rejects invalid dates rather than exporting Invalid Date", () => {
+    expect(() => toCsv(["value"], [{ value: new Date(NaN) }]))
+      .toThrow("cannot export invalid Date to CSV");
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;
