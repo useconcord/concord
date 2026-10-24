@@ -267,6 +267,8 @@ export class StellarSource implements ChainSource {
   private readonly rpcPool: EndpointPool;
   private readonly horizonPool: EndpointPool;
   private readonly deps: ChainDeps;
+  private headCache?: { head: ChainHead; expiresAt: number };
+  private headInFlight?: Promise<ChainHead>;
 
   constructor(
     private readonly network: NetworkConfig,
@@ -341,7 +343,24 @@ export class StellarSource implements ChainSource {
     });
   }
 
+  /** Reuse the same short-lived chain head across workspaces during a sync pass. */
   async latestLedger(): Promise<ChainHead> {
+    const cached = this.headCache;
+    if (cached && this.deps.now() < cached.expiresAt) return cached.head;
+    if (this.headInFlight) return this.headInFlight;
+    const pending = this.fetchLatestLedger().then((head) => {
+      this.headCache = { head, expiresAt: this.deps.now() + 2_000 };
+      return head;
+    });
+    this.headInFlight = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.headInFlight === pending) this.headInFlight = undefined;
+    }
+  }
+
+  private async fetchLatestLedger(): Promise<ChainHead> {
     const h = await this.rpc<{ latestLedger: number; oldestLedger: number; oldestLedgerCloseTime?: string }>("getHealth");
     if (!Number.isInteger(h?.latestLedger) || !Number.isInteger(h?.oldestLedger)) {
       throw new ChainError("Stellar RPC getHealth did not report its ledger range", "rejected");

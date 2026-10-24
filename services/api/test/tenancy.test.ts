@@ -712,7 +712,8 @@ describe("chain endpoints", () => {
     expect(await source.latestLedger()).toEqual({ latest: 50, oldest: 10, oldestClosedAt: new Date(1790000000 * 1000).toISOString() });
     expect(calls.map((c) => c.url)).toEqual([a, b]);
     expect(calls[0]!.headers["x-api-key"]).toBe("k");
-    // Still resting: the next call goes straight to the second endpoint.
+    // After the shared getHealth cache expires, the next call skips the resting endpoint.
+    clock.value += 2_001;
     await source.latestLedger();
     expect(calls.map((c) => c.url)).toEqual([a, b, b]);
     clock.value += 41_000;
@@ -788,7 +789,7 @@ describe("chain endpoints", () => {
   it("rests an endpoint on 401/403 with a distinct message", async () => {
     const a = "https://a.example/bad-key";
     const b = "https://b.example";
-    const { calls, deps } = scripted({
+    const { calls, deps, clock } = scripted({
       [a]: [() => new Response("unauthorized", { status: 401 })],
       [b]: [health, health],
     });
@@ -796,7 +797,8 @@ describe("chain endpoints", () => {
     const head = await source.latestLedger();
     expect(head.latest).toBe(50);
     expect(calls.map((c) => c.url)).toEqual([a, b]);
-    // Endpoint `a` is now resting due to bad API key, so next call goes straight to `b`.
+    // Once the brief getHealth cache expires, the bad-key endpoint remains rested.
+    clock.value += 2_001;
     await source.latestLedger();
     expect(calls.map((c) => c.url)).toEqual([a, b, b]);
 
