@@ -17,7 +17,7 @@ export class Db {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.raw = new DatabaseSync(path);
     // The CLI and the server may hold the same file; wait for the other rather than fail.
-    this.raw.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
+    this.raw.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
     this.migrate(migrations);
     this.raw.exec("PRAGMA foreign_keys = ON;");
   }

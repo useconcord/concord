@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { describe, expect, it } from "vitest";
 import { StrKey } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
@@ -962,6 +963,42 @@ describe("what ships", () => {
     const org = new Db(":memory:", ORG_MIGRATIONS);
     expect(org.get<{ foreign_keys: number }>("PRAGMA foreign_keys")!.foreign_keys).toBe(1);
     expect(() => new Db(":memory:", [...ORG_MIGRATIONS, "CREATE TABLE broken (x REFERENCES nowhere (y)); INSERT INTO broken VALUES (1);"])).toThrow();
+  });
+
+  it("waits for an exclusive SQLite lock while enabling WAL on a newly created file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "concord-db-wal-open-"));
+    const file = join(dir, "shared.db");
+    const worker = new Worker(
+      `
+        const { parentPort, workerData } = require("node:worker_threads");
+        const { DatabaseSync } = require("node:sqlite");
+        const db = new DatabaseSync(workerData.file);
+        db.exec("BEGIN EXCLUSIVE");
+        parentPort.postMessage("locked");
+        setTimeout(() => {
+          db.exec("COMMIT");
+          db.close();
+          parentPort.postMessage("released");
+        }, 300);
+      `,
+      { eval: true, workerData: { file } },
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        worker.once("message", () => resolve());
+        worker.once("error", reject);
+        worker.once("exit", (code) => {
+          if (code !== 0) reject(new Error(`SQLite lock worker exited with ${code}`));
+        });
+      });
+      // Busy timeout must be installed BEFORE journal_mode requests its lock.
+      const opened = new Db(file, ["CREATE TABLE messages (id INTEGER)"]);
+      expect(opened.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(1);
+      opened.close();
+    } finally {
+      await worker.terminate();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("does not mask the original error when rollback fails in tx and migrate", () => {
