@@ -1,0 +1,8 @@
+# Allowed SPDX license identifiers for production dependencies.
+# One identifier per line. Lines starting with # are comments.
+MIT
+ISC
+Apache-2.0
+BSD-2-Clause
+BSD-3-Clause
+0BSD
