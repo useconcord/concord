@@ -53,7 +53,8 @@ export function parseCsvTable(text: string): CsvTable {
   if (!head) throw new Error("empty CSV");
   const headers = head.map((h) => h.trim().toLowerCase().replace(/[\s-]+/g, "_"));
   const records = rows.slice(1).map((r, i) => {
-    const values: Record<string, string> = {};
+    // Untrusted header names must not inherit or mutate Object.prototype.
+    const values: Record<string, string> = Object.create(null);
     headers.forEach((h, j) => {
       values[h] = (r[j] ?? "").trim();
     });
