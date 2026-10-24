@@ -48,6 +48,29 @@ describe("csv", () => {
   });
 });
 
+describe("transfer debit observations", () => {
+  it("debits the sender for transfers listed in minus, without a payer", () => {
+    const events = [ev("transfer", 8, { from: "A", to: "B", amount: u(7), txHash: "tx7" })];
+    const observed = observeFlows(events, { plus: [], minus: ["transfer"] });
+    expect([...observed.keys()]).toEqual(["A"]);
+    expect(observed.get("A")).toEqual({ amount: -u(7), txHashes: ["tx7"] });
+  });
+
+  it("credits the payer transfer recipient and debits the sender when both configured", () => {
+    const events = [ev("transfer", 9, { from: "PAY", to: "B", amount: u(2), txHash: "tx2" })];
+    const observed = observeFlows(events, {
+      plus: ["transfer"], minus: ["transfer"], payer: "PAY",
+    });
+    expect(observed.get("PAY")).toMatchObject({ amount: -u(2) });
+    expect(observed.get("B")).toMatchObject({ amount: u(2) });
+  });
+
+  it("does not record a self-transfer as a debit or credit", () => {
+    const events = [ev("transfer", 10, { from: "A", to: "A", amount: u(3) })];
+    expect(observeFlows(events, { plus: ["transfer"], minus: ["transfer"], payer: "A" }).size).toBe(0);
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;

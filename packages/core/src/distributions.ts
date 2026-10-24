@@ -87,7 +87,7 @@ export interface FlowWindow {
   untilTime?: string;
   /** Kinds that add to a holder. A transfer counts only when sent by `payer` to another address. */
   plus: EventKind[];
-  /** Kinds that take from a holder. */
+  /** Kinds that debit a holder. Transfer debits the sender for non-self transfers. */
   minus: EventKind[];
   /** Paying agent for transfer-based distributions. */
   payer?: string;
@@ -113,8 +113,12 @@ export function observeFlows(events: AssetEvent[], window: FlowWindow): Map<stri
     if (window.afterTime !== undefined && ev.closedAt <= window.afterTime) continue;
     if (window.untilTime !== undefined && ev.closedAt > window.untilTime) continue;
     if (ev.kind === "transfer") {
-      if (window.plus.includes("transfer") && window.payer && ev.from === window.payer && ev.to !== ev.from) {
+      if (ev.to === ev.from) continue; // Self-transfers do not move units between holders.
+      if (window.plus.includes("transfer") && window.payer && ev.from === window.payer) {
         add(ev.to, ev.amount, ev.txHash);
+      }
+      if (window.minus.includes("transfer")) {
+        add(ev.from, -ev.amount, ev.txHash);
       }
     } else if (window.plus.includes(ev.kind)) {
       add(ev.kind === "mint" ? ev.to : ev.from, ev.amount, ev.txHash);
