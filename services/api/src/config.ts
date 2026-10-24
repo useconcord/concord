@@ -204,9 +204,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),
     webDir: env.CONCORD_WEB_DIR ? resolve(ROOT, env.CONCORD_WEB_DIR) : resolve(ROOT, "apps/web/dist"),
     publicUrl,
-    trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0),
+    trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0, 0, 10),
     signup,
-    maxAssetsPerOrg: integer(env, "CONCORD_MAX_ASSETS", 10, 1),
+    maxAssetsPerOrg: integer(env, "CONCORD_MAX_ASSETS", 10, 1, 1000),
     ephemeral: flag(env, "CONCORD_EPHEMERAL", false),
   };
   if (env.CONCORD_PASSWORD_COST) {
@@ -215,6 +215,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const whole = (n: number | undefined, min: number, max: number) => Number.isInteger(n) && n! >= min && n! <= max;
     if (!whole(N, 2 ** 14, 2 ** 20) || (N! & (N! - 1)) !== 0 || !whole(r, 8, 32) || !whole(p, 1, 16)) {
       throw new Error("CONCORD_PASSWORD_COST must be N:r:p, with N a power of two from 16384, r from 8 and p from 1; e.g. 32768:8:3");
+    }
+    const scryptMemoryBytes = 128 * N! * r!;
+    if (scryptMemoryBytes > 128 * 1024 * 1024) {
+      throw new Error("CONCORD_PASSWORD_COST cannot exceed 128 MiB of scrypt memory");
     }
     config.passwordCost = { N: N!, r: r!, p: p! };
   }
