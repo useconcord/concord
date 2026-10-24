@@ -701,6 +701,30 @@ describe("chain endpoints", () => {
     return { calls, clock, deps };
   }
 
+  it("URL-encodes unusual asset and issuer values in search, describe and baseline", async () => {
+    const code = "A&B?";
+    const issuer = "G?X&Y";
+    const h = "https://horizon.example";
+    const emptyAssets = () => new Response(JSON.stringify({ _embedded: { records: [] } }));
+    const emptyAccounts = () => new Response(JSON.stringify({ _embedded: { records: [] } }), {
+      headers: { "latest-ledger": "42" },
+    });
+    const { calls, deps } = scripted({
+      [`${h}/assets?asset_code=A%26B%3F&limit=200`]: [emptyAssets],
+      [`${h}/assets?asset_code=A%26B%3F&asset_issuer=G%3FX%26Y&limit=200`]: [emptyAssets],
+      [`${h}/accounts?asset=A%26B%3F%3AG%3FX%26Y&limit=200&order=asc`]: [emptyAccounts],
+    });
+    const source = new StellarSource(network(["https://rpc.example"]), deps);
+    expect(await source.search(code)).toEqual([]);
+    expect(await source.describe({ id: "unused", code, issuer })).toBeUndefined();
+    expect(await source.baseline(code, issuer, 7)).toEqual({ ledger: 42, openings: new Map() });
+    expect(calls.map((call) => call.url)).toEqual([
+      `${h}/assets?asset_code=A%26B%3F&limit=200`,
+      `${h}/assets?asset_code=A%26B%3F&asset_issuer=G%3FX%26Y&limit=200`,
+      `${h}/accounts?asset=A%26B%3F%3AG%3FX%26Y&limit=200&order=asc`,
+    ]);
+  });
+
   it("moves to the next endpoint when one is rate limited, and rests the first", async () => {
     const a = "https://a.example/secret-key-123";
     const b = "https://b.example";
@@ -814,7 +838,7 @@ describe("chain endpoints", () => {
     const line = (balance: string, authorized = true) => ({ asset_code: "FUND", asset_issuer: issuer, balance, is_authorized: authorized });
     const record = (id: string, balance: string) => ({ account_id: id, balances: [line(balance)] });
     const many = Array.from({ length: 199 }, () => record(key(), "1.0000000"));
-    const first = `https://horizon.example/accounts?asset=FUND:${issuer}&limit=200&order=asc`;
+    const first = `https://horizon.example/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`;
     const second = "https://horizon.example/accounts?cursor=abc&limit=200";
     const page = (records: unknown[], ledger: number, next?: string) => () =>
       new Response(JSON.stringify({ _links: next ? { next: { href: next } } : {}, _embedded: { records } }), {
@@ -894,8 +918,8 @@ describe("chain endpoints", () => {
       headers: { "latest-ledger": "100" },
     });
     const s2 = scripted({
-      [`${h1}/accounts?asset=FOO:${issuer}&limit=200&order=asc`]: [badBody],
-      [`${h2}/accounts?asset=FOO:${issuer}&limit=200&order=asc`]: [okAccounts],
+      [`${h1}/accounts?asset=FOO%3A${issuer}&limit=200&order=asc`]: [badBody],
+      [`${h2}/accounts?asset=FOO%3A${issuer}&limit=200&order=asc`]: [okAccounts],
     });
     const src2 = new StellarSource(net, s2.deps);
     const baseRes = await src2.baseline("FOO", issuer, 7);

@@ -188,6 +188,10 @@ const BUDGET_MS = 90_000;
 // Provider keys often sit in the URL path, so only the host is ever shown.
 const hostOf = (url: string) => new URL(url).host;
 
+/** Encode all Horizon query values, including asset codes and issuer identifiers. */
+const horizonPath = (path: string, params: Record<string, string>): string =>
+  `${path}?${new URLSearchParams(params).toString()}`;
+
 function retryAfterMs(res: Response, now: number): number {
   const header = res.headers.get("retry-after");
   if (!header) return REST_MS;
@@ -392,7 +396,11 @@ export class StellarSource implements ChainSource {
     return this.horizonPool.run(async (endpoint) => {
       const openings = new Map<string, Opening>();
       let ledger: number | undefined;
-      let path: string | undefined = `/accounts?asset=${code}:${issuer}&limit=200&order=asc`;
+      let path: string | undefined = horizonPath("/accounts", {
+        asset: `${code}:${issuer}`,
+        limit: "200",
+        order: "asc",
+      });
       while (path) {
         const { body, pageLedger } = await this.accountsPage(endpoint, path);
         if (ledger !== undefined && pageLedger < ledger) throw new EndpointFailure("went back in time mid-read");
@@ -437,8 +445,8 @@ export class StellarSource implements ChainSource {
   }
 
   private async horizonAssets(code: string, issuer?: string): Promise<HorizonAsset[]> {
-    const query = `asset_code=${encodeURIComponent(code)}${issuer ? `&asset_issuer=${issuer}` : ""}`;
-    return this.horizon(`/assets?${query}&limit=200`, (body) => {
+    const params = { asset_code: code, ...(issuer ? { asset_issuer: issuer } : {}), limit: "200" };
+    return this.horizon(horizonPath("/assets", params), (body) => {
       const records = (body as { _embedded?: { records?: HorizonAsset[] } })?._embedded?.records;
       if (!Array.isArray(records)) throw new EndpointFailure("unexpected response");
       return records;
