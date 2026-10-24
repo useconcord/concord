@@ -74,6 +74,42 @@ const RETIRED: Record<string, string> = {
   CONCORD_API_TOKEN: "users sign in; there is no shared token",
 };
 
+/** Recognized runtime settings, including the CLI-only workspace selector. */
+const KNOWN_CONCORD_SETTINGS = [
+  "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
+  "CONCORD_GOOGLE_CLIENT_ID", "CONCORD_GOOGLE_CLIENT_SECRET", "CONCORD_HOST",
+  "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
+  "CONCORD_MAX_ASSETS", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
+  "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS",
+  "CONCORD_SIGNUP", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
+  "CONCORD_TESTNET_RPC_URLS", "CONCORD_TRUST_PROXY", "CONCORD_WEB_DIR",
+] as const;
+const KNOWN_SETTINGS = new Set<string>(KNOWN_CONCORD_SETTINGS);
+
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(current[j - 1]! + 1, previous[j]! + 1,
+        previous[j - 1]! + Number(a[i - 1] !== b[j - 1]));
+    }
+    previous = current;
+  }
+  return previous[b.length]!;
+}
+
+function warnUnknownSettings(env: NodeJS.ProcessEnv, warn: (message: string) => void): void {
+  for (const name of Object.keys(env)) {
+    if (!name.startsWith("CONCORD_") || KNOWN_SETTINGS.has(name) || name in RETIRED) continue;
+    const closest = [...KNOWN_SETTINGS].map((candidate) => ({
+      candidate, distance: editDistance(name, candidate),
+    })).sort((a, b) => a.distance - b.distance)[0];
+    const suggestion = closest && closest.distance <= 4 ? `; did you mean ${closest.candidate}?` : "";
+    warn(`Unknown Concord setting ${name}${suggestion}`);
+  }
+}
+
 function list(value: string | undefined): string[] {
   return (value ?? "")
     .split(",")
@@ -125,7 +161,7 @@ function endpoints(urls: string[], headers: Record<string, Record<string, string
 /** The repository root in a checkout, /app in the container. */
 const ROOT = resolve(import.meta.dirname, "../../..");
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message: string) => void = console.warn): Config {
   if (env === process.env) {
     try {
       // A .env beside package.json, when there is one. Variables already set take precedence.
@@ -137,6 +173,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   for (const [name, advice] of Object.entries(RETIRED)) {
     if (env[name]) throw new Error(`${name} is no longer read: ${advice}`);
   }
+
+  warnUnknownSettings(env, warn);
 
   let headers: Record<string, Record<string, string>> = {};
   if (env.CONCORD_RPC_HEADERS) {
