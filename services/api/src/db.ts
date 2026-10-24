@@ -16,10 +16,20 @@ export class Db {
   ) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.raw = new DatabaseSync(path);
-    // The CLI and the server may hold the same file; wait for the other rather than fail.
-    this.raw.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-    this.migrate(migrations);
-    this.raw.exec("PRAGMA foreign_keys = ON;");
+    try {
+      // The CLI and the server may hold the same file; wait for the other rather than fail.
+      this.raw.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
+      this.migrate(migrations);
+      this.raw.exec("PRAGMA foreign_keys = ON;");
+    } catch (err) {
+      // A failed constructor cannot be closed by the caller; never retain its SQLite handle.
+      try {
+        this.raw.close();
+      } catch {
+        // Preserve the initialization error, even if closing the broken handle also fails.
+      }
+      throw err;
+    }
   }
 
   private pragma(name: string): number {

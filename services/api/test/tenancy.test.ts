@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { StrKey } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
@@ -962,6 +963,47 @@ describe("what ships", () => {
     const org = new Db(":memory:", ORG_MIGRATIONS);
     expect(org.get<{ foreign_keys: number }>("PRAGMA foreign_keys")!.foreign_keys).toBe(1);
     expect(() => new Db(":memory:", [...ORG_MIGRATIONS, "CREATE TABLE broken (x REFERENCES nowhere (y)); INSERT INTO broken VALUES (1);"])).toThrow();
+  });
+
+  it("closes failed initialization handles across repeated schema version mismatches", () => {
+    const dir = mkdtempSync(join(tmpdir(), "concord-db-init-"));
+    const file = join(dir, "control.db");
+    try {
+      const seed = new Db(file, []);
+      seed.raw.exec("PRAGMA user_version = 777");
+      seed.close();
+      const fds = () => existsSync("/proc/self/fd") ? readdirSync("/proc/self/fd").length : undefined;
+      const before = fds();
+      for (let i = 0; i < 100; i++) {
+        expect(() => new Db(file, [])).toThrow(/at schema 777/);
+      }
+      const after = fds();
+      // Linux can count open descriptors; tolerate incidental test-runner descriptors.
+      if (before !== undefined && after !== undefined) {
+        expect(after - before).toBeLessThan(10);
+      }
+      const raw = new DatabaseSync(file);
+      raw.exec("PRAGMA user_version = 0");
+      raw.close();
+      const reopened = new Db(file, ["CREATE TABLE recovered (x INTEGER)"]);
+      expect(reopened.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(1);
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("releases database files after a syntax-error migration", () => {
+    const dir = mkdtempSync(join(tmpdir(), "concord-db-migration-"));
+    const file = join(dir, "tenant.db");
+    try {
+      expect(() => new Db(file, ["CREATE TABLE broken ("])).toThrow(/syntax|near|incomplete/i);
+      const reopened = new Db(file, ["CREATE TABLE works (x INTEGER)"]);
+      expect(reopened.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(1);
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("does not mask the original error when rollback fails in tx and migrate", () => {
