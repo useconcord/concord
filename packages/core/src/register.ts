@@ -46,7 +46,13 @@ function parseStatus(raw: string): HolderStatus | undefined {
 /** The register's columns as Concord names them, in the order a template lists them. */
 export const REGISTER_COLUMNS = ["holder_id", "holder_name", "account", "units", "status"] as const;
 
-/** Columns: holder_id, units, and optionally holder_name, account, status. */
+/**
+ * Parses a register CSV into positions.
+ *
+ * Columns: holder_id and units are required; holder_name, account and status are optional.
+ * Header names may use any alias listed in ALIASES. Rows that fail validation are reported
+ * in `issues` (with line numbers) and skipped rather than aborting the whole file.
+ */
 export function parseRegisterCsv(text: string, decimals = DEFAULT_DECIMALS): ParsedRegister {
   const table = parseCsvTable(text);
   const idCol = pick(table.headers, "holder_id");
