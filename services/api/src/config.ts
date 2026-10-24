@@ -19,6 +19,8 @@ export interface NetworkConfig {
   /** Tried in order; a failing or rate-limited endpoint is rested and the next one used. */
   rpc: Endpoint[];
   horizon: Endpoint[];
+  /** Optional provider contact details appended to outbound User-Agent. */
+  userAgentSuffix?: string;
 }
 
 const DEFAULTS: Record<NetworkName, { passphrase: string; rpc: string[]; horizon: string[] }> = {
@@ -138,6 +140,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (env[name]) throw new Error(`${name} is no longer read: ${advice}`);
   }
 
+  if (env.CONCORD_USER_AGENT_SUFFIX && !/^[\x20-\x7e]{1,120}$/.test(env.CONCORD_USER_AGENT_SUFFIX)) {
+    throw new Error("CONCORD_USER_AGENT_SUFFIX must be at most 120 printable ASCII characters");
+  }
+
   let headers: Record<string, Record<string, string>> = {};
   if (env.CONCORD_RPC_HEADERS) {
     try {
@@ -170,6 +176,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       passphrase: base.passphrase,
       rpc: endpoints(rpc.length ? rpc : base.rpc, headers, `CONCORD_${upper}_RPC_URLS`),
       horizon: endpoints(horizon.length ? horizon : base.horizon, headers, `CONCORD_${upper}_HORIZON_URLS`),
+      ...(env.CONCORD_USER_AGENT_SUFFIX ? { userAgentSuffix: env.CONCORD_USER_AGENT_SUFFIX } : {}),
     };
   };
 

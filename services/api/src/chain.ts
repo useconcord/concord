@@ -1,4 +1,5 @@
 import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
+import { readFileSync } from "node:fs";
 import { Address, Asset, StrKey, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { isEventKind, parseUnits, type AssetEvent, type Opening } from "@concord/core";
 import type { Endpoint, NetworkConfig } from "./config.js";
@@ -6,6 +7,8 @@ import type { Endpoint, NetworkConfig } from "./config.js";
 // Node gives each address family 250ms to connect before trying the next, which fails outright
 // on a slow link.
 setDefaultAutoSelectFamilyAttemptTimeout(5000);
+const PACKAGE_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+const USER_AGENT = `concord/${PACKAGE_VERSION} (+https://github.com/useconcord/concord)`;
 
 export interface EventPage {
   events: AssetEvent[];
@@ -283,7 +286,11 @@ export class StellarSource implements ChainSource {
     try {
       res = await this.deps.fetch(url, {
         ...init,
-        headers: { ...(init.headers as Record<string, string> | undefined), ...endpoint.headers },
+        headers: {
+          "user-agent": this.network.userAgentSuffix ? `${USER_AGENT} ${this.network.userAgentSuffix}` : USER_AGENT,
+          ...(init.headers as Record<string, string> | undefined),
+          ...endpoint.headers,
+        },
         // Covers reading the body too, not just the wait for headers.
         signal: AbortSignal.timeout(timeoutMs),
       });
