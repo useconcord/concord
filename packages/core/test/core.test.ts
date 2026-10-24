@@ -6,6 +6,7 @@ import {
   formatUnits,
   observeFlows,
   parseCsv,
+  parseCsvTable,
   parseInstructionsCsv,
   parseJournalCsv,
   parseRegisterCsv,
@@ -45,6 +46,23 @@ describe("csv", () => {
       ['x, "y"', "2"],
     ]);
     expect(toCsv(["a", "b"], [{ a: 'x, "y"', b: 2 }])).toBe('a,b\n"x, ""y""",2\n');
+  });
+});
+
+describe("CSV duplicate header validation", () => {
+  it("reports duplicate normalized headers with both column positions", () => {
+    expect(() => parseCsvTable("units,units\n1,2\n"))
+      .toThrow('duplicate column "units" (columns 1 and 2)');
+    expect(() => parseCsvTable("Units, units\n1,2\n"))
+      .toThrow('duplicate column "units" (columns 1 and 2)');
+    expect(() => parseCsvTable("holder-id,holder id\nH1,H2\n"))
+      .toThrow('duplicate column "holder_id" (columns 1 and 2)');
+  });
+
+  it("allows multiple empty headers without creating an empty-key field", () => {
+    const table = parseCsvTable("a,,\n1,unused,ignored\n");
+    expect(table.records[0]!.values).toEqual({ a: "1" });
+    expect(Object.keys(table.records[0]!.values)).toEqual(["a"]);
   });
 });
 
