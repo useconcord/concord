@@ -80,7 +80,15 @@ export interface ResolvedAsset {
 /** Accepts CODE:ISSUER for a classic asset or a C... contract id for a SEP-41 token. */
 export function resolveAsset(spec: string, passphrase: string): ResolvedAsset {
   const s = spec.trim();
-  if (StrKey.isValidContract(s)) return { id: s, code: `${s.slice(0, 4)}…${s.slice(-4)}` };
+  if (/^(native|xlm)$/i.test(s)) {
+    return { id: Asset.native().contractId(passphrase), code: "XLM" };
+  }
+  // Stellar strkeys use uppercase base32. Normalize pasted lowercase contract ids,
+  // but leave classic asset codes and issuer validation unchanged.
+  const contract = s.toUpperCase();
+  if (StrKey.isValidContract(contract)) {
+    return { id: contract, code: `${contract.slice(0, 4)}…${contract.slice(-4)}` };
+  }
   const [code, issuer, ...rest] = s.split(":");
   if (!code || !issuer || rest.length || !StrKey.isValidEd25519PublicKey(issuer)) {
     throw new Error(`asset must be CODE:ISSUER or a contract id, got "${spec}"`);
