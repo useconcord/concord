@@ -129,7 +129,7 @@ export function controlEvents(
     const base = { eventId: ev.id, account: ev.from, ledger: ev.ledger, closedAt: ev.closedAt, txHash: ev.txHash };
     if (ev.kind === "clawback") {
       out.push({ ...base, type: "clawback", units: ev.amount });
-    } else if (ev.kind === "set_authorized") {
+    } else if (ev.kind === "set_authorized" && ev.authorized !== undefined) {
       if (ev.authorized) {
         out.push({ ...base, type: frozen.has(ev.from) ? "unfreeze" : "authorize" });
         frozen.delete(ev.from);

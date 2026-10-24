@@ -395,6 +395,17 @@ describe("controls log", () => {
     ev("mint", 2, { to: "A", amount: u(1) }),
   ];
 
+  it("does not treat set_authorized without a flag as a freeze (#42)", () => {
+    const missingFlag = ev("set_authorized", 9, { from: "A" });
+    expect(controlEvents([missingFlag])).toEqual([]);
+    expect(replay([missingFlag]).authorized.has("A")).toBe(false);
+
+    const validFreeze = ev("set_authorized", 10, { from: "A", authorized: false });
+    const validUnfreeze = ev("set_authorized", 11, { from: "A", authorized: true });
+    expect(controlEvents([missingFlag, validFreeze, validUnfreeze]).map((record) => record.type))
+      .toEqual(["freeze", "unfreeze"]);
+  });
+
   it("ties each control to its instruction and flags the rest", () => {
     const { instructions, issues } = parseInstructionsCsv(
       [
