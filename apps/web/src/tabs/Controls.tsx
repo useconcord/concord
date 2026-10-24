@@ -171,7 +171,7 @@ export function Controls({ asset, onChange }: { asset: AssetSummary; onChange: (
         >
           <Field
             label="Instruction file"
-            hint="CSV with ref, type (authorize, freeze, unfreeze or clawback), account and issued_at. Optional: units (required for a clawback), approved_by, reason. An instruction covers an action taken within 72 hours after it."
+            hint="CSV with ref, type (authorize, freeze, unfreeze or clawback), account and issued_at. Optional: units (required for a clawback), approved_by, reason. An instruction covers an action taken within 72 hours after it. See docs/controls.md for the matching rules."
           >
             <input ref={file} type="file" accept=".csv,text/csv" className={`${inputClass} py-1`} />
           </Field>

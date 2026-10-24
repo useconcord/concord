@@ -95,7 +95,10 @@ export interface ControlsLog {
 }
 
 export interface ControlsOptions {
-  /** How long after approval an instruction may be executed. Default 72h. */
+  /**
+   * How long after approval an instruction may be executed. Default 72h (`72 * 3_600_000` ms).
+   * See docs/controls.md for the matching rules this window feeds into.
+   */
   windowMs?: number;
   /** ISO-8601 time the chain is indexed up to. Instructions past their window before it are breaks. */
   asOf: string;
