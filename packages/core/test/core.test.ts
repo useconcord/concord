@@ -48,6 +48,35 @@ describe("csv", () => {
   });
 });
 
+describe("register decimal precision", () => {
+  it("imports whole-token units exactly with zero decimal places", () => {
+    const { positions, issues } = parseRegisterCsv("holder_id,account,units\nH0,A,1\n", 0);
+    expect(issues).toEqual([]);
+    expect(positions).toHaveLength(1);
+    expect(positions[0]!.units).toBe(1n);
+  });
+
+  it("reports fractional units as an issue for a zero-decimal token", () => {
+    const { positions, issues } = parseRegisterCsv("holder_id,account,units\nH0,A,1.5\n", 0);
+    expect(positions).toEqual([]);
+    expect(issues).toEqual([{ line: 2, message: '"1.5" has more than 0 decimal places' }]);
+  });
+
+  it("retains every fractional digit for an 18-decimal token", () => {
+    const { positions, issues } = parseRegisterCsv(
+      "holder_id,account,units\nH18,A,1.123456789012345678\n", 18,
+    );
+    expect(issues).toEqual([]);
+    expect(positions[0]!.units).toBe(1123456789012345678n);
+  });
+
+  it("keeps the default seven-decimal validation as a row issue", () => {
+    const { positions, issues } = parseRegisterCsv("holder_id,account,units\nH7,A,1.12345678\n");
+    expect(positions).toEqual([]);
+    expect(issues).toEqual([{ line: 2, message: '"1.12345678" has more than 7 decimal places' }]);
+  });
+});
+
 describe("templates", () => {
   it.each(Object.entries(TEMPLATES))("keeps the %s template header-only by default", (kind, columns) => {
     const header = `${columns.join(",")}\n`;
