@@ -86,6 +86,14 @@ Every command, option and exit code is in the [command-line reference](./docs/cl
 
 The audit pack format (JSON sections, CSV columns, period rules and file names) is documented in [`docs/audit-pack.md`](./docs/audit-pack.md).
 
+## HTTP API
+
+The HTTP API is described as an OpenAPI 3.1 document in [`docs/openapi.yaml`](./docs/openapi.yaml),
+with a static viewer at [`docs/api.html`](./docs/api.html). It covers every route in `services/api/src/api.ts` and
+`services/api/src/auth-api.ts`, the request and response shapes, the status codes the API can return
+with the conditions that produce them, cookie authentication, the `x-concord-org` header, and the
+same-origin requirement for non-GET requests.
+
 ## Deploying
 
 The [`Dockerfile`](./Dockerfile) builds one image that serves the API and the dashboard. Give it
