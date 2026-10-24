@@ -1,4 +1,7 @@
-/** Minimal RFC 4180 reader and writer. Registers arrive as CSV exports from TA systems. */
+/**
+ * Minimal RFC 4180 reader and writer. Registers arrive as CSV exports from TA systems.
+ * Format reference for transfer-agent staff: see docs/csv-formats.md.
+ */
 export function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];

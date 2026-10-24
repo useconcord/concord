@@ -14,7 +14,7 @@ Franklin Templeton's BENJI, Concord's unit total matched Horizon's own figure to
 and a register built from the chain's holdings reconciled clean across all 1,005 positions (see
 reproduction steps in [`docs/evidence/benji-mainnet.md`](./docs/evidence/benji-mainnet.md)). No
 customer has used it. The product brief and kill criteria are in [`BRIEF.md`](./BRIEF.md).
-Questions, bug reports and what to expect back: [`SUPPORT.md`](./SUPPORT.md). Answers to common questions are in [`docs/FAQ.md`](./docs/FAQ.md).
+Questions, bug reports and what to expect back: [`SUPPORT.md`](./SUPPORT.md). Answers to common questions are in [`docs/FAQ.md`](./docs/FAQ.md). The exact layout of the register, journal and instructions CSV files, with examples, is in [`docs/csv-formats.md`](./docs/csv-formats.md).
 
 ## Run it
 
