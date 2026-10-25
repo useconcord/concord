@@ -42,7 +42,7 @@ error. Positional arguments and options may appear in any order.
 | Option | Used by | Meaning |
 |---|---|---|
 | `--org <id \| name>` | every workspace command | The workspace to act on. Falls back to the `CONCORD_ORG` environment variable. |
-| `--json` | see [`--json` coverage](#json-coverage) | Print machine-readable JSON. |
+| `--json` | see [`--json` coverage](#--json-coverage) | Print machine-readable JSON. |
 | `--network mainnet\|testnet` | `watch` | Network of the asset. Defaults to `CONCORD_DEFAULT_NETWORK`, itself defaulting to `mainnet`. |
 | `--name <text>` | `watch` | Display name. Defaults to the asset code. |
 | `--ignore A,B` | `watch` | Comma-separated addresses to leave out of reconciliation (treasury, issuer). |
@@ -236,6 +236,8 @@ Prints a one-time code that lets one new workspace be created while `CONCORD_SIG
 Valid for 14 days; it is used up by the workspace created with it.
 
 ### `reset-link EMAIL`
+
+For the full dashboard deep-link format and safe token-sharing guidance, see [dashboard routes](web-routes.md#routes).
 
 Prints a link, `<CONCORD_PUBLIC_URL>/#/reset/<token>`, then a reminder line. The link is valid for
 one day and works once. It fails with `no account for EMAIL` if there is no such account. Set
