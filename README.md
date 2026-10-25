@@ -100,18 +100,19 @@ always-on instance with a local disk. It does not fit serverless hosts.
 [`render.yaml`](./render.yaml) deploys it to Render's **free** plan for a preview only: that plan
 has no persistent disk, so every account, upload and sign-off is erased when the service restarts or
 spins down after fifteen idle minutes (`CONCORD_EPHEMERAL=1` makes the dashboard say so). For
-anything people should come back to, use an instance with a disk at `/data` and remove that variable.
+anything people should come back to, use an instance with a disk at `/data` and remove that variable;
+the [paid Render disk and migration guide](./docs/deploy/render.md) covers that move.
 
 TLS: [nginx and Certbot](./docs/deploy/nginx.md), [Caddy](./docs/deploy/caddy.md). Hosts:
 [Docker Compose](./docs/deploy/docker-compose.md) (copy `.env.example` to `.env` at the repository
-root, then `docker compose -f deploy/docker-compose.yml up -d --build`), [Fly.io](./docs/deploy/fly.md),
+root, then `docker compose -f deploy/docker-compose.yml up -d --build`), [Fly.io](./docs/deploy/fly.md) (with the [single-machine template](./deploy/fly.toml)),
 [systemd](./docs/deploy/systemd.md). Running it: [monitoring](./docs/monitoring.md),
 [versioning](./docs/versioning.md), [upgrading and rolling back](./docs/upgrading.md).
 
 ## Layout and more documentation
 
 Three packages: `packages/core` (the accounting, no I/O), `services/api` (RPC indexer, SQLite
-stores, accounts and workspaces, HTTP API, CLI) and `apps/web` (the dashboard); see
+stores, accounts and workspaces, HTTP API, CLI) and [`apps/web`](./apps/web/README.md) (the dashboard); see
 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). Tables: [`docs/schema.md`](./docs/schema.md).
 Stellar concepts for finance and compliance readers: [`docs/glossary-stellar.md`](./docs/glossary-stellar.md).
 Architecture decisions: [`docs/adr/`](./docs/adr/README.md).

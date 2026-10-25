@@ -136,6 +136,8 @@ Coverage, the accessibility checks and the browser smoke test run only on the
 - [`docs/MAINTAINERS.md`](./docs/MAINTAINERS.md): triage, merge and release rules.
 - [`docs/contributing/review-checklist.md`](./docs/contributing/review-checklist.md): what reviewers check on every pull request.
 - [`docs/contributing/web-dev.md`](./docs/contributing/web-dev.md): running the dashboard locally against testnet or a fake chain.
+- [`docs/browser-support.md`](./docs/browser-support.md): browser requirements and fallback behaviours.
+- [`docs/web-routes.md`](./docs/web-routes.md): dashboard route paths, URL query parameters and safe deep-link sharing.
 - [`docs/contributing/chain-source.md`](./docs/contributing/chain-source.md): reading the ledger from a new source.
 - [`docs/contributing/core-tests.md`](./docs/contributing/core-tests.md): testing guidelines in `packages/core`.
 - [`docs/contributing/csv-column.md`](./docs/contributing/csv-column.md): adding a column to the register, journal or instructions CSV.

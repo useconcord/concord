@@ -62,6 +62,7 @@ same discrepancy on the next run produces the same key, so the note follows it. 
 - Control breaks ([`packages/core/src/controls.ts`](../packages/core/src/controls.ts)):
   - `UNINSTRUCTED_CONTROL:<eventId>`
   - `UNEXECUTED_INSTRUCTION:<instructionRef>`
+  - `LATE_INSTRUCTION:<eventId>`
 
 A note written against one address therefore never suppresses a different address's break, and an
 `action:<id>` note never applies to another action.
