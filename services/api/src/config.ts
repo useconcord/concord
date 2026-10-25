@@ -19,6 +19,8 @@ export interface NetworkConfig {
   /** Tried in order; a failing or rate-limited endpoint is rested and the next one used. */
   rpc: Endpoint[];
   horizon: Endpoint[];
+  /** Optional provider contact details appended to outbound User-Agent. */
+  userAgentSuffix?: string;
 }
 
 const DEFAULTS: Record<NetworkName, { passphrase: string; rpc: string[]; horizon: string[] }> = {
@@ -81,26 +83,48 @@ function list(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
-function integer(env: NodeJS.ProcessEnv, name: string, fallback: number, min = 0): number {
+function integer(env: NodeJS.ProcessEnv, name: string, fallback: number, min = 0, max?: number): number {
   const raw = env[name];
   if (raw === undefined || raw === "") return fallback;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < min) throw new Error(`${name} must be a whole number of at least ${min}`);
+  if (!Number.isInteger(n) || n < min || (max !== undefined && n > max)) {
+    if (max !== undefined) {
+      throw new Error(`${name} must be a whole number from ${min} to ${max}`);
+    }
+    throw new Error(`${name} must be a whole number of at least ${min}`);
+  }
   return n;
+}
+
+function flag(env: NodeJS.ProcessEnv, name: string, fallback = false): boolean {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const v = raw.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  throw new Error(`${name} must be a boolean flag: 1/true/yes/on or 0/false/no/off`);
 }
 
 function endpoints(urls: string[], headers: Record<string, Record<string, string>>, name: string): Endpoint[] {
   return urls.map((url) => {
     let host: string;
+    let hostname: string;
+    let hasCredentials = false;
     try {
       const parsed = new URL(url);
+      hasCredentials = Boolean(parsed.username || parsed.password);
       if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("not http");
       host = parsed.host;
+      hostname = parsed.hostname;
     } catch {
       throw new Error(`${name} holds something that is not a URL`);
     }
+    if (hasCredentials) {
+      throw new Error(`${name} must not contain URL credentials; configure Authorization via CONCORD_RPC_HEADERS`);
+    }
     const endpoint: Endpoint = { url: url.replace(/\/+$/, "") };
-    if (headers[host]) endpoint.headers = headers[host];
+    const h = headers[host] ?? headers[hostname];
+    if (h) endpoint.headers = h;
     return endpoint;
   });
 }
@@ -113,18 +137,39 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     try {
       // A .env beside package.json, when there is one. Variables already set take precedence.
       process.loadEnvFile(resolve(ROOT, ".env"));
-    } catch {
-      // No file: the environment is all there is.
+    } catch (err) {
+      // A missing .env is optional, but permission and parsing errors are configuration failures.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`Failed to load .env: ${(err as Error).message}`, { cause: err });
+      }
     }
   }
   for (const [name, advice] of Object.entries(RETIRED)) {
     if (env[name]) throw new Error(`${name} is no longer read: ${advice}`);
   }
 
+  if (env.CONCORD_USER_AGENT_SUFFIX && !/^[\x20-\x7e]{1,120}$/.test(env.CONCORD_USER_AGENT_SUFFIX)) {
+    throw new Error("CONCORD_USER_AGENT_SUFFIX must be at most 120 printable ASCII characters");
+  }
+
   let headers: Record<string, Record<string, string>> = {};
   if (env.CONCORD_RPC_HEADERS) {
     try {
-      headers = JSON.parse(env.CONCORD_RPC_HEADERS) as Record<string, Record<string, string>>;
+      const parsed = JSON.parse(env.CONCORD_RPC_HEADERS);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error();
+      }
+      for (const hostHeaders of Object.values(parsed)) {
+        if (typeof hostHeaders !== "object" || hostHeaders === null || Array.isArray(hostHeaders)) {
+          throw new Error();
+        }
+        for (const val of Object.values(hostHeaders)) {
+          if (typeof val !== "string") {
+            throw new Error();
+          }
+        }
+      }
+      headers = parsed as Record<string, Record<string, string>>;
     } catch {
       throw new Error('CONCORD_RPC_HEADERS must be JSON: {"host": {"header": "value"}}');
     }
@@ -139,6 +184,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       passphrase: base.passphrase,
       rpc: endpoints(rpc.length ? rpc : base.rpc, headers, `CONCORD_${upper}_RPC_URLS`),
       horizon: endpoints(horizon.length ? horizon : base.horizon, headers, `CONCORD_${upper}_HORIZON_URLS`),
+      ...(env.CONCORD_USER_AGENT_SUFFIX ? { userAgentSuffix: env.CONCORD_USER_AGENT_SUFFIX } : {}),
     };
   };
 
@@ -148,11 +194,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (signup !== "open" && signup !== "code") throw new Error("CONCORD_SIGNUP must be open or code");
 
   // Hosts such as Render hand the port over as PORT.
-  const port = integer(env, env.CONCORD_PORT ? "CONCORD_PORT" : "PORT", 4400, 1);
+  const port = integer(env, env.CONCORD_PORT ? "CONCORD_PORT" : "PORT", 4400, 1, 65535);
   const host = env.CONCORD_HOST ?? "127.0.0.1";
+  const urlHost =
+    host === "0.0.0.0" || host === "::"
+      ? "127.0.0.1"
+      : host.includes(":") && !host.startsWith("[")
+        ? `[${host}]`
+        : host;
   // Render names the service's own address in RENDER_EXTERNAL_URL.
-  let publicUrl =
-    env.CONCORD_PUBLIC_URL || env.RENDER_EXTERNAL_URL || `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
+  let publicUrl = env.CONCORD_PUBLIC_URL || env.RENDER_EXTERNAL_URL || `http://${urlHost}:${port}`;
   try {
     publicUrl = new URL(publicUrl).origin;
   } catch {
@@ -162,16 +213,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const config: Config = {
     networks: { mainnet: network("mainnet"), testnet: network("testnet") },
     defaultNetwork,
-    dataDir: resolve(env.CONCORD_DATA_DIR ?? resolve(ROOT, "data")),
+    dataDir: env.CONCORD_DATA_DIR ? resolve(ROOT, env.CONCORD_DATA_DIR) : resolve(ROOT, "data"),
     host,
     port,
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),
-    webDir: resolve(env.CONCORD_WEB_DIR ?? resolve(ROOT, "apps/web/dist")),
+    webDir: env.CONCORD_WEB_DIR ? resolve(ROOT, env.CONCORD_WEB_DIR) : resolve(ROOT, "apps/web/dist"),
     publicUrl,
-    trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0),
+    trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0, 0, 10),
     signup,
-    maxAssetsPerOrg: integer(env, "CONCORD_MAX_ASSETS", 10, 1),
-    ephemeral: env.CONCORD_EPHEMERAL === "1" || env.CONCORD_EPHEMERAL === "true",
+    maxAssetsPerOrg: integer(env, "CONCORD_MAX_ASSETS", 10, 1, 1000),
+    ephemeral: flag(env, "CONCORD_EPHEMERAL", false),
   };
   if (env.CONCORD_PASSWORD_COST) {
     // N:r:p. Each stored hash carries the factors it was made with, so this can change at any time.
@@ -179,6 +230,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const whole = (n: number | undefined, min: number, max: number) => Number.isInteger(n) && n! >= min && n! <= max;
     if (!whole(N, 2 ** 14, 2 ** 20) || (N! & (N! - 1)) !== 0 || !whole(r, 8, 32) || !whole(p, 1, 16)) {
       throw new Error("CONCORD_PASSWORD_COST must be N:r:p, with N a power of two from 16384, r from 8 and p from 1; e.g. 32768:8:3");
+    }
+    const scryptMemoryBytes = 128 * N! * r!;
+    if (scryptMemoryBytes > 128 * 1024 * 1024) {
+      throw new Error("CONCORD_PASSWORD_COST cannot exceed 128 MiB of scrypt memory");
     }
     config.passwordCost = { N: N!, r: r!, p: p! };
   }

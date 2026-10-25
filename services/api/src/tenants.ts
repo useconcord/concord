@@ -51,7 +51,7 @@ export class Tenants {
     const db = this.store.open(orgId);
     const owner = db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'org_id'");
     if (!owner) {
-      db.run("INSERT INTO meta (key, value) VALUES ('org_id', ?)", orgId);
+      db.insert("INSERT INTO meta (key, value) VALUES ('org_id', ?)", orgId);
     } else if (owner.value !== orgId) {
       db.close();
       throw new Error(`the database for workspace ${orgId} belongs to ${owner.value}`);

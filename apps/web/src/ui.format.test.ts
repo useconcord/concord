@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { when } from "./ui";
+import { short, when } from "./ui";
 
 describe("when() UTC table formatting", () => {
   it("returns never for missing timestamps", () => {
@@ -24,5 +24,27 @@ describe("when() UTC table formatting", () => {
 
   it("does not depend on the viewer's timezone", () => {
     expect(when("2026-10-06T00:00:01.000Z")).toBe("2026-10-06 00:00:01 UTC");
+  });
+});
+
+describe("short() address and hash truncation", () => {
+  it("shortens a 56-character G address preserving both ends", () => {
+    expect(short(`GABCD${"Z".repeat(46)}VWXYZ`)).toBe("GABCD…VWXYZ");
+  });
+
+  it("leaves exactly 14 characters unchanged", () => {
+    expect(short("ABCDEFGHIJKLMN")).toBe("ABCDEFGHIJKLMN");
+  });
+
+  it("shortens 15 characters at the boundary", () => {
+    expect(short("ABCDEFGHIJKLMNO")).toBe("ABCDE…KLMNO");
+  });
+
+  it("preserves an empty string", () => {
+    expect(short("")).toBe("");
+  });
+
+  it("truncates multibyte Unicode characters without converting to ASCII", () => {
+    expect(short("αβγδεζηθικλμνξο")).toBe("αβγδε…λμνξο");
   });
 });

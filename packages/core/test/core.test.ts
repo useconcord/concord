@@ -4,11 +4,13 @@ import {
   controlEvents,
   dividendEntitlements,
   formatUnits,
+  mulDiv,
   observeFlows,
   parseCsv,
   parseInstructionsCsv,
   parseJournalCsv,
   parseRegisterCsv,
+  parseRatio,
   parseUnits,
   reconcileDistribution,
   reconcileMovements,
@@ -32,6 +34,68 @@ describe("amounts", () => {
     expect(formatUnits(-1n)).toBe("-0.0000001");
     expect(parseUnits("5.10000000")).toBe(51_000_000n);
   });
+  it.each([
+    ["0", 0n, 1n],
+    ["0.5", 5n, 10n],
+    ["10", 10n, 1n],
+    ["0.0123456789", 123456789n, 10n ** 10n],
+    [" 1 ", 1n, 1n],
+  ])("parses non-negative ratio %j exactly", (raw, num, den) => {
+    expect(parseRatio(raw)).toEqual({ num, den });
+  });
+
+  it.each(["-1", "1e-3", ".5", "1,5", ""])("rejects invalid ratio %j", (raw) => {
+    expect(() => parseRatio(raw)).toThrow(`not a non-negative decimal: "${raw}"`);
+  });
+
+  it.each([
+    ["1,234", 12_340_000_000n],
+    ["12,345,678", 123_456_780_000_000n],
+    ["-1,234.5", -12_345_000_000n],
+  ])("accepts grouped amount %s", (raw, units) => {
+    expect(parseUnits(raw)).toBe(units);
+  });
+
+  it.each(["1,23", "12,3456", "1,50,000", ",5", "1,,000"])(
+    "rejects malformed grouping in %s",
+    (raw) => {
+      expect(() => parseUnits(raw)).toThrow(`not a decimal amount: "${raw}"`);
+    },
+  );
+
+  it.each([
+    [0n, 7, "0"],
+    [1n, 7, "0.0000001"],
+    [-1n, 7, "-0.0000001"],
+    [10_000_000n, 7, "1"],
+    [12_345_678n, 7, "1.2345678"],
+    [5n, 0, "5"],
+    [-5n, 0, "-5"],
+    [1n, 18, "0.000000000000000001"],
+  ])("formats %s units at %i decimals", (units, decimals, expected) => {
+    const formatted = formatUnits(units, decimals);
+    expect(formatted).toBe(expected);
+    expect(formatted).not.toMatch(/\.$|\.\d*0$/);
+  });
+
+  it.each([" 12 ", "\t12\n"])("accepts surrounding whitespace in %j", (value) => {
+    expect(parseUnits(value)).toBe(120_000_000n);
+  });
+
+  it.each(["1 000", "1\u00a0000", "- 5"])("rejects interior whitespace in %j", (value) => {
+    expect(() => parseUnits(value)).toThrow(`not a decimal amount: "${value}"`);
+  });
+
+  it.each([
+    [-1n, 1n, 1n, "mulDiv expects non-negative operands"],
+    [1n, -1n, 1n, "mulDiv expects non-negative operands"],
+    [1n, 1n, 0n, "denominator must be positive"],
+    [1n, 1n, -1n, "denominator must be positive"],
+    [-1n, 1n, 0n, "denominator must be positive"],
+  ])("validates mulDiv operands (%s, %s, %s)", (a, b, den, error) => {
+    expect(() => mulDiv(a, b, den)).toThrow(error);
+  });
+
   it("refuses to round", () => {
     expect(() => parseUnits("0.00000001")).toThrow(/decimal places/);
     expect(() => parseUnits("1e5")).toThrow();
@@ -45,6 +109,33 @@ describe("csv", () => {
       ['x, "y"', "2"],
     ]);
     expect(toCsv(["a", "b"], [{ a: 'x, "y"', b: 2 }])).toBe('a,b\n"x, ""y""",2\n');
+  });
+});
+
+describe("journal column aliases", () => {
+  it("uses legacy from/to values when canonical account cells are blank", () => {
+    const csv = [
+      "ref,date,type,from,from_account,to,to_account,units",
+      "J1,2026-10-01,transfer,GA,,GB,,2",
+      "J2,2026-10-01,transfer,,GC,,GD,3",
+    ].join("\n");
+    const { entries, issues } = parseJournalCsv(csv);
+    expect(issues).toEqual([]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ ref: "J1", from: "GA", to: "GB", units: parseUnits("2") });
+    expect(entries[1]).toMatchObject({ ref: "J2", from: "GC", to: "GD", units: parseUnits("3") });
+  });
+
+  it.each([
+    ["from,to", "GA,GB"],
+    ["from_account,to_account", "GA,GB"],
+  ])("keeps single naming scheme %s working", (headers, accounts) => {
+    const { entries, issues } = parseJournalCsv(
+      `ref,date,type,${headers},units\nJ3,2026-10-01,transfer,${accounts},1\n`,
+    );
+    expect(issues).toEqual([]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ from: "GA", to: "GB", units: parseUnits("1") });
   });
 });
 
@@ -139,6 +230,20 @@ describe("replay", () => {
     expect(() => sortEvents([{ id: "9-1" }, { id: "abc" }])).toThrow(/event id "abc"/);
     expect(() => replay([{ ...ev("mint", 1, { to: "A", amount: u(1) }), id: "1" }])).toThrow(/RPC form/);
   });
+
+  it("reports skipped malformed events missing required addresses", () => {
+    const malformedMint = ev("mint", 1, { amount: u(10) }); // missing 'to'
+    const malformedBurn = ev("burn", 2, { amount: u(5) }); // missing 'from'
+    const malformedTransfer = ev("transfer", 3, { from: "A", amount: u(1) }); // missing 'to'
+    const validMint = ev("mint", 4, { to: "A", amount: u(50) });
+
+    const s = replay([malformedMint, malformedBurn, malformedTransfer, validMint]);
+    expect(s.supply).toBe(u(50));
+    expect(s.balances.get("A")).toBe(u(50));
+    expect(s.eventCount).toBe(1);
+    expect(s.skipped).toHaveLength(3);
+    expect(s.skipped?.map((e) => e.kind)).toEqual(["mint", "burn", "transfer"]);
+  });
 });
 
 describe("position reconciliation", () => {
@@ -157,6 +262,27 @@ describe("position reconciliation", () => {
     expect(r.breaks).toEqual([]);
     expect(r.summary.matchedLines).toBe(3);
     expect(r.lines[0]!.holderIds).toEqual(["H1", "H2"]);
+  });
+
+  it("excludes ignored treasury accounts from registerHolders and chainHolders (#33)", () => {
+    const holdings = replay([
+      ev("mint", 1, { to: "H", amount: u(100) }),
+      ev("mint", 2, { to: "TRE", amount: u(5) }),
+    ]);
+    const { positions, issues } = parseRegisterCsv(
+      "holder_id,account,units\nH1,H,100\nT1,TRE,5\n",
+    );
+    expect(issues).toEqual([]);
+
+    const result = reconcilePositions(holdings, positions, { ignore: ["TRE"] });
+    expect(result.summary.registerHolders).toBe(1);
+    expect(result.summary.chainHolders).toBe(1);
+    expect(result.summary.registerTotal).toBe(u(100));
+    expect(result.breaks).toEqual([]);
+
+    const unfiltered = reconcilePositions(holdings, positions);
+    expect(unfiltered.summary.registerHolders).toBe(2);
+    expect(unfiltered.summary.chainHolders).toBe(2);
   });
 
   it("flags every kind of break", () => {
@@ -279,6 +405,24 @@ describe("corporate actions", () => {
     expect(r.summary.difference).toBe(-172_834n);
   });
 
+  it("validates baseDecimals and payDecimals as integers from 0 to 38", () => {
+    expect(() =>
+      dividendEntitlements(snapshot, {
+        ratePerUnit: "1",
+        baseDecimals: -1,
+        payDecimals: 7,
+      }),
+    ).toThrow("baseDecimals must be an integer from 0 to 38, got -1");
+
+    expect(() =>
+      dividendEntitlements(snapshot, {
+        ratePerUnit: "1",
+        baseDecimals: 7,
+        payDecimals: 1.5,
+      }),
+    ).toThrow("payDecimals must be an integer from 0 to 38, got 1.5");
+  });
+
   it("does not count a payer's transfer to itself as a distribution", () => {
     const cash = [
       ev("transfer", 10, { from: "PAYER", to: "PAYER", amount: u(9) }),
@@ -363,6 +507,17 @@ describe("controls log", () => {
     ev("mint", 2, { to: "A", amount: u(1) }),
   ];
 
+  it("does not treat set_authorized without a flag as a freeze (#42)", () => {
+    const missingFlag = ev("set_authorized", 9, { from: "A" });
+    expect(controlEvents([missingFlag])).toEqual([]);
+    expect(replay([missingFlag]).authorized.has("A")).toBe(false);
+
+    const validFreeze = ev("set_authorized", 10, { from: "A", authorized: false });
+    const validUnfreeze = ev("set_authorized", 11, { from: "A", authorized: true });
+    expect(controlEvents([missingFlag, validFreeze, validUnfreeze]).map((record) => record.type))
+      .toEqual(["freeze", "unfreeze"]);
+  });
+
   it("ties each control to its instruction and flags the rest", () => {
     const { instructions, issues } = parseInstructionsCsv(
       [
@@ -402,6 +557,33 @@ describe("controls log", () => {
     expect(buildControlsLog(events, instructions, options)).toEqual(
       buildControlsLog(events, instructions, options),
     );
+  });
+
+  // #52 — core is documented as reading no clock. The offending
+  // `options.asOf ? … : Date.now()` is already gone and `asOf` is required,
+  // but nothing stopped a clock read from creeping back in. This pins the
+  // invariant across ALL of packages/core/src, not one function's behaviour.
+  it("reads no clock anywhere in packages/core/src (#52)", async () => {
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const srcDir = join(__dirname, "..", "src");
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (/\.(ts|js|mts|mjs)$/.test(entry)) files.push(full);
+      }
+    };
+    walk(srcDir);
+    expect(files.length).toBeGreaterThan(0);
+    const offenders = files.filter((file) => {
+      const source = readFileSync(file, "utf8");
+      // `Date.now()` and a no-argument `new Date()` both read the wall clock;
+      // `new Date(value)` parses its input and stays pure.
+      return /\bDate\.now\s*\(/.test(source) || /\bnew Date\s*\(\s*\)/.test(source);
+    });
+    expect(offenders).toEqual([]);
   });
 
   it("logs unfreeze when an initially frozen account is lifted", () => {

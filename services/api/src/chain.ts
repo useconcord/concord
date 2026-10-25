@@ -1,4 +1,5 @@
 import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
+import { readFileSync } from "node:fs";
 import { Address, Asset, StrKey, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { isEventKind, parseUnits, type AssetEvent, type Opening } from "@concord/core";
 import type { Endpoint, NetworkConfig } from "./config.js";
@@ -6,6 +7,8 @@ import type { Endpoint, NetworkConfig } from "./config.js";
 // Node gives each address family 250ms to connect before trying the next, which fails outright
 // on a slow link.
 setDefaultAutoSelectFamilyAttemptTimeout(5000);
+const PACKAGE_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+const USER_AGENT = `concord/${PACKAGE_VERSION} (+https://github.com/useconcord/concord)`;
 
 export interface EventPage {
   events: AssetEvent[];
@@ -80,7 +83,15 @@ export interface ResolvedAsset {
 /** Accepts CODE:ISSUER for a classic asset or a C... contract id for a SEP-41 token. */
 export function resolveAsset(spec: string, passphrase: string): ResolvedAsset {
   const s = spec.trim();
-  if (StrKey.isValidContract(s)) return { id: s, code: `${s.slice(0, 4)}…${s.slice(-4)}` };
+  if (/^(native|xlm)$/i.test(s)) {
+    return { id: Asset.native().contractId(passphrase), code: "XLM" };
+  }
+  // Stellar strkeys use uppercase base32. Normalize pasted lowercase contract ids,
+  // but leave classic asset codes and issuer validation unchanged.
+  const contract = s.toUpperCase();
+  if (StrKey.isValidContract(contract)) {
+    return { id: contract, code: `${contract.slice(0, 4)}…${contract.slice(-4)}` };
+  }
   const [code, issuer, ...rest] = s.split(":");
   if (!code || !issuer || rest.length || !StrKey.isValidEd25519PublicKey(issuer)) {
     throw new Error(`asset must be CODE:ISSUER or a contract id, got "${spec}"`);
@@ -137,7 +148,7 @@ export function decodeEvent(raw: RawEvent): AssetEvent | undefined {
   }
   // A muxed destination turns the value into a map carrying the amount.
   const amount = typeof value === "object" && value !== null ? (value as { amount?: unknown }).amount : value;
-  if (typeof amount !== "bigint") return undefined;
+  if (typeof amount !== "bigint" || amount < 0n) return undefined;
   event.amount = amount;
   if (kind === "transfer") {
     if (addresses.length < 2) return undefined;
@@ -181,12 +192,17 @@ const ATTEMPTS_PER_ENDPOINT = 2;
 /** Tries at one page of a long read before the whole read is given up. */
 const PAGE_ATTEMPTS = 3;
 const REST_MS = 30_000;
-const MAX_REST_MS = 60_000;
+/** Respect provider rate-limit backoffs, up to fifteen minutes per endpoint. */
+const MAX_REST_MS = 15 * 60_000;
 /** A request is abandoned after this long, however many endpoints remain. */
 const BUDGET_MS = 90_000;
 
 // Provider keys often sit in the URL path, so only the host is ever shown.
 const hostOf = (url: string) => new URL(url).host;
+
+/** Encode all Horizon query values, including asset codes and issuer identifiers. */
+const horizonPath = (path: string, params: Record<string, string>): string =>
+  `${path}?${new URLSearchParams(params).toString()}`;
 
 function retryAfterMs(res: Response, now: number): number {
   const header = res.headers.get("retry-after");
@@ -267,6 +283,8 @@ export class StellarSource implements ChainSource {
   private readonly rpcPool: EndpointPool;
   private readonly horizonPool: EndpointPool;
   private readonly deps: ChainDeps;
+  private headCache?: { head: ChainHead; expiresAt: number };
+  private headInFlight?: Promise<ChainHead>;
 
   constructor(
     private readonly network: NetworkConfig,
@@ -283,7 +301,11 @@ export class StellarSource implements ChainSource {
     try {
       res = await this.deps.fetch(url, {
         ...init,
-        headers: { ...(init.headers as Record<string, string> | undefined), ...endpoint.headers },
+        headers: {
+          "user-agent": this.network.userAgentSuffix ? `${USER_AGENT} ${this.network.userAgentSuffix}` : USER_AGENT,
+          ...(init.headers as Record<string, string> | undefined),
+          ...endpoint.headers,
+        },
         // Covers reading the body too, not just the wait for headers.
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -327,6 +349,9 @@ export class StellarSource implements ChainSource {
       );
       const body = await this.json<{ result?: T; error?: { message: string } }>(res);
       if (body.error) throw new ChainError(`Stellar RPC ${method}: ${body.error.message}`, "rejected");
+      if (body.result === undefined || body.result === null) {
+        throw new ChainError(`Stellar RPC ${method} returned no result`, "rejected");
+      }
       return body.result as T;
     });
   }
@@ -338,7 +363,24 @@ export class StellarSource implements ChainSource {
     });
   }
 
+  /** Reuse the same short-lived chain head across workspaces during a sync pass. */
   async latestLedger(): Promise<ChainHead> {
+    const cached = this.headCache;
+    if (cached && this.deps.now() < cached.expiresAt) return cached.head;
+    if (this.headInFlight) return this.headInFlight;
+    const pending = this.fetchLatestLedger().then((head) => {
+      this.headCache = { head, expiresAt: this.deps.now() + 2_000 };
+      return head;
+    });
+    this.headInFlight = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.headInFlight === pending) this.headInFlight = undefined;
+    }
+  }
+
+  private async fetchLatestLedger(): Promise<ChainHead> {
     const h = await this.rpc<{ latestLedger: number; oldestLedger: number; oldestLedgerCloseTime?: string }>("getHealth");
     if (!Number.isInteger(h?.latestLedger) || !Number.isInteger(h?.oldestLedger)) {
       throw new ChainError("Stellar RPC getHealth did not report its ledger range", "rejected");
@@ -389,7 +431,11 @@ export class StellarSource implements ChainSource {
     return this.horizonPool.run(async (endpoint) => {
       const openings = new Map<string, Opening>();
       let ledger: number | undefined;
-      let path: string | undefined = `/accounts?asset=${code}:${issuer}&limit=200&order=asc`;
+      let path: string | undefined = horizonPath("/accounts", {
+        asset: `${code}:${issuer}`,
+        limit: "200",
+        order: "asc",
+      });
       while (path) {
         const { body, pageLedger } = await this.accountsPage(endpoint, path);
         if (ledger !== undefined && pageLedger < ledger) throw new EndpointFailure("went back in time mid-read");
@@ -434,8 +480,8 @@ export class StellarSource implements ChainSource {
   }
 
   private async horizonAssets(code: string, issuer?: string): Promise<HorizonAsset[]> {
-    const query = `asset_code=${encodeURIComponent(code)}${issuer ? `&asset_issuer=${issuer}` : ""}`;
-    return this.horizon(`/assets?${query}&limit=200`, (body) => {
+    const params = { asset_code: code, ...(issuer ? { asset_issuer: issuer } : {}), limit: "200" };
+    return this.horizon(horizonPath("/assets", params), (body) => {
       const records = (body as { _embedded?: { records?: HorizonAsset[] } })?._embedded?.records;
       if (!Array.isArray(records)) throw new EndpointFailure("unexpected response");
       return records;

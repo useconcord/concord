@@ -32,6 +32,8 @@ export interface HoldingsState {
   eventCount: number;
   /** Holders whose balance went negative: the indexed history is incomplete for them. */
   incomplete: string[];
+  /** Events skipped because required addresses were missing or malformed. */
+  skipped?: AssetEvent[];
 }
 
 interface Effect {
@@ -59,6 +61,20 @@ export function effects(ev: AssetEvent): Effect[] {
   return out;
 }
 
+function isMalformed(ev: AssetEvent): boolean {
+  switch (ev.kind) {
+    case "transfer":
+      return !ev.from || !ev.to;
+    case "mint":
+      return !ev.to;
+    case "burn":
+    case "clawback":
+      return !ev.from;
+    case "set_authorized":
+      return !ev.from || ev.authorized === undefined;
+  }
+}
+
 export function replay(events: AssetEvent[], options: ReplayOptions = {}): HoldingsState {
   const { opening, baselineLedger = 0, upToLedger, upToTime } = options;
   const balances = new Map<string, bigint>();
@@ -72,11 +88,16 @@ export function replay(events: AssetEvent[], options: ReplayOptions = {}): Holdi
   }
   const cutoff = (address: string) => opening?.get(address)?.asOfLedger ?? baselineLedger;
   const negative = new Set<string>();
+  const skipped: AssetEvent[] = [];
   let eventCount = 0;
 
   for (const ev of sortEvents(events)) {
     if (upToLedger !== undefined && ev.ledger > upToLedger) break;
     if (upToTime !== undefined && ev.closedAt > upToTime) break;
+    if (isMalformed(ev)) {
+      skipped.push(ev);
+      continue;
+    }
     let applied = false;
     if (ev.kind === "set_authorized") {
       if (ev.from && ev.authorized !== undefined && ev.ledger > cutoff(ev.from)) {
@@ -104,5 +125,7 @@ export function replay(events: AssetEvent[], options: ReplayOptions = {}): Holdi
     else supply += amount;
   }
   const incomplete = [...negative].filter((a) => (balances.get(a) ?? 0n) < 0n).sort();
-  return { balances, authorized, supply, ledger, eventCount, incomplete };
+  const res: HoldingsState = { balances, authorized, supply, ledger, eventCount, incomplete };
+  if (skipped.length > 0) res.skipped = skipped;
+  return res;
 }

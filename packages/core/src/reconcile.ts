@@ -93,7 +93,7 @@ export function reconcilePositions(
     }
     const entry = byAddress.get(p.account) ?? { units: 0n, holderIds: [], statuses: new Set() };
     entry.units += p.units;
-    entry.holderIds.push(p.holderId);
+    if (!entry.holderIds.includes(p.holderId)) entry.holderIds.push(p.holderId);
     if (p.status) entry.statuses.add(p.status);
     byAddress.set(p.account, entry);
   }
@@ -201,7 +201,7 @@ export function reconcilePositions(
       registerTotal,
       unmappedUnits,
       chainHolders,
-      registerHolders: register.filter((p) => p.units > 0n).length,
+      registerHolders: register.filter((p) => p.units > 0n && (!p.account || !ignore.has(p.account))).length,
       matchedLines: lines.filter((l) => l.matched).length,
       breakCount: breaks.length,
       grossDifference,

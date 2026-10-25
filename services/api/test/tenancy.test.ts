@@ -1,7 +1,10 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { readFileSync as readFixture } from "node:fs";
+import { StrKey } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
 import { StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
@@ -229,8 +232,8 @@ describe("workspace isolation", () => {
     try {
       const alphaDb = tenants.forOrg(alpha).db;
       const betaDb = tenants.forOrg(beta).db;
-      alphaDb.run("INSERT INTO meta (key, value) VALUES ('sample', 'ALPHA ONLY')");
-      betaDb.run("INSERT INTO meta (key, value) VALUES ('sample', 'BETA ONLY')");
+      alphaDb.insert("INSERT INTO meta (key, value) VALUES ('sample', 'ALPHA ONLY')");
+      betaDb.insert("INSERT INTO meta (key, value) VALUES ('sample', 'BETA ONLY')");
 
       // SQLite holds its WAL and shared-memory files while both handles are open.
       expect(files()).toEqual([...paths(alpha), ...paths(beta)].sort());
@@ -557,6 +560,24 @@ describe("Google sign-in", () => {
     expect((await new Client(h.app).call("/api/auth/google/start?link=1")).status).toBe(401);
   });
 
+  it("normalizes long Google names and reports invalid email without a mismatch message", async () => {
+    const renamed = withGoogle(good("longname@example.test", { name: "N".repeat(140) }));
+    const first = new Client(renamed.h.app);
+    const start = await begin(renamed.h, first);
+    renamed.box.nonce = start.nonce;
+    const done = await first.call(`/api/auth/google/callback?code=abc&state=${start.state}`);
+    expect(done.headers.get("location")).toBe(`${ORIGIN}/#/`);
+    const me = await first.json<{ user: { name: string } }>("/api/auth/me");
+    expect(me.user.name).toBe("N".repeat(80));
+
+    const malformed = withGoogle(good("invalid-email", { email: "invalid-email" }));
+    const second = new Client(malformed.h.app);
+    const state = await begin(malformed.h, second);
+    malformed.box.nonce = state.nonce;
+    const failure = await second.call(`/api/auth/google/callback?code=abc&state=${state.state}`);
+    expect(failure.headers.get("location")).toBe(`${ORIGIN}/#/signin?error=google_invalid_email`);
+  });
+
   it("rejects a forged state, a stale token and an unverified address", async () => {
     const forged = withGoogle(good("gail@example.test"));
     const c1 = new Client(forged.h.app);
@@ -639,6 +660,60 @@ describe("networks", () => {
     for (const weak of ["1024:8:1", "20000:8:1", "32768:8", "nope"]) {
       expect(() => loadConfig({ CONCORD_PASSWORD_COST: weak }), weak).toThrow(/CONCORD_PASSWORD_COST/);
     }
+    expect(() => loadConfig({ PORT: "70000" })).toThrow("PORT must be a whole number from 1 to 65535");
+
+    const withHeaders = loadConfig({
+      CONCORD_MAINNET_RPC_URLS: "https://x.example:8443/rpc, https://y.example:8443/rpc, https://z.example/rpc",
+      CONCORD_RPC_HEADERS: JSON.stringify({
+        "x.example": { "x-api-key": "fallback-key" },
+        "y.example": { "x-api-key": "hostname-key" },
+        "y.example:8443": { "x-api-key": "exact-key" },
+        "z.example": { "x-api-key": "standard-key" },
+      }),
+    });
+    expect(withHeaders.networks.mainnet.rpc[0]?.headers).toEqual({ "x-api-key": "fallback-key" });
+    expect(withHeaders.networks.mainnet.rpc[1]?.headers).toEqual({ "x-api-key": "exact-key" });
+    expect(withHeaders.networks.mainnet.rpc[2]?.headers).toEqual({ "x-api-key": "standard-key" });
+    // Node fetch does not support userinfo URLs: fail configuration instead of retrying forever.
+    for (const url of [
+      "https://user:password@rpc.example/secret",
+      "https://user@rpc.example",
+      "https://:password@rpc.example",
+    ]) {
+      expect(() => loadConfig({ CONCORD_MAINNET_RPC_URLS: url })).toThrow(
+        /CONCORD_MAINNET_RPC_URLS must not contain URL credentials; configure Authorization via CONCORD_RPC_HEADERS/,
+      );
+    }
+    expect(() => loadConfig({ CONCORD_TESTNET_HORIZON_URLS: "https://u:p@horizon.example" })).toThrow(
+      /CONCORD_TESTNET_HORIZON_URLS must not contain URL credentials/,
+    );
+    expect(
+      loadConfig({
+        CONCORD_MAINNET_RPC_URLS: "https://rpc.example/secret",
+        CONCORD_RPC_HEADERS: JSON.stringify({ "rpc.example": { Authorization: "Bearer token" } }),
+      }).networks.mainnet.rpc[0]?.headers,
+    ).toEqual({ Authorization: "Bearer token" });
+    for (const truthy of ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"]) {
+      expect(loadConfig({ CONCORD_EPHEMERAL: truthy }).ephemeral, truthy).toBe(true);
+    }
+    for (const falsy of ["0", "false", "FALSE", "False", "no", "NO", "off", "OFF"]) {
+      expect(loadConfig({ CONCORD_EPHEMERAL: falsy }).ephemeral, falsy).toBe(false);
+    }
+    expect(loadConfig({}).ephemeral).toBe(false);
+    for (const junk of ["maybe", "2", "none", "enabled"]) {
+      expect(() => loadConfig({ CONCORD_EPHEMERAL: junk }), junk).toThrow(/CONCORD_EPHEMERAL must be a boolean flag/);
+    }
+    expect(loadConfig({ CONCORD_RPC_HEADERS: '{"mainnet.sorobanrpc.com": {"Authorization": "Bearer token"}}' })).toBeDefined();
+    for (const invalid of [
+      "null",
+      "[]",
+      '{"mainnet.sorobanrpc.com": "Bearer token"}',
+      '{"mainnet.sorobanrpc.com": {"Authorization": 123}}',
+      '{"mainnet.sorobanrpc.com": null}',
+      '{"mainnet.sorobanrpc.com": ["header"]}',
+    ]) {
+      expect(() => loadConfig({ CONCORD_RPC_HEADERS: invalid }), invalid).toThrow(/CONCORD_RPC_HEADERS must be JSON/);
+    }
   });
 });
 
@@ -665,6 +740,52 @@ describe("chain endpoints", () => {
     return { calls, clock, deps };
   }
 
+  it("URL-encodes unusual asset and issuer values in search, describe and baseline", async () => {
+    const code = "A&B?";
+    const issuer = "G?X&Y";
+    const h = "https://horizon.example";
+    const emptyAssets = () => new Response(JSON.stringify({ _embedded: { records: [] } }));
+    const emptyAccounts = () => new Response(JSON.stringify({ _embedded: { records: [] } }), {
+      headers: { "latest-ledger": "42" },
+    });
+    const { calls, deps } = scripted({
+      [`${h}/assets?asset_code=A%26B%3F&limit=200`]: [emptyAssets],
+      [`${h}/assets?asset_code=A%26B%3F&asset_issuer=G%3FX%26Y&limit=200`]: [emptyAssets],
+      [`${h}/accounts?asset=A%26B%3F%3AG%3FX%26Y&limit=200&order=asc`]: [emptyAccounts],
+    });
+    const source = new StellarSource(network(["https://rpc.example"]), deps);
+    expect(await source.search(code)).toEqual([]);
+    expect(await source.describe({ id: "unused", code, issuer })).toBeUndefined();
+    expect(await source.baseline(code, issuer, 7)).toEqual({ ledger: 42, openings: new Map() });
+    expect(calls.map((call) => call.url)).toEqual([
+      `${h}/assets?asset_code=A%26B%3F&limit=200`,
+      `${h}/assets?asset_code=A%26B%3F&asset_issuer=G%3FX%26Y&limit=200`,
+      `${h}/accounts?asset=A%26B%3F%3AG%3FX%26Y&limit=200&order=asc`,
+    ]);
+  });
+
+  it.each([
+    ["600", 600_000],
+    [new Date(1_600_000).toUTCString(), 600_000],
+    ["not-a-retry-time", 30_000],
+    ["3600", 900_000],
+  ])("respects Retry-After %s for %s milliseconds", async (header, delay) => {
+    const url = "https://limited.example";
+    const { calls, clock, deps } = scripted({
+      [url]: [() => new Response("slow down", { status: 429, headers: { "retry-after": header } }), health],
+    });
+    const source = new StellarSource(network([url]), deps);
+    await expect(source.latestLedger()).rejects.toThrow(/rate limited/);
+    await expect(source.latestLedger()).rejects.toThrow(`trying again in ${delay / 1000}s`);
+    expect(calls).toHaveLength(1);
+    clock.value += delay - 1_000;
+    await expect(source.latestLedger()).rejects.toThrow(/not answering/);
+    expect(calls).toHaveLength(1);
+    clock.value += 1_000;
+    await expect(source.latestLedger()).resolves.toMatchObject({ latest: 50 });
+    expect(calls).toHaveLength(2);
+  });
+
   it("moves to the next endpoint when one is rate limited, and rests the first", async () => {
     const a = "https://a.example/secret-key-123";
     const b = "https://b.example";
@@ -676,7 +797,8 @@ describe("chain endpoints", () => {
     expect(await source.latestLedger()).toEqual({ latest: 50, oldest: 10, oldestClosedAt: new Date(1790000000 * 1000).toISOString() });
     expect(calls.map((c) => c.url)).toEqual([a, b]);
     expect(calls[0]!.headers["x-api-key"]).toBe("k");
-    // Still resting: the next call goes straight to the second endpoint.
+    // After the shared getHealth cache expires, the next call skips the resting endpoint.
+    clock.value += 2_001;
     await source.latestLedger();
     expect(calls.map((c) => c.url)).toEqual([a, b, b]);
     clock.value += 41_000;
@@ -715,6 +837,22 @@ describe("chain endpoints", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("produces a descriptive ChainError when RPC returns null or missing result", async () => {
+    const a = "https://a.example";
+    const { deps: nullDeps } = scripted({
+      [a]: [
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: null })),
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: null })),
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1 })),
+      ],
+    });
+    const source = new StellarSource(network([a]), nullDeps);
+    await expect(source.getEvents("C", { startLedger: 1 }, 10)).rejects.toThrow("Stellar RPC getEvents returned no result");
+    await expect(source.latestLedger()).rejects.toThrow("Stellar RPC getHealth returned no result");
+    const contractId = StrKey.encodeContract(Buffer.alloc(32, 1));
+    await expect(source.describe({ id: contractId })).rejects.toThrow("Stellar RPC getLedgerEntries returned no result");
+  });
+
   it("does not rest an endpoint on request faults (400, 404, 422)", async () => {
     const a = "https://a.example";
     const { calls, deps } = scripted({
@@ -736,7 +874,7 @@ describe("chain endpoints", () => {
   it("rests an endpoint on 401/403 with a distinct message", async () => {
     const a = "https://a.example/bad-key";
     const b = "https://b.example";
-    const { calls, deps } = scripted({
+    const { calls, deps, clock } = scripted({
       [a]: [() => new Response("unauthorized", { status: 401 })],
       [b]: [health, health],
     });
@@ -744,7 +882,8 @@ describe("chain endpoints", () => {
     const head = await source.latestLedger();
     expect(head.latest).toBe(50);
     expect(calls.map((c) => c.url)).toEqual([a, b]);
-    // Endpoint `a` is now resting due to bad API key, so next call goes straight to `b`.
+    // Once the brief getHealth cache expires, the bad-key endpoint remains rested.
+    clock.value += 2_001;
     await source.latestLedger();
     expect(calls.map((c) => c.url)).toEqual([a, b, b]);
 
@@ -762,7 +901,7 @@ describe("chain endpoints", () => {
     const line = (balance: string, authorized = true) => ({ asset_code: "FUND", asset_issuer: issuer, balance, is_authorized: authorized });
     const record = (id: string, balance: string) => ({ account_id: id, balances: [line(balance)] });
     const many = Array.from({ length: 199 }, () => record(key(), "1.0000000"));
-    const first = `https://horizon.example/accounts?asset=FUND:${issuer}&limit=200&order=asc`;
+    const first = `https://horizon.example/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`;
     const second = "https://horizon.example/accounts?cursor=abc&limit=200";
     const page = (records: unknown[], ledger: number, next?: string) => () =>
       new Response(JSON.stringify({ _links: next ? { next: { href: next } } : {}, _embedded: { records } }), {
@@ -842,8 +981,8 @@ describe("chain endpoints", () => {
       headers: { "latest-ledger": "100" },
     });
     const s2 = scripted({
-      [`${h1}/accounts?asset=FOO:${issuer}&limit=200&order=asc`]: [badBody],
-      [`${h2}/accounts?asset=FOO:${issuer}&limit=200&order=asc`]: [okAccounts],
+      [`${h1}/accounts?asset=FOO%3A${issuer}&limit=200&order=asc`]: [badBody],
+      [`${h2}/accounts?asset=FOO%3A${issuer}&limit=200&order=asc`]: [okAccounts],
     });
     const src2 = new StellarSource(net, s2.deps);
     const baseRes = await src2.baseline("FOO", issuer, 7);
@@ -912,6 +1051,47 @@ describe("what ships", () => {
     expect(() => new Db(":memory:", [...ORG_MIGRATIONS, "CREATE TABLE broken (x REFERENCES nowhere (y)); INSERT INTO broken VALUES (1);"])).toThrow();
   });
 
+  it("closes failed initialization handles across repeated schema version mismatches", () => {
+    const dir = mkdtempSync(join(tmpdir(), "concord-db-init-"));
+    const file = join(dir, "control.db");
+    try {
+      const seed = new Db(file, []);
+      seed.raw.exec("PRAGMA user_version = 777");
+      seed.close();
+      const fds = () => existsSync("/proc/self/fd") ? readdirSync("/proc/self/fd").length : undefined;
+      const before = fds();
+      for (let i = 0; i < 100; i++) {
+        expect(() => new Db(file, [])).toThrow(/at schema 777/);
+      }
+      const after = fds();
+      // Linux can count open descriptors; tolerate incidental test-runner descriptors.
+      if (before !== undefined && after !== undefined) {
+        expect(after - before).toBeLessThan(10);
+      }
+      const raw = new DatabaseSync(file);
+      raw.exec("PRAGMA user_version = 0");
+      raw.close();
+      const reopened = new Db(file, ["CREATE TABLE recovered (x INTEGER)"]);
+      expect(reopened.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(1);
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("releases database files after a syntax-error migration", () => {
+    const dir = mkdtempSync(join(tmpdir(), "concord-db-migration-"));
+    const file = join(dir, "tenant.db");
+    try {
+      expect(() => new Db(file, ["CREATE TABLE broken ("])).toThrow(/syntax|near|incomplete/i);
+      const reopened = new Db(file, ["CREATE TABLE works (x INTEGER)"]);
+      expect(reopened.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(1);
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not mask the original error when rollback fails in tx and migrate", () => {
     // 1. In migrate: COMMIT inside migration followed by invalid statement
     expect(() => {
@@ -926,6 +1106,16 @@ describe("what ships", () => {
         throw new Error("original failure");
       });
     }).toThrow("original failure");
+  });
+
+  it("treats a second close as a no-op and reports a closed database on later use", () => {
+    const db = new Db(":memory:", ["CREATE TABLE t (k TEXT);"]);
+    db.all("SELECT * FROM t");
+    db.close();
+    expect(() => db.close()).not.toThrow();
+    // The statement above was cached; left in the cache it fails with "statement has been finalized".
+    expect(() => db.all("SELECT * FROM t")).toThrow("database is not open");
+    expect(() => db.tx(() => 1)).toThrow("database is not open");
   });
 
   it("does not serve files reached through encoded dot-dot with immutable caching", async () => {
@@ -1059,4 +1249,73 @@ describe("what ships", () => {
     }
   });
 
+  it("brackets IPv6 hosts and maps :: to 127.0.0.1 for publicUrl", () => {
+    const cfgLoopback = loadConfig({ CONCORD_HOST: "::1", CONCORD_PORT: "4400" });
+    expect(cfgLoopback.publicUrl).toBe("http://[::1]:4400");
+
+    const cfgAny = loadConfig({ CONCORD_HOST: "::", CONCORD_PORT: "4400" });
+    expect(cfgAny.publicUrl).toBe("http://127.0.0.1:4400");
+  });
+  it("serves static files with correct MIME types for Vite assets and falls back to octet-stream", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "concord-mime-"));
+    const dataDir = join(dir, "data");
+    const webDir = join(dir, "web");
+    mkdirSync(dataDir);
+    mkdirSync(webDir);
+
+    const testFiles: Record<string, string> = {
+      "bundle.js.map": "application/json",
+      "manifest.webmanifest": "application/manifest+json",
+      "robots.txt": "text/plain; charset=utf-8",
+      "feed.xml": "application/xml",
+      "module.wasm": "application/wasm",
+      "font.woff": "font/woff",
+      "photo.jpg": "image/jpeg",
+      "photo.jpeg": "image/jpeg",
+      "anim.gif": "image/gif",
+      "pic.webp": "image/webp",
+      "pic.avif": "image/avif",
+      "unknown.xyz": "application/octet-stream",
+    };
+
+    for (const file of Object.keys(testFiles)) {
+      writeFileSync(join(webDir, file), "sample-content");
+    }
+
+    const cfg = loadConfig({
+      CONCORD_DATA_DIR: dataDir,
+      CONCORD_WEB_DIR: webDir,
+      CONCORD_SIGNUP: "open",
+    });
+    const control = new Db(join(dataDir, "control.db"), CONTROL_MIGRATIONS);
+    const auth = new Auth(control, { signup: "open" });
+    const tenants = new Tenants(fileStore(dataDir), {}, () => false, () => []);
+    const runtime = { control, auth, tenants, close: () => { tenants.close(); control.close(); } };
+    const app = createServerApp(runtime, cfg);
+
+    try {
+      for (const [file, expectedMime] of Object.entries(testFiles)) {
+        const res = await app.request(`/${file}`);
+        expect(res.status, file).toBe(200);
+        expect(res.headers.get("content-type"), file).toBe(expectedMime);
+      }
+    } finally {
+      runtime.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Db", () => {
+  it("returns changed-row counts for UPDATE and DELETE, never a stale row id (#79)", () => {
+    const db = new Db(":memory:", ["CREATE TABLE t (k TEXT PRIMARY KEY, v TEXT NOT NULL);"]);
+    expect(db.insert("INSERT INTO t (k, v) VALUES ('a', '1')")).toBe(1);
+    expect(db.insert("INSERT INTO t (k, v) VALUES ('b', '2')")).toBe(2);
+    expect(db.write("UPDATE t SET v = 'x'")).toBe(2);
+    expect(db.write("UPDATE t SET v = 'y' WHERE k = 'missing'")).toBe(0);
+    expect(db.write("DELETE FROM t WHERE k = 'a'")).toBe(1);
+    expect(db.write("DELETE FROM t WHERE k = 'a'")).toBe(0);
+    expect(db.write("INSERT OR IGNORE INTO t (k, v) VALUES ('b', 'dup')")).toBe(0);
+    expect("run" in db).toBe(false);
+  });
 });

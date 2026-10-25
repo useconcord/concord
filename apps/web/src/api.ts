@@ -43,7 +43,12 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     throw new ApiError("The Concord server is not reachable. Check your connection and try again.", 0);
   }
   if (!res.ok) throw await failure(res, "Request failed");
-  return (await res.json()) as T;
+  if (res.status === 204) return undefined as T;
+  try {
+    return (await res.json()) as T;
+  } catch {
+    throw new ApiError("The server sent an unexpected response.", res.status);
+  }
 }
 
 /** Downloads go through fetch so a failure can be shown in place instead of on a blank page. */
@@ -55,8 +60,15 @@ export async function download(path: string, fallbackName: string): Promise<void
   const a = document.createElement("a");
   a.href = url;
   a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
+  document.body.appendChild(a);
+  try {
+    a.click();
+  } finally {
+    a.remove();
+    // Browsers may begin the download asynchronously after the click.
+    // Keep the URL alive long enough for the download to start.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
 }
 
 export type Network = "mainnet" | "testnet";
