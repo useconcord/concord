@@ -40,12 +40,24 @@ const SESSION_IDLE_MS = 7 * DAY;
 const INVITE_LIFE_MS = 7 * DAY;
 const RESET_LIFE_MS = DAY;
 const SEEN_EVERY_MS = 10 * 60_000;
+/** Pending invitations one workspace may hold at once. */
+const DEFAULT_MAX_INVITES = 100;
 
 const WRONG = "Wrong email or password.";
 
 function cleanEmail(input: unknown): string {
   const email = typeof input === "string" ? input.trim().toLowerCase() : "";
-  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Rejected("Enter a valid email address.");
+  const [local = "", domain = "", extra] = email.split("@");
+  const validLocal =
+    local.length <= 64 && /^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/.test(local) && !local.includes("..");
+  const labels = domain.split(".");
+  const validDomain =
+    labels.length >= 2 &&
+    labels.every((label) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label) && label.length <= 63) &&
+    /^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "");
+  if (email.length > 254 || extra !== undefined || !validLocal || !validDomain) {
+    throw new Rejected("Enter a valid email address.");
+  }
   return email;
 }
 
@@ -72,7 +84,7 @@ export class Auth {
 
   constructor(
     private readonly db: Db,
-    private readonly options: { signup: "open" | "code"; cost?: ScryptCost; now?: () => number },
+    private readonly options: { signup: "open" | "code"; cost?: ScryptCost; now?: () => number; maxInvites?: number },
   ) {
     this.cost = options.cost ?? DEFAULT_COST;
     this.now = options.now ?? (() => Date.now());
@@ -82,17 +94,28 @@ export class Auth {
     return new Date(this.now() + offsetMs).toISOString();
   }
 
+  /** Remove abandoned identity records using the same clock as session validation. */
+  purgeExpired(): { sessions: number; invites: number; tokens: number } {
+    const now = this.iso();
+    const idle = this.iso(-SESSION_IDLE_MS);
+    return this.db.tx(() => ({
+      sessions: this.db.write("DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?", now, idle),
+      invites: this.db.write("DELETE FROM invites WHERE expires_at <= ?", now),
+      tokens: this.db.write("DELETE FROM one_time_tokens WHERE expires_at <= ? OR used_at IS NOT NULL", now),
+    }));
+  }
+
   // ── accounts ──────────────────────────────────────────────────────────────
 
   private createOrg(name: string): string {
     const id = newId();
-    this.db.run("INSERT INTO orgs (id, name, created_at) VALUES (?, ?, ?)", id, name, this.iso());
+    this.db.insert("INSERT INTO orgs (id, name, created_at) VALUES (?, ?, ?)", id, name, this.iso());
     return id;
   }
 
   private createUser(email: string, name: string, verified: boolean): string {
     const id = newId();
-    this.db.run(
+    this.db.insert(
       "INSERT INTO users (id, email, name, email_verified, created_at) VALUES (?, ?, ?, ?, ?)",
       id,
       email,
@@ -104,7 +127,7 @@ export class Auth {
   }
 
   private join(orgId: string, userId: string, role: Role): void {
-    this.db.run(
+    this.db.insert(
       "INSERT INTO memberships (org_id, user_id, role, created_at) VALUES (?, ?, ?, ?)",
       orgId,
       userId,
@@ -114,7 +137,7 @@ export class Auth {
   }
 
   private setCredential(userId: string, kind: "password" | "google", subject: string | null, secret: string | null): void {
-    this.db.run(
+    this.db.insert(
       "INSERT OR REPLACE INTO credentials (user_id, kind, subject, secret, updated_at) VALUES (?, ?, ?, ?, ?)",
       userId,
       kind,
@@ -200,7 +223,7 @@ export class Auth {
     const secret = await hashPassword(checkPassword(next, session.user.email), this.cost);
     this.db.tx(() => {
       this.setCredential(session.user.id, "password", null, secret);
-      this.db.run("DELETE FROM sessions WHERE user_id = ? AND id_hash != ?", session.user.id, session.idHash);
+      this.db.write("DELETE FROM sessions WHERE user_id = ? AND id_hash != ?", session.user.id, session.idHash);
     });
   }
 
@@ -218,7 +241,7 @@ export class Auth {
   startSession(userId: string, orgId: string): string {
     const token = newToken();
     this.db.tx(() => {
-      this.db.run(
+      this.db.insert(
         "INSERT INTO sessions (id_hash, user_id, org_id, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
         sha256(token),
         userId,
@@ -227,7 +250,7 @@ export class Auth {
         this.iso(),
         this.iso(SESSION_LIFE_MS),
       );
-      this.db.run("UPDATE users SET last_org_id = ? WHERE id = ?", orgId, userId);
+      this.db.write("UPDATE users SET last_org_id = ? WHERE id = ?", orgId, userId);
     });
     return token;
   }
@@ -257,10 +280,10 @@ export class Auth {
     const at = this.now();
     const seen = Date.parse(row.last_seen_at);
     if (Date.parse(row.expires_at) <= at || seen + SESSION_IDLE_MS <= at) {
-      this.db.run("DELETE FROM sessions WHERE id_hash = ?", idHash);
+      this.db.write("DELETE FROM sessions WHERE id_hash = ?", idHash);
       return undefined;
     }
-    if (seen + SEEN_EVERY_MS <= at) this.db.run("UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?", this.iso(), idHash);
+    if (seen + SEEN_EVERY_MS <= at) this.db.write("UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?", this.iso(), idHash);
     return {
       idHash,
       user: { id: row.user_id, email: row.email, name: row.user_name },
@@ -270,7 +293,7 @@ export class Auth {
   }
 
   endSession(token: string | undefined): void {
-    if (token) this.db.run("DELETE FROM sessions WHERE id_hash = ?", sha256(token));
+    if (token) this.db.write("DELETE FROM sessions WHERE id_hash = ?", sha256(token));
   }
 
   /** Point a session at another workspace its user belongs to. */
@@ -282,8 +305,8 @@ export class Auth {
     );
     if (!member) throw new Forbidden("You are not a member of that workspace.");
     this.db.tx(() => {
-      this.db.run("UPDATE sessions SET org_id = ? WHERE id_hash = ?", String(orgId), session.idHash);
-      this.db.run("UPDATE users SET last_org_id = ? WHERE id = ?", String(orgId), session.user.id);
+      this.db.write("UPDATE sessions SET org_id = ? WHERE id_hash = ?", String(orgId), session.idHash);
+      this.db.write("UPDATE users SET last_org_id = ? WHERE id = ?", String(orgId), session.user.id);
     });
   }
 
@@ -298,6 +321,11 @@ export class Auth {
 
   orgExists(orgId: string): boolean {
     return Boolean(this.db.get("SELECT 1 AS x FROM orgs WHERE id = ?", orgId));
+  }
+
+  /** Cheap liveness check: do not materialize all workspace IDs on each probe. */
+  pingDb(): void {
+    this.db.get("SELECT 1");
   }
 
   orgIds(): string[] {
@@ -322,7 +350,7 @@ export class Auth {
   }
 
   renameOrg(orgId: string, name: unknown): void {
-    this.db.run("UPDATE orgs SET name = ? WHERE id = ?", cleanName(name, "A workspace name"), orgId);
+    this.db.write("UPDATE orgs SET name = ? WHERE id = ?", cleanName(name, "A workspace name"), orgId);
   }
 
   members(orgId: string) {
@@ -341,17 +369,21 @@ export class Auth {
 
   /** Accounts exist to belong to a workspace; one left with none is removed. */
   private dropStranded(): void {
-    this.db.run("DELETE FROM users WHERE id NOT IN (SELECT user_id FROM memberships)");
+    this.db.write("DELETE FROM users WHERE id NOT IN (SELECT user_id FROM memberships)");
   }
 
-  removeMember(orgId: string, userId: string): void {
+  removeMember(orgId: string, userId: string, actorId: string): void {
     this.db.tx(() => {
       const member = this.db.get<{ role: Role }>("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?", orgId, userId);
       if (!member) throw new Rejected("That person is not in this workspace.");
+      if (actorId === userId) {
+        const count = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM memberships WHERE user_id = ?", userId)?.n ?? 0;
+        if (count <= 1) throw new Rejected("You cannot leave your only workspace. Join another first.");
+      }
       if (member.role === "owner" && this.owners(orgId) === 1) {
         throw new Rejected("A workspace needs an owner. Make someone else an owner first, or delete the workspace.");
       }
-      this.db.run("DELETE FROM memberships WHERE org_id = ? AND user_id = ?", orgId, userId);
+      this.db.write("DELETE FROM memberships WHERE org_id = ? AND user_id = ?", orgId, userId);
       this.dropStranded();
     });
   }
@@ -364,14 +396,14 @@ export class Auth {
       if (member.role === "owner" && role === "member" && this.owners(orgId) === 1) {
         throw new Rejected("A workspace needs an owner.");
       }
-      this.db.run("UPDATE memberships SET role = ? WHERE org_id = ? AND user_id = ?", role, orgId, userId);
+      this.db.write("UPDATE memberships SET role = ? WHERE org_id = ? AND user_id = ?", role, orgId, userId);
     });
   }
 
   /** Removes the workspace's identity records. The caller deletes its database file. */
   deleteOrg(orgId: string): void {
     this.db.tx(() => {
-      this.db.run("DELETE FROM orgs WHERE id = ?", orgId);
+      this.db.write("DELETE FROM orgs WHERE id = ?", orgId);
       this.dropStranded();
     });
   }
@@ -390,8 +422,15 @@ export class Auth {
     const id = newId();
     this.db.tx(() => {
       // A fresh link for the same address replaces the one still pending.
-      this.db.run("DELETE FROM invites WHERE org_id = ? AND email = ? AND accepted_at IS NULL", session.org.id, email);
-      this.db.run(
+      this.db.write("DELETE FROM invites WHERE org_id = ? AND email = ? AND accepted_at IS NULL", session.org.id, email);
+      const limit = this.options.maxInvites ?? DEFAULT_MAX_INVITES;
+      const count = this.db.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM invites WHERE org_id = ? AND accepted_at IS NULL AND expires_at > ?",
+        session.org.id,
+        this.iso(),
+      )?.n ?? 0;
+      if (count >= limit) throw new Rejected(`A workspace can have at most ${limit} pending invitations.`);
+      this.db.insert(
         "INSERT INTO invites (id, token_hash, org_id, email, role, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         id,
         sha256(token),
@@ -417,7 +456,7 @@ export class Auth {
   }
 
   revokeInvite(orgId: string, inviteId: string): void {
-    this.db.run("DELETE FROM invites WHERE id = ? AND org_id = ? AND accepted_at IS NULL", inviteId, orgId);
+    this.db.write("DELETE FROM invites WHERE id = ? AND org_id = ? AND accepted_at IS NULL", inviteId, orgId);
   }
 
   private pendingInvite(token: unknown) {
@@ -470,7 +509,7 @@ export class Auth {
   private admit(invite: { id: string; org_id: string; role: Role }, userId: string): void {
     const spent = this.db.write("UPDATE invites SET accepted_at = ? WHERE id = ? AND accepted_at IS NULL", this.iso(), invite.id);
     if (spent === 0) throw new Rejected("This invitation is no longer valid. Ask for a new one.");
-    this.db.run(
+    this.db.write(
       "INSERT OR IGNORE INTO memberships (org_id, user_id, role, created_at) VALUES (?, ?, ?, ?)",
       invite.org_id,
       userId,
@@ -505,7 +544,10 @@ export class Auth {
     if (this.userByEmail(email)) {
       throw new Conflict("An account with this email already exists. Sign in with its password, then connect Google under Settings.");
     }
-    const name = cleanName(profile.name || email.split("@")[0], "Your name");
+    // Google profile names may be longer than our local account-name limit.
+    const fallbackName = email.split("@")[0] ?? "Google user";
+    const displayName = (profile.name || fallbackName).trim().replace(/\s+/g, " ").slice(0, 80);
+    const name = cleanName(displayName || fallbackName.slice(0, 80), "Your name");
     return this.db.tx(() => {
       if (!invited) this.spendSignupCode(context.code);
       const userId = this.createUser(email, name, true);
@@ -531,7 +573,7 @@ export class Auth {
     if (taken && taken.user_id !== userId) throw new Conflict("That Google account is connected to another account.");
     this.db.tx(() => {
       this.setCredential(userId, "google", profile.sub, null);
-      this.db.run("UPDATE users SET email_verified = 1 WHERE id = ?", userId);
+      this.db.write("UPDATE users SET email_verified = 1 WHERE id = ?", userId);
     });
   }
 
@@ -539,7 +581,7 @@ export class Auth {
 
   createSignupCode(note?: string, lifeMs = 14 * DAY): string {
     const code = newToken(12);
-    this.db.run(
+    this.db.insert(
       "INSERT INTO one_time_tokens (token_hash, purpose, note, created_at, expires_at) VALUES (?, 'signup', ?, ?, ?)",
       sha256(code),
       note ?? null,
@@ -554,13 +596,20 @@ export class Auth {
     const user = this.userByEmail(emailInput.trim().toLowerCase());
     if (!user) throw new Rejected(`no account for ${emailInput}`);
     const token = newToken();
-    this.db.run(
-      "INSERT INTO one_time_tokens (token_hash, purpose, user_id, created_at, expires_at) VALUES (?, 'reset', ?, ?, ?)",
-      sha256(token),
-      user.id,
-      this.iso(),
-      this.iso(RESET_LIFE_MS),
-    );
+    this.db.tx(() => {
+      this.db.write(
+        "UPDATE one_time_tokens SET used_at = ? WHERE purpose = 'reset' AND user_id = ? AND used_at IS NULL",
+        this.iso(),
+        user.id,
+      );
+      this.db.insert(
+        "INSERT INTO one_time_tokens (token_hash, purpose, user_id, created_at, expires_at) VALUES (?, 'reset', ?, ?, ?)",
+        sha256(token),
+        user.id,
+        this.iso(),
+        this.iso(RESET_LIFE_MS),
+      );
+    });
     return token;
   }
 
@@ -578,9 +627,13 @@ export class Auth {
     const secret = await hashPassword(checkPassword(password, row.email), this.cost);
     this.db.tx(() => {
       if (!find()) throw new Rejected("This reset link is no longer valid.");
-      this.db.run("UPDATE one_time_tokens SET used_at = ? WHERE token_hash = ?", this.iso(), hash);
+      this.db.write(
+        "UPDATE one_time_tokens SET used_at = ? WHERE purpose = 'reset' AND user_id = ? AND used_at IS NULL",
+        this.iso(),
+        row.user_id,
+      );
       this.setCredential(row.user_id, "password", null, secret);
-      this.db.run("DELETE FROM sessions WHERE user_id = ?", row.user_id);
+      this.db.write("DELETE FROM sessions WHERE user_id = ?", row.user_id);
     });
     return { userId: row.user_id, orgId: this.homeOrg(row.user_id) };
   }

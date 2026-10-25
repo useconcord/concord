@@ -19,8 +19,19 @@ const MIME: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".svg": "image/svg+xml",
   ".json": "application/json",
+  ".map": "application/json",
+  ".webmanifest": "application/manifest+json",
+  ".txt": "text/plain; charset=utf-8",
+  ".xml": "application/xml",
+  ".wasm": "application/wasm",
+  ".woff": "font/woff",
   ".woff2": "font/woff2",
   ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
   ".ico": "image/x-icon",
 };
 
@@ -34,7 +45,7 @@ export interface Runtime {
 /** Identity records, the chain sources for both networks, and the workspaces over them. */
 export function openRuntime(config: Config): Runtime {
   const control = new Db(join(config.dataDir, "control.db"), CONTROL_MIGRATIONS);
-  const auth = new Auth(control, { signup: config.signup, ...(config.passwordCost ? { cost: config.passwordCost } : {}) });
+  const auth = new Auth(control, { signup: config.signup, maxInvites: config.maxInvitesPerOrg, ...(config.passwordCost ? { cost: config.passwordCost } : {}) });
   const networks: Networks = {};
   for (const name of NETWORK_NAMES) {
     networks[name] = { passphrase: config.networks[name].passphrase, chain: new StellarSource(config.networks[name]) };
@@ -106,9 +117,9 @@ export function createServerApp(runtime: Runtime, config: Config): Hono {
     } catch {
       return c.text("Bad request", 400);
     }
-    // Reject paths containing '..' segments after decoding.
+    // Refuse dotfile segments (e.g. /.hidden, /a/.git/config).
     const segments = requested.split("/").filter(Boolean);
-    if (segments.some((s) => s === "..")) {
+    if (segments.some((s) => s.startsWith("."))) {
       return c.text("Not found", 404);
     }
 
@@ -116,8 +127,10 @@ export function createServerApp(runtime: Runtime, config: Config): Hono {
     // The separator matters: without it a sibling directory sharing the prefix would count as inside.
     const inside = path === config.webDir || path.startsWith(config.webDir + sep);
     const found = inside && existsSync(path) && statSync(path).isFile();
-    // A build asset that is not there is a 404; only page routes fall back to the app shell.
-    if (!found && requested.startsWith("/assets/")) return c.text("Not found", 404);
+    // A build asset that is not there, or any missing file with an extension, is a 404; only extensionless routes fall back to the app shell.
+    const lastSegment = segments[segments.length - 1] ?? "";
+    const hasExtension = extname(lastSegment) !== "";
+    if (!found && (hasExtension || requested.startsWith("/assets/"))) return c.text("Not found", 404);
     const file = found ? path : join(config.webDir, "index.html");
     const assetsDir = normalize(join(config.webDir, "assets"));
     const isAsset = found && (path === assetsDir || path.startsWith(assetsDir + sep));
@@ -144,6 +157,19 @@ export function startServer(config: Config = loadConfig()): void {
     }
     if (config.ephemeral) console.warn("CONCORD_EPHEMERAL is set: users are told their data does not survive a restart.");
   });
+
+  // Keep sessions, invitations and one-time tokens bounded even when nobody presents an expired token.
+  const purge = () => {
+    try {
+      const counts = runtime.auth.purgeExpired();
+      if (counts.sessions || counts.invites || counts.tokens) console.log("identity cleanup", counts);
+    } catch (err) {
+      console.error("identity cleanup failed", err);
+    }
+  };
+  purge();
+  const purgeTimer = setInterval(purge, 60 * 60_000);
+  purgeTimer.unref();
 
   let timer: NodeJS.Timeout | undefined;
   if (config.syncIntervalSec > 0) {
@@ -175,6 +201,7 @@ export function startServer(config: Config = loadConfig()): void {
     stopping = true;
     console.log(`${signal}: shutting down`);
     if (timer) clearInterval(timer);
+    clearInterval(purgeTimer);
     server.close(() => {
       runtime.close();
       process.exit(0);

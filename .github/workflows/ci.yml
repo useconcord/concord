@@ -28,10 +28,10 @@ jobs:
           - os: macos-latest
             node: "24.x"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Version comes from "packageManager" in package.json.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -39,6 +39,7 @@ jobs:
       # The API and the dashboard import packages/core from its build output, so build first.
       - run: pnpm build
       - run: pnpm typecheck
+      - run: pnpm lint
       - run: pnpm test
       # Second pass with randomised test order to expose inter-test coupling.
       # Replay a failing seed with: pnpm test --sequence.shuffle --sequence.seed=<seed>
@@ -53,7 +54,7 @@ jobs:
         run: pnpm --filter @concord/api test:coverage
       - name: Upload lcov reports
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: |
@@ -81,7 +82,7 @@ jobs:
         run: pnpm e2e
       - name: Upload Playwright traces
         if: failure() && matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-traces
           path: apps/web/test-results/
@@ -92,9 +93,9 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -112,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build image
         run: docker build -t concord:ci .

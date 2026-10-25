@@ -15,7 +15,8 @@ import { download, type Issue, type Network } from "./api";
 /** The network of whatever is on screen, so explorer links point at the right ledger. */
 export const NetworkContext = createContext<Network>("mainnet");
 
-const explorer = (network: Network) => `https://stellar.expert/explorer/${network === "mainnet" ? "public" : "testnet"}`;
+const explorer = (network: Network) =>
+  `https://stellar.expert/explorer/${network === "mainnet" ? "public" : "testnet"}`;
 
 export function useLoad<T>(load: () => Promise<T>, deps: unknown[]) {
   const [data, setData] = useState<T | undefined>();
@@ -36,7 +37,7 @@ export function useLoad<T>(load: () => Promise<T>, deps: unknown[]) {
     return () => {
       live = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- caller controls invalidation via deps array and reload tick
   }, [...deps, tick]);
   const reload = useCallback(() => setTick((t) => t + 1), []);
   return { data, error, loading, reload };
@@ -53,7 +54,7 @@ export function useAction() {
       await fn();
       return true;
     } catch (e) {
-      setError((e as Error).message);
+      setError(e instanceof Error ? e.message : String(e));
       return false;
     } finally {
       setBusy(false);
@@ -73,9 +74,23 @@ const LOOKS: Record<Variant, string> = {
 const BUTTON =
   "inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded border px-3 text-[13px] font-medium transition-[transform,background-color,opacity] duration-150 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50";
 
-export function Button({ variant = "quiet", busy, className = "", children, disabled, type = "button", ...rest }: ButtonProps) {
+export function Button({
+  variant = "quiet",
+  busy,
+  className = "",
+  children,
+  disabled,
+  type = "button",
+  ...rest
+}: ButtonProps) {
   return (
-    <button {...rest} type={type} disabled={disabled || busy} aria-busy={busy || undefined} className={`${BUTTON} ${LOOKS[variant]} ${className}`}>
+    <button
+      {...rest}
+      type={type}
+      disabled={disabled || busy}
+      aria-busy={busy || undefined}
+      className={`${BUTTON} ${LOOKS[variant]} ${className}`}
+    >
       {children}
     </button>
   );
@@ -125,7 +140,17 @@ export function Segmented<T extends string>({
   );
 }
 
-export function Field({ label, hint, error, children }: { label: string; hint?: string; error?: string; children: ReactNode }) {
+export function Field({
+  label,
+  hint,
+  error,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  error?: string;
+  children: ReactNode;
+}) {
   return (
     <label className="flex flex-col gap-1.5">
       <span className="text-[13px] font-medium">{label}</span>
@@ -148,7 +173,9 @@ const TONES = {
 
 export function Badge({ tone, children }: { tone: keyof typeof TONES; children: ReactNode }) {
   return (
-    <span className={`inline-flex h-5 items-center whitespace-nowrap rounded px-1.5 text-xs font-medium ${TONES[tone]}`}>
+    <span
+      className={`inline-flex h-5 items-center whitespace-nowrap rounded px-1.5 text-xs font-medium ${TONES[tone]}`}
+    >
       {children}
     </span>
   );
@@ -202,7 +229,11 @@ export function Addr({ value }: { value: string | null | undefined }) {
         className="num inline-flex items-center gap-1 rounded hover:text-accent"
       >
         {short(value)}
-        {copied ? <Check size={12} /> : <Copy size={12} className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100" />}
+        {copied ? (
+          <Check size={12} />
+        ) : (
+          <Copy size={12} className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100" />
+        )}
       </button>
       {/^[GC][A-Z2-7]{55}$/.test(value) && (
         <a
@@ -235,6 +266,12 @@ export function Tx({ hash }: { hash: string | null | undefined }) {
       <ArrowSquareOut size={12} />
     </a>
   );
+}
+
+/** Remove redundant fractional zeros without ever altering integer digits. */
+export function trimFractionalZeros(value: string): string {
+  if (!value.includes(".")) return value;
+  return value.replace(/0+$/, "").replace(/\.$/, "") || "0";
 }
 
 export function Units({ value, signed }: { value: string | null | undefined; signed?: boolean }) {
@@ -288,8 +325,8 @@ export function IssueList({ issues, what }: { issues: Issue[]; what: string }) {
         {issues.length} {issues.length === 1 ? "row" : "rows"} of the {what} not loaded
       </summary>
       <ul className="mt-2 flex max-h-56 flex-col gap-1 overflow-y-auto">
-        {issues.map((issue) => (
-          <li key={`${issue.line}-${issue.message}`} className="flex gap-3">
+        {issues.map((issue, index) => (
+          <li key={`${issue.line}-${index}`} className="flex gap-3">
             <span className="num shrink-0">line {issue.line}</span>
             <span>{issue.message}</span>
           </li>
@@ -374,7 +411,9 @@ export function Figures({ items }: { items: Array<{ label: string; value: ReactN
       {items.map((item) => (
         <div key={item.label} className="flex flex-col gap-1 md:px-4 md:first:pl-0">
           <dt className="text-xs text-muted">{item.label}</dt>
-          <dd className={`text-lg font-semibold ${item.tone === "bad" ? "text-bad" : item.tone === "ok" ? "text-ok" : ""}`}>
+          <dd
+            className={`text-lg font-semibold ${item.tone === "bad" ? "text-bad" : item.tone === "ok" ? "text-ok" : ""}`}
+          >
             {item.value}
           </dd>
         </div>

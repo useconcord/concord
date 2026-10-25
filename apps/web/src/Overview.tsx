@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, type AssetSummary, type Candidate, type Network } from "./api";
-import { Addr, Badge, Button, Empty, ErrorNote, Field, Section, StatusBadge, TableWrap, Units, inputClass, useAction, when } from "./ui";
+import { Addr, Badge, Button, Empty, ErrorNote, Field, Section, StatusBadge, TableWrap, Units, inputClass, trimFractionalZeros, useAction, when } from "./ui";
 
 const NETWORK_LABEL: Record<Network, string> = { mainnet: "Mainnet", testnet: "Testnet" };
 const CONTRACT = /^C[A-Z2-7]{55}$/;
@@ -103,7 +103,7 @@ function WatchForm({ network, onDone }: { network: Network; onDone: (id: string)
                       </td>
                       <td className="r num">{c.trustlines.toLocaleString()}</td>
                       <td className="r">
-                        <Units value={c.authorizedUnits.replace(/\.?0+$/, "") || "0"} />
+                        <Units value={trimFractionalZeros(c.authorizedUnits)} />
                       </td>
                       <td>
                         <Flags c={c} />
