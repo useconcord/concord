@@ -107,11 +107,11 @@ repository root, then run `docker compose -f deploy/docker-compose.yml up -d --b
 Concord is a single process with a background indexer and SQLite files, so it needs one
 always-on instance with a local disk. It does not fit serverless hosts. For operational logs, healthchecks, and indexer alerting, see [`docs/monitoring.md`](docs/monitoring.md).
 
-[`render.yaml`](./render.yaml) deploys it to Render's **free** plan for a preview. That plan has
+[`render.yaml`](./render.yaml) deploys it to Render's **free** plan for a preview. For durable deployments, follow the [paid Render disk and migration guide](./docs/deploy/render.md). That plan has
 no persistent disk: every account, upload and sign-off is erased when the service restarts or
 spins down after fifteen idle minutes. `CONCORD_EPHEMERAL=1` makes the dashboard say so on every
 page. For anything people should come back to, use a paid instance with a disk at `/data` (or
-[Fly.io](./docs/deploy/fly.md), or a VPS with [nginx](./docs/deploy/nginx.md) or [systemd](./docs/deploy/systemd.md)) and remove that variable.
+[Fly.io](./docs/deploy/fly.md) with the [single-machine template](./deploy/fly.toml), or a VPS with [nginx](./docs/deploy/nginx.md) or [systemd](./docs/deploy/systemd.md)) and remove that variable.
 
 Before upgrading, read [`docs/versioning.md`](./docs/versioning.md): what a version number
 promises, what counts as breaking for the input files, the audit pack and the database, and why a
@@ -126,7 +126,7 @@ covered in [`docs/upgrading.md`](./docs/upgrading.md).
 |---|---|
 | `packages/core` | The accounting, with no I/O: holdings replay, position and movement reconciliation, entitlements, controls matching |
 | `services/api` | RPC indexer, SQLite stores, accounts and workspaces ([how they are isolated](./docs/tenancy.md)), HTTP API, CLI |
-| `apps/web` | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team |
+| [`apps/web`](./apps/web/README.md) | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team |
 
 The tables in `control.db` and in each workspace database are described in
 [`docs/schema.md`](./docs/schema.md). Core Stellar blockchain concepts (CAP-67, SEP-41, trustlines,
@@ -254,10 +254,10 @@ Contributions are welcome. Start with [`CONTRIBUTING.md`](./CONTRIBUTING.md) for
 rules that matter, [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for how the code fits
 together, [`docs/MAINTAINERS.md`](./docs/MAINTAINERS.md) for triage, merge and release rules, and [`docs/contributing/review-checklist.md`](./docs/contributing/review-checklist.md)
 for what reviewers check on every pull request. Front-end contributors should also read
-[`docs/contributing/web-dev.md`](./docs/contributing/web-dev.md) for running the dashboard locally against testnet or a fake chain.
+[`docs/contributing/web-dev.md`](./docs/contributing/web-dev.md) for running the dashboard locally against testnet or a fake chain. Browser requirements and fallback behaviours are covered in [browser support](./docs/browser-support.md).
 To read the ledger from a new source, see
 [`docs/contributing/chain-source.md`](./docs/contributing/chain-source.md), see [`docs/breaks.md`](./docs/breaks.md) for the break-type glossary, see [`docs/contributing/core-tests.md`](./docs/contributing/core-tests.md) for testing guidelines in `packages/core`, and see [`docs/accessibility.md`](./docs/accessibility.md) for our accessibility statement and conformance goals. To add a column to the register, journal or instructions CSV, see
-[`docs/contributing/csv-column.md`](./docs/contributing/csv-column.md). To add a database migration safely, see [`docs/contributing/migrations.md`](./docs/contributing/migrations.md). Looking for a place to start? See [`docs/contributing/good-first-issues.md`](./docs/contributing/good-first-issues.md) for how issues are labelled. For frequently asked questions, see [`docs/FAQ.md`](./docs/FAQ.md). For why the dashboard uses hash routing and is served from the API's origin, see [`docs/adr/0005-hash-routing-same-origin.md`](./docs/adr/0005-hash-routing-same-origin.md). The security model (trust boundaries, cookies, rate limits, what an operator can see) is in [`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md). Report security problems
+[`docs/contributing/csv-column.md`](./docs/contributing/csv-column.md). To add a database migration safely, see [`docs/contributing/migrations.md`](./docs/contributing/migrations.md). Looking for a place to start? See [`docs/contributing/good-first-issues.md`](./docs/contributing/good-first-issues.md) for how issues are labelled. For frequently asked questions, see [`docs/FAQ.md`](./docs/FAQ.md). For route paths, URL query parameters and safe deep-link sharing, see [dashboard routes](./docs/web-routes.md). For why the dashboard uses hash routing and is served from the API's origin, see [`docs/adr/0005-hash-routing-same-origin.md`](./docs/adr/0005-hash-routing-same-origin.md). The security model (trust boundaries, cookies, rate limits, what an operator can see) is in [`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md). Report security problems
 privately, as described in [`SECURITY.md`](./SECURITY.md).
 Everyone taking part is expected to follow the [Code of Conduct](./CODE_OF_CONDUCT.md).
 

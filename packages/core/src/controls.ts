@@ -49,7 +49,9 @@ export function parseInstructionsCsv(
       };
       if (type === "clawback") {
         if (!values.units) throw new Error("clawback needs units");
-        instruction.units = parseUnits(values.units, decimals);
+        const units = parseUnits(values.units, decimals);
+        if (units <= 0n) throw new Error("clawback units must be greater than zero");
+        instruction.units = units;
       }
       if (values.approved_by) instruction.approvedBy = values.approved_by;
       if (values.reason) instruction.reason = values.reason;
@@ -73,7 +75,7 @@ export interface ControlRecord {
   instruction?: Instruction;
 }
 
-export type ControlBreakType = "UNINSTRUCTED_CONTROL" | "UNEXECUTED_INSTRUCTION";
+export type ControlBreakType = "UNINSTRUCTED_CONTROL" | "UNEXECUTED_INSTRUCTION" | "LATE_INSTRUCTION";
 
 export interface ControlBreak {
   type: ControlBreakType;
@@ -129,7 +131,7 @@ export function controlEvents(
     const base = { eventId: ev.id, account: ev.from, ledger: ev.ledger, closedAt: ev.closedAt, txHash: ev.txHash };
     if (ev.kind === "clawback") {
       out.push({ ...base, type: "clawback", units: ev.amount });
-    } else if (ev.kind === "set_authorized") {
+    } else if (ev.kind === "set_authorized" && ev.authorized !== undefined) {
       if (ev.authorized) {
         out.push({ ...base, type: frozen.has(ev.from) ? "unfreeze" : "authorize" });
         frozen.delete(ev.from);
@@ -163,6 +165,7 @@ export function buildControlsLog(
   const used = new Set<string>();
   const breaks: ControlBreak[] = [];
 
+  const unmatched: ControlRecord[] = [];
   for (const record of records) {
     const t = Date.parse(record.closedAt);
     const hit = ordered.find((i) => {
@@ -173,6 +176,39 @@ export function buildControlsLog(
     if (hit) {
       used.add(hit.ref);
       record.instruction = hit;
+    } else {
+      unmatched.push(record);
+    }
+  }
+
+  // Late pairing runs only after every on-time match has been made, so an
+  // instruction that properly covers a later event is never stolen by an
+  // earlier one as "late". A compatible instruction written after the event is
+  // one real-world action with a backdated paper trail — reporting it as
+  // UNINSTRUCTED_CONTROL now and UNEXECUTED_INSTRUCTION when its window ends
+  // described that single action as two unrelated breaks. The pairing is
+  // bounded by the same execution window on the other side of the event: a
+  // compatible instruction months later is not a backdated approval of this
+  // event, and both findings stand on their own.
+  for (const record of unmatched) {
+    const t = Date.parse(record.closedAt);
+    const late = ordered.find((i) => {
+      if (used.has(i.ref) || !compatible(record, i)) return false;
+      const issued = Date.parse(i.issuedAt);
+      return issued > t && issued - t <= windowMs;
+    });
+    if (late) {
+      used.add(late.ref);
+      breaks.push({
+        type: "LATE_INSTRUCTION",
+        severity: "high",
+        key: `LATE_INSTRUCTION:${record.eventId}`,
+        address: record.account,
+        ref: late.ref,
+        eventId: record.eventId,
+        txHash: record.txHash,
+        message: `Instruction ${late.ref} (${late.type}) was issued after the on-chain ${record.type} it describes`,
+      });
     } else {
       breaks.push({
         type: "UNINSTRUCTED_CONTROL",
