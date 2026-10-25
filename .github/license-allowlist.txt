@@ -6,3 +6,5 @@ Apache-2.0
 BSD-2-Clause
 BSD-3-Clause
 0BSD
+# Data licence of caniuse-lite, the browser-support tables browserslist reads at build time.
+CC-BY-4.0
