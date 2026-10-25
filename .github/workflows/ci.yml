@@ -39,47 +39,6 @@ jobs:
       # The API and the dashboard import packages/core from its build output, so build first.
       - run: pnpm build
 
-  audit:
-    name: dependency audit and license check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Vulnerability audit (production dependencies)
-        continue-on-error: ${{ github.event_name != 'push' }}
-        run: pnpm audit --prod --audit-level high
-      - name: License allow-list check
-        continue-on-error: ${{ github.event_name != 'push' }}
-        run: |
-          allow_file=.github/license-allowlist.txt
-          status=0
-          pnpm licenses list --prod --json > licenses.json
-          node -e '
-            const fs = require("fs");
-            const allowed = new Set(
-              fs.readFileSync(process.argv[1], "utf8")
-                .split("\n").map(l => l.trim())
-                .filter(l => l && !l.startsWith("#"))
-            );
-            const data = JSON.parse(fs.readFileSync("licenses.json", "utf8"));
-            let bad = 0;
-            for (const [license, pkgs] of Object.entries(data)) {
-              const parts = license.split(/\s+(?:OR|AND)\s+|\s*\/\s*/i).map(p => p.replace(/[()]/g, "").trim());
-              if (parts.some(p => allowed.has(p))) continue;
-              for (const pkg of pkgs) {
-                bad++;
-                console.log(`DISALLOWED license "${license}": ${pkg.name}@${pkg.versions?.join(",") ?? ""} (${pkg.paths?.join(", ") ?? "path unknown"})`);
-              }
-            }
-            if (bad) { console.error(`${bad} package(s) with licenses not on the allow-list`); process.exit(1); }
-          ' "$allow_file" || status=$?
-          exit $status
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
@@ -131,6 +90,53 @@ jobs:
           if-no-files-found: ignore
 
 # Advisory: reports numbers, never fails the build.
+  # Advisory on pull requests, blocking on main. Production dependencies only.
+  audit:
+    name: dependency audit and license check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # Version comes from "packageManager" in package.json.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Vulnerability audit (production dependencies)
+        continue-on-error: ${{ github.event_name != 'push' }}
+        run: pnpm audit --prod --audit-level high
+      - name: License allow-list check
+        continue-on-error: ${{ github.event_name != 'push' }}
+        env:
+          ALLOWLIST: .github/license-allowlist.txt
+        run: |
+          pnpm licenses list --prod --json > "$RUNNER_TEMP/licenses.json"
+          node -e '
+            const fs = require("fs");
+            const allowed = new Set(
+              fs.readFileSync(process.env.ALLOWLIST, "utf8")
+                .split("\n").map((l) => l.trim())
+                .filter((l) => l && !l.startsWith("#")),
+            );
+            const data = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/licenses.json", "utf8"));
+            let bad = 0;
+            for (const [license, pkgs] of Object.entries(data)) {
+              // "(MIT OR Apache-2.0)" is fine when any one option is allowed.
+              const options = license.split(/\s+(?:OR|AND)\s+|\s*\/\s*/i).map((p) => p.replace(/[()]/g, "").trim());
+              if (options.some((o) => allowed.has(o))) continue;
+              for (const pkg of pkgs) {
+                bad++;
+                console.log(`DISALLOWED license "${license}": ${pkg.name}@${(pkg.versions ?? []).join(",")} (${(pkg.paths ?? []).join(", ") || "path unknown"})`);
+              }
+            }
+            if (bad) {
+              console.error(`${bad} package(s) with licenses that are not in ${process.env.ALLOWLIST}`);
+              process.exit(1);
+            }
+          '
+
   bench:
     runs-on: ubuntu-latest
     continue-on-error: true
