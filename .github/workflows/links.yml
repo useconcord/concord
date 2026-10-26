@@ -64,7 +64,7 @@ jobs:
 
       - name: Open issue on failure
         if: steps.lychee.outputs.exit_code != 0
-        uses: peter-evans/create-issue-from-file@v5
+        uses: peter-evans/create-issue-from-file@v6
         with:
           title: "Dead links detected (weekly link check)"
           content-filepath: /tmp/lychee-full.md
