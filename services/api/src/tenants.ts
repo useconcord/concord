@@ -10,10 +10,16 @@ export interface OrgStore {
   remove(orgId: string): void;
 }
 
-export function fileStore(dataDir: string): OrgStore {
+export function fileStore(dataDir: string, options: { checkOnOpen?: boolean } = {}): OrgStore {
   const path = (orgId: string) => join(dataDir, "orgs", `${orgId}.db`);
   return {
-    open: (orgId) => new Db(path(orgId), ORG_MIGRATIONS),
+    open: (orgId) => {
+      const db = new Db(path(orgId), ORG_MIGRATIONS);
+      if (options.checkOnOpen) {
+        try { db.check(); } catch (err) { db.close(); throw err; }
+      }
+      return db;
+    },
     remove: (orgId) => {
       for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path(orgId)}${suffix}`, { force: true });
     },

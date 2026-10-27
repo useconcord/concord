@@ -29,7 +29,7 @@ export class Db {
       } catch {
         // Preserve the initialization error, even if closing the broken handle also fails.
       }
-      throw err;
+      throw new Error("failed to initialize database " + this.path + ": " + (err as Error).message, { cause: err });
     }
   }
 
@@ -68,6 +68,20 @@ export class Db {
         }
         throw err;
       }
+    }
+  }
+
+  /** Report corrupt pages and foreign-key problems with the database filename. */
+  check(): void {
+    try {
+      const rows = this.raw.prepare("PRAGMA quick_check").all() as Array<{ quick_check: string }>;
+      if (!rows.length || rows.some((row) => row.quick_check !== "ok")) {
+        throw new Error(rows.map((row) => row.quick_check).join("; ") || "quick_check returned no result");
+      }
+      const foreign = this.raw.prepare("PRAGMA foreign_key_check").all();
+      if (foreign.length) throw new Error("foreign_key_check found " + foreign.length + " violations");
+    } catch (err) {
+      throw new Error("database integrity check failed for " + this.path + ": " + (err as Error).message, { cause: err });
     }
   }
 
