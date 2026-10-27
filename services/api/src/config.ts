@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 
 export type NetworkName = "mainnet" | "testnet";
 export const NETWORK_NAMES: readonly NetworkName[] = ["mainnet", "testnet"];
@@ -81,10 +82,10 @@ const RETIRED: Record<string, string> = {
 /** Recognized runtime settings, including the CLI-only workspace selector. */
 const KNOWN_CONCORD_SETTINGS = [
   "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
-  "CONCORD_GOOGLE_CLIENT_ID", "CONCORD_GOOGLE_CLIENT_SECRET", "CONCORD_HOST",
+  "CONCORD_GOOGLE_CLIENT_ID", "CONCORD_GOOGLE_CLIENT_SECRET", "CONCORD_GOOGLE_CLIENT_SECRET_FILE", "CONCORD_HOST",
   "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
   "CONCORD_MAX_ASSETS", "CONCORD_MAX_INVITES", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
-  "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS",
+  "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS", "CONCORD_RPC_HEADERS_FILE",
   "CONCORD_SIGNUP", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
   "CONCORD_TESTNET_RPC_URLS", "CONCORD_TRUST_PROXY", "CONCORD_USER_AGENT_SUFFIX", "CONCORD_WEB_DIR",
 ] as const;
@@ -111,6 +112,22 @@ function warnUnknownSettings(env: NodeJS.ProcessEnv, warn: (message: string) => 
     })).sort((a, b) => a.distance - b.distance)[0];
     const suggestion = closest && closest.distance <= 4 ? `; did you mean ${closest.candidate}?` : "";
     warn(`Unknown Concord setting ${name}${suggestion}`);
+  }
+}
+
+/** Secrets may be provided by mounted files instead of process environment values. */
+function secretValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const direct = env[name];
+  const filePath = env[`${name}_FILE`];
+  if (direct !== undefined && filePath !== undefined) {
+    throw new Error(`Set either ${name} or ${name}_FILE, not both`);
+  }
+  if (filePath === undefined) return direct;
+  if (!filePath) throw new Error(`${name}_FILE must be a readable file path`);
+  try {
+    return readFileSync(filePath, "utf8").replace(/\r?\n$/, "");
+  } catch {
+    throw new Error(`${name}_FILE could not be read`);
   }
 }
 
@@ -192,10 +209,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
     throw new Error("CONCORD_USER_AGENT_SUFFIX must be at most 120 printable ASCII characters");
   }
 
+  const rpcHeaders = secretValue(env, "CONCORD_RPC_HEADERS");
   let headers: Record<string, Record<string, string>> = {};
-  if (env.CONCORD_RPC_HEADERS) {
+  if (rpcHeaders) {
     try {
-      const parsed = JSON.parse(env.CONCORD_RPC_HEADERS);
+      const parsed = JSON.parse(rpcHeaders);
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new Error();
       }
@@ -293,7 +311,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
     config.passwordCost = { N: N!, r: r!, p: p! };
   }
   const clientId = env.CONCORD_GOOGLE_CLIENT_ID;
-  const clientSecret = env.CONCORD_GOOGLE_CLIENT_SECRET;
+  const clientSecret = secretValue(env, "CONCORD_GOOGLE_CLIENT_SECRET");
   if (clientId || clientSecret) {
     if (!clientId || !clientSecret) {
       throw new Error("set both CONCORD_GOOGLE_CLIENT_ID and CONCORD_GOOGLE_CLIENT_SECRET, or neither");
