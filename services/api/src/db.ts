@@ -77,12 +77,16 @@ export class Db {
   }
 
   private readonly statements = new Map<string, StatementSync>();
+  private static readonly STATEMENT_CACHE_LIMIT = 200;
 
   private prepare(sql: string): StatementSync {
     let statement = this.statements.get(sql);
-    if (!statement) {
-      statement = this.raw.prepare(sql);
-      this.statements.set(sql, statement);
+    if (statement) this.statements.delete(sql); // Refresh its LRU position.
+    else statement = this.raw.prepare(sql);
+    this.statements.set(sql, statement);
+    if (this.statements.size > Db.STATEMENT_CACHE_LIMIT) {
+      const oldest = this.statements.keys().next().value;
+      if (oldest !== undefined) this.statements.delete(oldest);
     }
     return statement;
   }
