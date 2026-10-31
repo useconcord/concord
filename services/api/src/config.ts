@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { SqliteSynchronous } from "./db.js";
 
 export type NetworkName = "mainnet" | "testnet";
 export const NETWORK_NAMES: readonly NetworkName[] = ["mainnet", "testnet"];
@@ -48,6 +49,7 @@ export interface Config {
   defaultNetwork: NetworkName;
   /** Holds control.db and one database per workspace under orgs/. */
   dataDir: string;
+  sqliteSynchronous: SqliteSynchronous;
   host: string;
   port: number;
   /** Seconds between indexer passes. 0 disables the background indexer. */
@@ -85,7 +87,7 @@ const KNOWN_CONCORD_SETTINGS = [
   "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
   "CONCORD_MAX_ASSETS", "CONCORD_MAX_INVITES", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
   "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS",
-  "CONCORD_SIGNUP", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
+  "CONCORD_SIGNUP", "CONCORD_SQLITE_SYNCHRONOUS", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
   "CONCORD_TESTNET_RPC_URLS", "CONCORD_TRUST_PROXY", "CONCORD_USER_AGENT_SUFFIX", "CONCORD_WEB_DIR",
 ] as const;
 const KNOWN_SETTINGS = new Set<string>(KNOWN_CONCORD_SETTINGS);
@@ -264,10 +266,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
   }
   publicUrl = parsedPublicUrl.origin;
 
+  const sqliteSynchronous = env.CONCORD_SQLITE_SYNCHRONOUS ?? "normal";
+  if (sqliteSynchronous !== "normal" && sqliteSynchronous !== "full") {
+    throw new Error("CONCORD_SQLITE_SYNCHRONOUS must be normal or full");
+  }
+
   const config: Config = {
     networks: { mainnet: network("mainnet"), testnet: network("testnet") },
     defaultNetwork,
     dataDir: env.CONCORD_DATA_DIR ? resolve(ROOT, env.CONCORD_DATA_DIR) : resolve(ROOT, "data"),
+    sqliteSynchronous,
     host,
     port,
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),
