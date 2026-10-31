@@ -155,6 +155,10 @@ CREATE INDEX break_note_history_key ON break_note_history (asset_id, scope, key,
 INSERT INTO break_note_history (asset_id, scope, key, fingerprint, status, note, author, author_id, at)
   SELECT asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at FROM break_notes;
 `,
+  // v3: keep the recurring reconcileDue search off reconciled action rows.
+  `
+CREATE INDEX actions_due ON actions (record_time) WHERE snapshot IS NULL;
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */

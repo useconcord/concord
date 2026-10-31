@@ -60,6 +60,11 @@ build(join(outDir, "org-v2.db"), ORG_MIGRATIONS.slice(0, 2), (db) => {
            ('usd-mainnet', 'recon', 'SUPPLY_MISMATCH', '10|12', 'resolved', 'corrected', 'bob', 'u2', '2024-01-05T00:00:00Z')`);
 });
 
+// Freeze the v3 schema for future upgrade-compatibility checks.
+build(join(outDir, "org-v3.db"), ORG_MIGRATIONS.slice(0, 3), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v3')");
+});
+
 build(join(outDir, "control-v1.db"), CONTROL_MIGRATIONS.slice(0, 1), (db) => {
   db.exec(`INSERT INTO users (id, email, name, email_verified, created_at)
     VALUES ('u1', 'alice@example.org', 'Alice', 1, '2024-01-01T00:00:00Z')`);
