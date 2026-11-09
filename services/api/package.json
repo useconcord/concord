@@ -19,9 +19,9 @@
   },
   "dependencies": {
     "@concord/core": "workspace:*",
-    "@hono/node-server": "^2.1.5",
-    "@stellar/stellar-sdk": "^17.1.0",
-    "hono": "^4.13.0"
+    "@hono/node-server": "^2.1.6",
+    "@stellar/stellar-sdk": "^17.4.0",
+    "hono": "^4.13.16"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
