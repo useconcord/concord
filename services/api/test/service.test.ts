@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
-import { nativeToScVal } from "@stellar/stellar-sdk";
+import { StrKey, nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
@@ -1058,6 +1058,58 @@ describe("Concord", () => {
       concord.watchAsset({ network: "testnet", asset: contractId, decimals: 19, fromLedger: 1 }),
     ).rejects.toThrow(new Invalid("decimals must be 0 to 18"));
   });
+
+  // What the ledger states about the asset, what the caller gives, and what is stored or why not.
+  const NOT_STATED = "this token does not state its decimals; give them when watching it";
+  const OUT_OF_RANGE = "decimals must be 0 to 18";
+  const CLASSIC_SEVEN = "classic assets always carry 7 decimals";
+  const decimalsCases: Array<{
+    kind: "contract token" | "classic asset";
+    stated?: number;
+    given?: number;
+    stored?: number;
+    refused?: string;
+  }> = [
+    { kind: "contract token", given: undefined, refused: NOT_STATED },
+    { kind: "contract token", given: 0, stored: 0 },
+    { kind: "contract token", given: 18, stored: 18 },
+    { kind: "contract token", given: 19, refused: OUT_OF_RANGE },
+    { kind: "contract token", given: -1, refused: OUT_OF_RANGE },
+    { kind: "contract token", given: 1.5, refused: OUT_OF_RANGE },
+    { kind: "contract token", given: Number.NaN, refused: OUT_OF_RANGE },
+    // A token that states its decimals needs none given, and is held to the same range.
+    { kind: "contract token", stated: 6, stored: 6 },
+    { kind: "contract token", stated: 19, refused: OUT_OF_RANGE },
+    // A classic asset carries seven by protocol. The caller may say so, but may not override it.
+    { kind: "classic asset", given: undefined, stored: 7 },
+    { kind: "classic asset", given: 7, stored: 7 },
+    { kind: "classic asset", given: 3, refused: CLASSIC_SEVEN },
+  ];
+
+  for (const { kind, stated, given, stored, refused } of decimalsCases) {
+    const subject = kind === "classic asset" ? kind : `${kind} that states ${stated ?? "no"} decimals`;
+    const outcome = refused === undefined ? `stores ${stored}` : `is refused: ${refused}`;
+    it(`watching a ${subject}, given ${given ?? "none"}, ${outcome}`, async () => {
+      const asset = kind === "classic asset" ? `DEC:${key()}` : StrKey.encodeContract(Buffer.alloc(32, 5));
+      chain.describe = async () => (stated === undefined ? { name: "Token" } : { name: "Token", decimals: stated });
+      const assetRows = () => concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM assets")!.n;
+      const before = assetRows();
+      const watch = () => concord.watchAsset({ network: "testnet", asset, decimals: given, fromLedger: 1 });
+
+      if (refused === undefined) {
+        const watched = await watch();
+        expect(watched.decimals).toBe(stored);
+        const row = concord.db.get<{ decimals: number }>("SELECT decimals FROM assets WHERE id = ?", watched.id);
+        expect(row!.decimals).toBe(stored);
+      } else {
+        const error = await watch().catch((err: unknown) => err);
+        expect(error).toBeInstanceOf(Invalid);
+        expect((error as Error).message).toBe(refused);
+        // A refused watch leaves no row behind.
+        expect(assetRows()).toBe(before);
+      }
+    });
+  }
 
   it("validates Stellar addresses in ignore and exclude lists", async () => {
     const validG = key();
