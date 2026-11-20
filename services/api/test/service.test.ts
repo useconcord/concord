@@ -968,6 +968,124 @@ describe("Concord", () => {
     expect(concord.registers("FUND").map((r) => r.id)).toEqual([reg.registerId]);
   });
 
+  /** How an asset's history begins, as stored. */
+  const startColumns = (id: string) => ({
+    ...concord.db.get("SELECT start_mode, start_ledger, baseline_ledger, state FROM assets WHERE id = ?", id),
+  });
+
+  it("rebuild moves an asset watched from a named ledger over to opening balances", async () => {
+    expect(startColumns(assetId)).toEqual({ start_mode: "ledger", start_ledger: 1, baseline_ledger: null, state: "ready" });
+    chain.latest = 300;
+    chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
+    await concord.rebuild("FUND");
+    expect(startColumns(assetId)).toEqual({
+      start_mode: "baseline",
+      start_ledger: 251,
+      baseline_ledger: 250,
+      state: "ready",
+    });
+  });
+
+  it("rebuild gives a contract token a fresh window, and never opening balances", async () => {
+    const contractId = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+    await concord.watchAsset({ network: "testnet", asset: contractId, decimals: 7, fromLedger: 5 });
+    expect(startColumns(contractId)).toEqual({ start_mode: "ledger", start_ledger: 5, baseline_ledger: null, state: "ready" });
+    // Opening balances are on offer, and are not for this asset: it has no issuer to ask about.
+    chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
+    chain.oldest = 100;
+    chain.latest = 500;
+    await concord.rebuild(contractId);
+    // Twenty ledgers in from the oldest the RPC holds, as when a window asset is first watched.
+    expect(startColumns(contractId)).toEqual({
+      start_mode: "window",
+      start_ledger: 120,
+      baseline_ledger: null,
+      state: "ready",
+    });
+    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM openings WHERE asset_id = ?", contractId)!.n).toBe(0);
+  });
+
+  it("a deferred rebuild clears the indexed history and its error at once, and keeps every book", async () => {
+    // FUND on opening balances taken at ledger 250, then a movement once the chain has moved on.
+    chain.latest = 300;
+    chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
+    await concord.rebuild("FUND");
+    chain.latest = 320;
+    chain.push(assetId, "transfer", 310, { from: h1, to: h2, amount: u(2) });
+    // Every kind of book against it (reconciling indexes the transfer), and a failure on record.
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(315) });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    concord.importJournal("FUND", `ref,date,type,from_account,to_account,units\nJ1,${at(310)},transfer,${h1},${h2},2\n`);
+    concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI1,freeze,${h2},,${at(312)}\n`);
+    await concord.createAction("FUND", { type: "split", recordTime: at(312), num: "2", den: "1" });
+    const brk = run.breaks[0]!;
+    concord.setNote("FUND", "recon", brk.key, { fingerprint: brk.fingerprint, status: "resolved", note: "x" });
+    concord.db.write("UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?", "connection reset", at(316), assetId);
+
+    const rows = (table: string) => concord.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`)!.n;
+    const books = ["registers", "register_positions", "journal", "instructions", "runs", "actions", "break_notes", "break_note_history"];
+    const bookRows = () => Object.fromEntries(books.map((table) => [table, rows(table)]));
+    const before = bookRows();
+    expect(Object.values(before).every((n) => n > 0), JSON.stringify(before)).toBe(true);
+    expect([rows("events"), rows("openings")]).toEqual([1, 1]);
+    expect(concord.asset("FUND")).toMatchObject({
+      cursor: expect.any(String),
+      syncError: "connection reset",
+      syncedLedger: 320,
+      baselineLedger: 250,
+    });
+
+    // A blocking rebuild re-reads the chain before it returns, so what it cleared is never seen.
+    // Hold the chain instead: the deferred pass cannot start, and the cleared row stays put.
+    chain.baselineResult = {
+      ledger: 318,
+      openings: new Map([
+        [h1, { amount: u(40), asOfLedger: 318 }],
+        [h2, { amount: u(2), asOfLedger: 318 }],
+      ]),
+    };
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const latestLedger = chain.latestLedger.bind(chain);
+    chain.latestLedger = async () => {
+      await held;
+      return latestLedger();
+    };
+
+    const cleared = await concord.rebuild("FUND", { defer: true });
+    expect(cleared).toMatchObject({ state: "indexing", startMode: "baseline" });
+    expect(cleared.cursor).toBeUndefined();
+    expect(cleared.syncError).toBeUndefined();
+    const row = concord.db.get(
+      `SELECT state, start_mode, start_ledger, baseline_ledger, history_from, cursor, synced_ledger, synced_at,
+         sync_error, sync_error_at FROM assets WHERE id = ?`,
+      assetId,
+    );
+    expect({ ...row }).toEqual({
+      state: "indexing",
+      start_mode: "baseline",
+      start_ledger: null,
+      baseline_ledger: null,
+      history_from: null,
+      cursor: null,
+      synced_ledger: null,
+      synced_at: null,
+      sync_error: null,
+      sync_error_at: null,
+    });
+    expect([rows("events"), rows("openings")]).toEqual([0, 0]);
+    expect(bookRows()).toEqual(before);
+
+    // Let the deferred pass go and wait for it: sync() hands back the pass already in flight.
+    release();
+    await concord.sync("FUND");
+    expect(startColumns(assetId)).toEqual({ start_mode: "baseline", start_ledger: 319, baseline_ledger: 318, state: "ready" });
+    expect(concord.asset("FUND")).toMatchObject({ syncedLedger: 320, cursor: expect.any(String) });
+    expect(concord.asset("FUND").syncError).toBeUndefined();
+    expect([rows("events"), rows("openings")]).toEqual([0, 2]);
+    expect(bookRows()).toEqual(before);
+  });
+
   it("advances a scheduled action once the chain passes its record time", async () => {
     const action = await concord.createAction("FUND", { type: "redemption", recordTime: at(150), num: "1", den: "1" });
     expect(action.state).toBe("scheduled");
