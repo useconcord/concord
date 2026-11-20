@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { nativeToScVal } from "@stellar/stellar-sdk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
@@ -476,6 +476,78 @@ describe("Concord", () => {
     await concord.watchAsset({ network: "testnet", asset: `NAMED:${key()}`, fromLedger: 1 });
     concord.importInstructions("NAMED", `ref,type,account,issued_at\nI-OLD,freeze,${h1},2025-01-01T00:00:00Z\n`);
     expect(concord.controls("NAMED").breaks.map((b) => b.key)).toEqual(["UNEXECUTED_INSTRUCTION:I-OLD"]);
+  });
+
+  // In the two tests below chain.baselineResult is left unset, so FakeChain.baseline() throws
+  // "no baseline". Each uses its own empty database, so the assets table holds only what it watches.
+
+  it("removes the asset row when a blocking watch cannot take its opening balances", async () => {
+    const db = new Db(":memory:");
+    const fresh = new Concord(db, { testnet: { passphrase: PASSPHRASE, chain } });
+    const assetRows = () => db.get<{ n: number }>("SELECT COUNT(*) AS n FROM assets")!.n;
+    const asset = `OLD:${key()}`;
+
+    await expect(fresh.watchAsset({ network: "testnet", asset })).rejects.toThrow("no baseline");
+    expect(assetRows()).toBe(0);
+    expect(fresh.assets()).toEqual([]);
+
+    // Nothing is left to collide with: once opening balances can be read, the same asset is watched.
+    chain.baselineResult = { ledger: 50, openings: new Map() };
+    const watched = await fresh.watchAsset({ network: "testnet", asset });
+    expect(watched).toMatchObject({ state: "ready", startMode: "baseline", baselineLedger: 50 });
+    expect(assetRows()).toBe(1);
+  });
+
+  it("keeps a deferred watch whose opening balances fail, and records that indexing stopped", async () => {
+    const db = new Db(":memory:");
+    const fresh = new Concord(db, { testnet: { passphrase: PASSPHRASE, chain } });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Park the background pass on the baseline read, so the asset is seen before the failure lands.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let arrive!: () => void;
+    const arrived = new Promise<void>((resolve) => (arrive = resolve));
+    const baseline = chain.baseline.bind(chain);
+    let baselineReads = 0;
+    chain.baseline = async () => {
+      baselineReads++;
+      arrive();
+      await held;
+      return baseline();
+    };
+
+    try {
+      const watched = await fresh.watchAsset({ network: "testnet", asset: `OLD:${key()}` }, { defer: true });
+      expect(watched).toMatchObject({ state: "indexing", startMode: "baseline" });
+      expect(watched.syncError).toBeUndefined();
+
+      // The watch started the pass itself: it reaches the baseline read without anyone calling sync().
+      await arrived;
+      // sync() hands back that pass, still in flight, so this waits for the background pass itself.
+      const pass = fresh.sync(watched.id);
+      release();
+      await expect(pass).rejects.toThrow("no baseline");
+      expect(baselineReads).toBe(1);
+
+      // The asset stays, still indexing, with the failure on it in words fit for the dashboard.
+      const failed = fresh.asset(watched.id);
+      expect(failed).toMatchObject({ state: "indexing", syncError: "Indexing stopped on an unexpected error." });
+      expect(failed.syncErrorAt).toEqual(expect.any(String));
+      expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM assets")!.n).toBe(1);
+      // What actually went wrong goes to the server log instead.
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect((logged.mock.calls[0]![0] as Error).message).toBe("no baseline");
+
+      // And because the asset stayed, the next pass that succeeds clears the failure.
+      chain.baselineResult = { ledger: 50, openings: new Map() };
+      await fresh.sync(watched.id);
+      const healed = fresh.asset(watched.id);
+      expect(healed).toMatchObject({ state: "ready", baselineLedger: 50 });
+      expect(healed.syncError).toBeUndefined();
+      expect(healed.syncErrorAt).toBeUndefined();
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("snapshots at the record time and reconciles a dividend paid in another asset", async () => {
