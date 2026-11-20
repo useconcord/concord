@@ -1446,3 +1446,22 @@ describe("Db", () => {
     expect("run" in db).toBe(false);
   });
 });
+
+describe("configuration reference", () => {
+  it("lists every variable the server and CLI read (#514)", () => {
+    // Every CONCORD_* name in config.ts (the KNOWN list, the RETIRED map and the reads) and
+    // cli.ts, plus the two bare names loadConfig reads. The lookbehind keeps
+    // KNOWN_CONCORD_SETTINGS from contributing a spurious CONCORD_SETTINGS.
+    const sources = [
+      readFileSync(join(import.meta.dirname, "../src/config.ts"), "utf-8"),
+      readFileSync(join(import.meta.dirname, "../src/cli.ts"), "utf-8"),
+    ].join("\n");
+    const names = new Set(
+      [...sources.matchAll(/(?<![A-Z_])CONCORD_[A-Z_]+/g)].map((m) => m[0]),
+    );
+    for (const bare of ["PORT", "RENDER_EXTERNAL_URL"]) names.add(bare);
+    const doc = readFileSync(join(import.meta.dirname, "../../../docs/CONFIGURATION.md"), "utf-8");
+    const missing = [...names].filter((name) => !doc.includes(`\`${name}\``));
+    expect(missing, "variables read but not documented").toEqual([]);
+  });
+});
