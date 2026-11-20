@@ -328,6 +328,46 @@ describe("Concord", () => {
     expect(concord.auditExport("FUND", { from: "2020-01-01", to: "2020-01-02" }).signoffHistory).toEqual(history);
   });
 
+  it("assigns a break to a member, keeps the owner across runs, and clears it", async () => {
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    const brk = run.breaks[0]!;
+    const ann = { id: "u2", label: "Ann <ann@example.test>" };
+
+    expect(concord.assignBreak("FUND", "recon", brk.key, ann)).toMatchObject({
+      ok: true,
+      assigneeId: "u2",
+      assigneeLabel: "Ann <ann@example.test>",
+    });
+    expect(concord.run(run.id).breaks.find((b) => b.key === brk.key)).toMatchObject({
+      status: "open",
+      assigneeId: "u2",
+      assigneeLabel: "Ann <ann@example.test>",
+    });
+
+    // The same break reported by a later run keeps its owner.
+    const again = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(41) });
+    const next = await concord.reconcile("FUND", again.registerId);
+    expect(next.breaks.find((b) => b.key === brk.key)).toMatchObject({ assigneeId: "u2" });
+
+    // Signing it off neither drops nor moves the owner, and the list can be narrowed by it.
+    concord.setNote("FUND", "recon", brk.key, { fingerprint: brk.fingerprint, status: "resolved", note: "corrected" });
+    expect(concord.breaks("FUND", "u2").map((b) => b.key)).toContain(brk.key);
+    expect(concord.breaks("FUND", "none").map((b) => b.key)).not.toContain(brk.key);
+
+    // Only a break that exists now can be assigned; null clears the owner.
+    expect(() => concord.assignBreak("FUND", "recon", "NOT_A_BREAK:xyz", ann)).toThrow(/no break/);
+    expect(() => concord.assignBreak("FUND", "nope", brk.key, ann)).toThrow(/scope must be recon/);
+    concord.assignBreak("FUND", "recon", brk.key, null);
+    expect(concord.breaks("FUND", "u2").map((b) => b.key)).not.toContain(brk.key);
+    expect(concord.breaks("FUND").find((b) => b.key === brk.key)).toMatchObject({
+      status: "resolved",
+      note: "corrected",
+      assigneeId: null,
+      assigneeLabel: null,
+    });
+  });
+
   it("narrows the whole controls section of an audit pack to the period, not just its records", async () => {
     await concord.sync("FUND");
     const all = concord.auditExport("FUND").controls;
@@ -688,6 +728,8 @@ describe("Concord", () => {
         "controls.asOf",
         "controls.breaks[]",
         "controls.breaks[].address",
+        "controls.breaks[].assigneeId",
+        "controls.breaks[].assigneeLabel",
         "controls.breaks[].eventId",
         "controls.breaks[].fingerprint",
         "controls.breaks[].key",
@@ -747,6 +789,8 @@ describe("Concord", () => {
         "corporateActions[].recordTime",
         "corporateActions[].result.breaks[]",
         "corporateActions[].result.breaks[].address",
+        "corporateActions[].result.breaks[].assigneeId",
+        "corporateActions[].result.breaks[].assigneeLabel",
         "corporateActions[].result.breaks[].difference",
         "corporateActions[].result.breaks[].expected",
         "corporateActions[].result.breaks[].fingerprint",
@@ -818,6 +862,8 @@ describe("Concord", () => {
         "reconciliations[].assetId",
         "reconciliations[].breaks[]",
         "reconciliations[].breaks[].address",
+        "reconciliations[].breaks[].assigneeId",
+        "reconciliations[].breaks[].assigneeLabel",
         "reconciliations[].breaks[].chainUnits",
         "reconciliations[].breaks[].difference",
         "reconciliations[].breaks[].fingerprint",
@@ -1133,6 +1179,31 @@ describe("Concord", () => {
     expect(trail).toMatchObject([{ key: run.breaks[0]!.key, status: "resolved", note: "register corrected" }]);
     const again = await client.json<{ breaks: Array<{ noteAuthor: string }> }>(`/api/reconciliations/${run.id}`);
     expect(again.breaks[0]!.noteAuthor).toBe("Test User <ops@example.test>");
+
+    const brk = run.breaks[0]!;
+    const assigned = await client.call("/api/assets/FUND/notes/assignee", {
+      method: "PUT",
+      body: { scope: "recon", key: brk.key, assigneeId: client.userId },
+    });
+    expect(assigned.status).toBe(200);
+    expect(await assigned.json()).toMatchObject({
+      assigneeId: client.userId,
+      assigneeLabel: "Test User <ops@example.test>",
+    });
+    // The assignee has to be someone in this workspace, not an id the caller made up.
+    const stranger = await client.call("/api/assets/FUND/notes/assignee", {
+      method: "PUT",
+      body: { scope: "recon", key: brk.key, assigneeId: "not-a-member" },
+    });
+    expect(stranger.status).toBe(400);
+    const mine = await client.json<Array<{ key: string; assigneeId: string | null }>>(
+      `/api/assets/FUND/breaks?assignee=${client.userId}`,
+    );
+    expect(mine.find((b) => b.key === brk.key)).toMatchObject({ assigneeId: client.userId });
+    const unowned = await client.json<Array<{ key: string }>>("/api/assets/FUND/breaks?assignee=none");
+    expect(unowned.map((b) => b.key)).not.toContain(brk.key);
+    const breakCsv = await client.call("/api/assets/FUND/export?section=breaks");
+    expect(await breakCsv.text()).toContain("Test User <ops@example.test>");
     const overview = await client.json<{ networks: string[]; assets: Array<{ code: string; openBreaks: { reconciliation: number } }> }>("/api/overview");
     expect(overview.networks).toEqual(["testnet"]);
     expect(overview.assets[0]).toMatchObject({ code: "FUND", openBreaks: { reconciliation: 1 } });

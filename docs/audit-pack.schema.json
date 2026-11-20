@@ -208,7 +208,9 @@
         "note": { "$ref": "#/definitions/nullableString" },
         "noteAuthor": { "$ref": "#/definitions/nullableString" },
         "noteAt": { "$ref": "#/definitions/nullableDateTime" },
-        "noteStale": { "type": "boolean" }
+        "noteStale": { "type": "boolean" },
+        "assigneeId": { "$ref": "#/definitions/nullableString" },
+        "assigneeLabel": { "$ref": "#/definitions/nullableString" }
       }
     },
     "reconciliation": {

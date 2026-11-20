@@ -103,6 +103,8 @@ function probes(s: Seeded): Record<string, Probe> {
     "GET /api/assets/:id/controls": p("GET", `/api/assets/${id}/controls`),
     "PUT /api/assets/:id/notes": p("PUT", `/api/assets/${id}/notes`, { scope: "recon", key: "k", fingerprint: "f", status: "resolved", note: "n" }),
     "GET /api/assets/:id/notes/history": p("GET", `/api/assets/${id}/notes/history`),
+    "PUT /api/assets/:id/notes/assignee": p("PUT", `/api/assets/${id}/notes/assignee`, { scope: "recon", key: "k", assigneeId: s.a.userId }),
+    "GET /api/assets/:id/breaks": p("GET", `/api/assets/${id}/breaks`),
     "GET /api/assets/:id/export": p("GET", `/api/assets/${id}/export`),
   };
 }
