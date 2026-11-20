@@ -96,6 +96,7 @@ function probes(s: Seeded): Record<string, Probe> {
     "GET /api/assets/:id/reconciliations": p("GET", `/api/assets/${id}/reconciliations`),
     "POST /api/assets/:id/reconciliations": p("POST", `/api/assets/${id}/reconciliations`, { registerId: s.registerId }),
     "GET /api/reconciliations/:id": p("GET", `/api/reconciliations/${s.runId}`),
+    "GET /api/reconciliations/:id/report": p("GET", `/api/reconciliations/${s.runId}/report`),
     "GET /api/assets/:id/actions": p("GET", `/api/assets/${id}/actions`),
     "POST /api/assets/:id/actions": p("POST", `/api/assets/${id}/actions`, { type: "split", recordTime: at(1), num: "2", den: "1" }),
     "GET /api/actions/:id": p("GET", `/api/actions/${s.actionId}`),

@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
-import { nativeToScVal } from "@stellar/stellar-sdk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { nativeToScVal, Keypair } from "@stellar/stellar-sdk";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
@@ -326,6 +326,53 @@ describe("Concord", () => {
     expect(concord.auditExport("FUND").signoffHistory).toEqual(history);
     // Sign-offs are wall-clock events, so the period (chain time) does not narrow the trail.
     expect(concord.auditExport("FUND", { from: "2020-01-01", to: "2020-01-02" }).signoffHistory).toEqual(history);
+  });
+
+  it("renders a printable report with escaped text, both digests and the sign-off trail", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-01T01:00:00Z"));
+    try {
+      const fixed = (byte: number) => Keypair.fromRawEd25519Seed(Buffer.alloc(32, byte)).publicKey();
+      const reportChain = new FakeChain();
+      const reportConcord = new Concord(new Db(":memory:"), {
+        testnet: { passphrase: PASSPHRASE, chain: reportChain },
+      });
+      const reportAsset = await reportConcord.watchAsset({
+        network: "testnet",
+        asset: `FUND:${fixed(1)}`,
+        name: "Fixed <Fund>",
+        fromLedger: 1,
+      });
+      reportChain.push(reportAsset.id, "mint", 3, { to: fixed(2), amount: u(100) });
+      const reg = reportConcord.importRegister("FUND", {
+        csv: `holder_id,holder_name,account,units\n<script>alert("x")</script>,Mallory & Co,${fixed(2)},90\n`,
+        asOf: at(40),
+      });
+      const run = await reportConcord.reconcile("FUND", reg.registerId);
+      const brk = run.breaks[0]!;
+      reportConcord.setNote(
+        "FUND",
+        "recon",
+        brk.key,
+        { fingerprint: brk.fingerprint, status: "resolved", note: "Fixed <b>off-chain</b> & verified" },
+        { id: "u1", label: "Alice & Bob <alice@example.test>" },
+      );
+
+      const html = reportConcord.runReport(run.id);
+      expect(html).toContain("<!doctype html>");
+      expect(html).not.toContain("<script>alert");
+      expect(html).toContain("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;");
+      expect(html).toContain("Fixed &lt;Fund&gt;");
+      expect(html).toContain("Fixed &lt;b&gt;off-chain&lt;/b&gt; &amp; verified");
+      expect(html).toContain("Alice &amp; Bob &lt;alice@example.test&gt;");
+      expect(html).toContain(run.registerSha256);
+      expect(html).toContain("Run result SHA-256");
+      expect(html).toContain("Sign-off history");
+      expect(() => reportConcord.runReport(999)).toThrow(NotFound);
+      expect(html).toMatchSnapshot();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("narrows the whole controls section of an audit pack to the period, not just its records", async () => {
@@ -1133,6 +1180,13 @@ describe("Concord", () => {
     expect(trail).toMatchObject([{ key: run.breaks[0]!.key, status: "resolved", note: "register corrected" }]);
     const again = await client.json<{ breaks: Array<{ noteAuthor: string }> }>(`/api/reconciliations/${run.id}`);
     expect(again.breaks[0]!.noteAuthor).toBe("Test User <ops@example.test>");
+    const report = await client.call(`/api/reconciliations/${run.id}/report`);
+    expect(report.status).toBe(200);
+    expect(report.headers.get("content-type")).toContain("text/html");
+    const reportHtml = await report.text();
+    expect(reportHtml).toContain("Concord reconciliation report");
+    expect(reportHtml).toContain(`Run ${run.id}`);
+    expect((await client.call("/api/reconciliations/999/report")).status).toBe(404);
     const overview = await client.json<{ networks: string[]; assets: Array<{ code: string; openBreaks: { reconciliation: number } }> }>("/api/overview");
     expect(overview.networks).toEqual(["testnet"]);
     expect(overview.assets[0]).toMatchObject({ code: "FUND", openBreaks: { reconciliation: 1 } });
