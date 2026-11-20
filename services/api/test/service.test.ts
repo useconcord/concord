@@ -1014,6 +1014,37 @@ describe("Concord", () => {
     expect(concord.asset(assetId).id).toBe(assetId);
   });
 
+  it("looks an asset up by contract id or by code in any case, and names an ambiguous or unknown reference", async () => {
+    const thrown = (lookup: () => unknown): unknown => {
+      try {
+        lookup();
+      } catch (err) {
+        return err;
+      }
+      return undefined;
+    };
+
+    const fund = concord.asset(assetId);
+    expect(fund).toMatchObject({ id: assetId, code: "FUND", issuer });
+    expect(concord.asset("FUND")).toEqual(fund);
+    expect(concord.asset("fund")).toEqual(fund);
+
+    // A second FUND from another issuer makes the code ambiguous in any case, but neither id.
+    const other = await concord.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
+    expect(other.id).not.toBe(assetId);
+    for (const code of ["FUND", "fund"]) {
+      const ambiguous = thrown(() => concord.asset(code));
+      expect(ambiguous).toBeInstanceOf(Invalid);
+      expect((ambiguous as Error).message).toBe(`more than one watched asset is called ${code}; use its contract id`);
+    }
+    expect(concord.asset(assetId)).toEqual(fund);
+    expect(concord.asset(other.id)).toEqual(other);
+
+    const unknown = thrown(() => concord.asset("NOPE"));
+    expect(unknown).toBeInstanceOf(NotFound);
+    expect((unknown as Error).message).toBe("asset NOPE is not watched");
+  });
+
   it("handles concurrent watchAsset calls gracefully without UNIQUE constraint failure", async () => {
     const assetCode = `CONC:${key()}`;
     const origDescribe = chain.describe?.bind(chain);
