@@ -1697,6 +1697,10 @@ export class Concord {
       .all<{ id: number }>("SELECT id FROM runs WHERE asset_id = ? ORDER BY as_of, id", asset.id)
       .map(({ id }) => this.run(id))
       .filter((r) => inPeriod(r.asOf));
+    const runRegisterIds = new Set(runs.map((r) => r.registerId));
+    const registers = this.registers(asset.id)
+      .filter((r) => inPeriod(r.asOf) || runRegisterIds.has(r.id))
+      .sort((a, b) => a.asOf.localeCompare(b.asOf) || a.id - b.id);
     const content = {
       asset: {
         id: asset.id,
@@ -1717,6 +1721,7 @@ export class Concord {
         const { beforeHistory: _beforeHistory, warnings: _warnings, ...rest } = this.holdings(asset.id, to);
         return rest;
       })(),
+      registers,
       reconciliations: runs,
       corporateActions: this.actions(asset.id).filter((a) => inPeriod(a.recordTime)),
       controls,

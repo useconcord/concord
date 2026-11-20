@@ -875,6 +875,15 @@ describe("Concord", () => {
         "reconciliations[].summary.supplyDifference",
         "reconciliations[].summary.unmappedUnits",
         "reconciliations[].warnings[]",
+        "registers[]",
+        "registers[].asOf",
+        "registers[].id",
+        "registers[].importedAt",
+        "registers[].importedBy",
+        "registers[].issues[]",
+        "registers[].positions",
+        "registers[].sha256",
+        "registers[].source",
         "sha256",
         "signoffHistory[]",
         "signoffHistory[].at",
@@ -886,6 +895,58 @@ describe("Concord", () => {
         "signoffHistory[].status",
       ]
     `);
+  });
+
+  it("includes register provenance in the audit pack covering every reconciled register", async () => {
+    await concord.sync("FUND");
+    const reg1 = concord.importRegister(
+      "FUND",
+      {
+        csv: `holder_id,account,units,status\nA,${h1},100,active\n`,
+        asOf: at(2),
+      },
+      { id: "u1", label: "alice <alice@example.test>" },
+    );
+    const reg2 = concord.importRegister(
+      "FUND",
+      {
+        csv: `holder_id,account,units,status\nA,${h1},90,active\n`,
+        asOf: at(5),
+      },
+      { id: "u2", label: "bob <bob@example.test>" },
+    );
+
+    const run = await concord.reconcile("FUND", reg2.registerId);
+    expect(run.registerId).toBe(reg2.registerId);
+
+    const pack = concord.auditExport("FUND");
+    expect(pack.registers.length).toBeGreaterThanOrEqual(2);
+
+    // Every registerId in reconciliations appears in registers
+    const registerIdsInRecon = pack.reconciliations.map((r) => r.registerId);
+    const registerIds = pack.registers.map((r) => r.id);
+    for (const rid of registerIdsInRecon) {
+      expect(registerIds).toContain(rid);
+    }
+
+    // Provenance details are present
+    const r2 = pack.registers.find((r) => r.id === reg2.registerId)!;
+    expect(r2).toBeDefined();
+    expect(r2.asOf).toBe(at(5));
+    expect(r2.source).toBe("upload");
+    expect(r2.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(r2.positions).toBe(1);
+    expect(r2.issues).toEqual([]);
+    expect(r2.importedBy).toBe("bob <bob@example.test>");
+    expect(r2.importedAt).toBeDefined();
+
+    // Digest covers registers: modifying a register breaks the digest
+    const originalDigest = pack.sha256;
+    const tampered = { ...pack, registers: [{ ...r2, source: "tampered" }] };
+    const { generatedAt: _g, generator: _gen, sha256: _s, ...content } = tampered;
+    const { createHash } = await import("node:crypto");
+    const tamperedDigest = createHash("sha256").update(JSON.stringify(content)).digest("hex");
+    expect(tamperedDigest).not.toBe(originalDigest);
   });
 
   it("holds the indexed-to mark still when a pass dies part-way", async () => {
