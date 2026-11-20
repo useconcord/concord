@@ -16,6 +16,8 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   sync [ASSET]                     pull new events (every workspace when no --org)
   holdings ASSET [--as-of ISO]     on-chain holders
   register ASSET FILE --as-of ISO  import a register export and reconcile it
+  registers ASSET                  list imported registers
+  register-delete ASSET ID [--yes] remove a register and its reconciliation runs
   journal ASSET FILE               import the register's transaction journal
   instructions ASSET FILE          import control instructions
   reconcile ASSET [--register ID]  re-run a reconciliation

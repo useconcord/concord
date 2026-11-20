@@ -858,10 +858,17 @@ export class Concord {
   }
 
   /** Remove a register, its holder lines and every reconciliation run against it. */
-  deleteRegister(ref: string, registerId: number): void {
+  deleteRegister(ref: string, registerId: number): { runs: number } {
     const asset = this.asset(ref);
+    const runs =
+      this.db.get<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM runs WHERE register_id = ? AND asset_id = ?",
+        registerId,
+        asset.id,
+      )?.count ?? 0;
     const removed = this.db.write("DELETE FROM registers WHERE id = ? AND asset_id = ?", registerId, asset.id);
     if (removed === 0) throw new NotFound("no such register for this asset");
+    return { runs };
   }
 
   private registerPositions(registerId: number): RegisterPosition[] {
