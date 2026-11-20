@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,18 @@ import { Client, FakeChain, MAINNET_PASSPHRASE, ORIGIN, PASSPHRASE, at, harness,
 
 /** Strings that exist only in workspace A. None may ever reach workspace B. */
 const MARKERS = ["ALPHA-HOLDER-7", "Northgate Secret Trust", "alpha sign-off note", "J-ALPHA", "I-ALPHA", "Alpha Capital"];
+
+/** SHA-256 of each shipped migration, in order. A changed entry means a shipped migration was edited. */
+const ORG_MIGRATION_DIGESTS = [
+  "1a4f90d62ead1ba8254ab3244d04be0ca9f46646df78cd12f1ece6db41bd2387",
+  "2002f2e1b269939a38de8da3768a85787f98ce207246cf15134423ffdce6db72",
+];
+const CONTROL_MIGRATION_DIGESTS = ["ba25bc5419cfcc376d2e7ff027845b2da4b789d9c7e966424b70cdfbbb90a422"];
+
+/** Hash each migration as LF text so a CRLF checkout does not change the pinned values. */
+function migrationDigests(migrations: readonly string[]): string[] {
+  return migrations.map((sql) => createHash("sha256").update(sql.replace(/\r\n?/g, "\n")).digest("hex"));
+}
 
 interface Seeded {
   h: Harness;
@@ -1430,6 +1443,28 @@ describe("what ships", () => {
       runtime.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("migrations", () => {
+  it("keeps shipped migrations append-only by pinning their digests", () => {
+    const check = (name: string, migrations: readonly string[], pinned: readonly string[]) => {
+      expect(
+        migrationDigests(migrations),
+        `${name} are append-only. Add a new migration and pin its digest instead of editing a shipped one.`,
+      ).toEqual(pinned);
+    };
+    check("ORG_MIGRATIONS", ORG_MIGRATIONS, ORG_MIGRATION_DIGESTS);
+    check("CONTROL_MIGRATIONS", CONTROL_MIGRATIONS, CONTROL_MIGRATION_DIGESTS);
+  });
+
+  it("rejects an edited shipped migration and an unpinned appended one", () => {
+    const edited = [...ORG_MIGRATIONS];
+    edited[0] = `${edited[0]} `;
+    expect(migrationDigests(edited)).not.toEqual(ORG_MIGRATION_DIGESTS);
+
+    const appended = [...CONTROL_MIGRATIONS, "CREATE TABLE later (id INTEGER);"];
+    expect(migrationDigests(appended)).not.toEqual(CONTROL_MIGRATION_DIGESTS);
   });
 });
 
