@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
-import { nativeToScVal } from "@stellar/stellar-sdk";
+import { StrKey, nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
@@ -459,6 +459,32 @@ describe("Concord", () => {
       [h1, "66"],
       [h2, "29"],
     ]);
+  });
+
+  it("refuses opening balances for a contract token before any row is written, and lets a classic asset opt out", async () => {
+    const contractId = StrKey.encodeContract(Buffer.alloc(32, 9));
+    const watch = { network: "testnet" as const, asset: contractId, baseline: true, decimals: 7 };
+    const assetRows = () => concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM assets")!.n;
+    const before = assetRows();
+
+    // Deferred as well as blocking: a deferred watch never rolls back, so a row written ahead of
+    // the refusal would still be there afterwards.
+    for (const options of [{}, { defer: true }]) {
+      const refused = await concord.watchAsset(watch, options).catch((err: unknown) => err);
+      expect(refused).toBeInstanceOf(Invalid);
+      expect((refused as Error).message).toBe("opening balances are only available for classic assets");
+      expect(concord.db.get("SELECT id FROM assets WHERE id = ?", contractId)).toBeUndefined();
+      expect(assetRows()).toBe(before);
+    }
+    // It is the request for opening balances that is refused, not the token.
+    expect(await concord.watchAsset({ ...watch, baseline: false })).toMatchObject({ id: contractId, startMode: "window" });
+
+    // The suite sets no baselineResult, so an opt-out that still asked for opening balances would
+    // fail with "no baseline" instead of landing in window mode.
+    const classic = await concord.watchAsset({ network: "testnet", asset: `NB:${issuer}`, baseline: false });
+    expect(classic).toMatchObject({ startMode: "window", state: "ready", startLedger: 21 });
+    expect(classic.baselineLedger).toBeUndefined();
+    expect(concord.db.get("SELECT 1 FROM openings WHERE asset_id = ?", classic.id)).toBeUndefined();
   });
 
   it("does not flag an instruction from before a baseline asset's indexed history as never executed", async () => {
