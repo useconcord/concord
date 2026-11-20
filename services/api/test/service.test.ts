@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
@@ -5,7 +6,7 @@ import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
-import { Concord, Invalid, NotFound } from "../src/concord.js";
+import { Concord, Invalid, NotFound, verifyPack } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
@@ -886,6 +887,69 @@ describe("Concord", () => {
         "signoffHistory[].status",
       ]
     `);
+  });
+
+  it("signs the audit pack with an ed25519 operator key and verifies it", async () => {
+    await concord.sync("FUND");
+
+    // 1. Unset: no signature or keyId present
+    const unsignedPack = concord.auditExport("FUND");
+    expect((unsignedPack as Record<string, unknown>).signature).toBeUndefined();
+    expect((unsignedPack as Record<string, unknown>).keyId).toBeUndefined();
+
+    const unsignedResult = verifyPack(unsignedPack);
+    expect(unsignedResult.digestValid).toBe(true);
+    expect(unsignedResult.signed).toBe(false);
+
+    // 2. Generate ed25519 keypair
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const pubPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+
+    // Export with signing key option
+    const signedPack = concord.auditExport("FUND", {}, { signingKey: privPem });
+    const signedObj = signedPack as Record<string, unknown>;
+    expect(typeof signedObj.signature).toBe("string");
+    expect(typeof signedObj.keyId).toBe("string");
+    expect(signedObj.keyId).toHaveLength(64);
+
+    // Verify without key: verifies digest, detects pack is signed
+    const selfCheck = verifyPack(signedPack);
+    expect(selfCheck.digestValid).toBe(true);
+    expect(selfCheck.signed).toBe(true);
+    expect(selfCheck.keyId).toBe(signedObj.keyId);
+    expect(selfCheck.signatureChecked).toBe(false);
+
+    // Verify with correct public key
+    const verified = verifyPack(signedPack, pubPem);
+    expect(verified.digestValid).toBe(true);
+    expect(verified.signed).toBe(true);
+    expect(verified.signatureChecked).toBe(true);
+    expect(verified.signatureValid).toBe(true);
+
+    // Tampered content fails digest
+    const tamperedContent = { ...signedPack, asset: { ...signedPack.asset, name: "Tampered Name" } };
+    const tamperedRes = verifyPack(tamperedContent, pubPem);
+    expect(tamperedRes.digestValid).toBe(false);
+
+    // Tampered signature fails signature verification
+    const tamperedSig = { ...signedPack, signature: Buffer.from("bad-signature").toString("base64") };
+    const badSigRes = verifyPack(tamperedSig, pubPem);
+    expect(badSigRes.digestValid).toBe(true);
+    expect(badSigRes.signatureChecked).toBe(true);
+    expect(badSigRes.signatureValid).toBe(false);
+
+    // Wrong public key fails verification
+    const otherKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
+    const wrongKeyRes = verifyPack(signedPack, otherKey);
+    expect(wrongKeyRes.signatureChecked).toBe(true);
+    expect(wrongKeyRes.signatureValid).toBe(false);
+    expect(wrongKeyRes.error).toContain("keyId mismatch");
+
+    // Non-ed25519 key throws Invalid
+    const rsaKey = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const rsaPriv = rsaKey.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    expect(() => concord.auditExport("FUND", {}, { signingKey: rsaPriv })).toThrow(Invalid);
   });
 
   it("holds the indexed-to mark still when a pass dies part-way", async () => {

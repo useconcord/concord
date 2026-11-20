@@ -64,6 +64,8 @@ export interface Config {
   maxInvitesPerOrg: number;
   /** The host discards the data directory on restart. Shown to users rather than hidden. */
   ephemeral: boolean;
+  /** Optional ed25519 private key in PEM format to sign audit packs. */
+  signingKey?: string;
   google?: { clientId: string; clientSecret: string };
   /** scrypt work factors for new password hashes. Unset keeps the built-in default. */
   passwordCost?: { N: number; r: number; p: number };
@@ -85,7 +87,7 @@ const KNOWN_CONCORD_SETTINGS = [
   "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
   "CONCORD_MAX_ASSETS", "CONCORD_MAX_INVITES", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
   "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS",
-  "CONCORD_SIGNUP", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
+  "CONCORD_SIGNING_KEY", "CONCORD_SIGNUP", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
   "CONCORD_TESTNET_RPC_URLS", "CONCORD_TRUST_PROXY", "CONCORD_USER_AGENT_SUFFIX", "CONCORD_WEB_DIR",
 ] as const;
 const KNOWN_SETTINGS = new Set<string>(KNOWN_CONCORD_SETTINGS);
@@ -279,6 +281,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
     maxInvitesPerOrg: integer(env, "CONCORD_MAX_INVITES", 100, 1, 10000),
     ephemeral: flag(env, "CONCORD_EPHEMERAL", false),
   };
+  if (env.CONCORD_SIGNING_KEY) {
+    config.signingKey = resolve(ROOT, env.CONCORD_SIGNING_KEY);
+  }
   if (env.CONCORD_PASSWORD_COST) {
     // N:r:p. Each stored hash carries the factors it was made with, so this can change at any time.
     const [N, r, p] = env.CONCORD_PASSWORD_COST.split(":").map(Number);

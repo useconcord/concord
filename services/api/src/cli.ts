@@ -3,7 +3,7 @@ import { userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { backup } from "node:sqlite";
 import { parseArgs } from "node:util";
-import type { ActionInput, Actor, Concord, WatchInput } from "./concord.js";
+import { verifyPack, type ActionInput, type Actor, type Concord, type WatchInput } from "./concord.js";
 import { isNetworkName, loadConfig } from "./config.js";
 import { openRuntime, startServer } from "./main.js";
 import { USAGE } from "./cli-usage.js";
@@ -40,6 +40,7 @@ async function main(): Promise<void> {
       out: { type: "string" },
       note: { type: "string" },
       json: { type: "boolean" },
+      key: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -242,12 +243,36 @@ async function main(): Promise<void> {
       if (values.to) period.to = values.to;
       const text = values.csv
         ? concord.exportCsv(asset, values.csv, period)
-        : JSON.stringify(concord.auditExport(asset, period), null, 2);
+        : JSON.stringify(concord.auditExport(asset, period, config.signingKey ? { signingKey: config.signingKey } : {}), null, 2);
       if (values.out) {
         writeFileSync(values.out, text);
         console.log(`wrote ${values.out}`);
       } else {
         process.stdout.write(text);
+      }
+      break;
+    }
+    case "verify-pack": {
+      const file = need(a, "pack file");
+      const raw = readFileSync(resolve(file), "utf8");
+      const pack = JSON.parse(raw);
+      const res = verifyPack(pack, values.key ? resolve(values.key) : undefined);
+      if (values.json) {
+        out(res);
+      } else {
+        if (!res.digestValid) {
+          console.error(`FAIL: digest mismatch (expected ${res.expectedDigest}, got ${res.digest})`);
+          process.exitCode = 1;
+        } else if (res.signatureChecked && !res.signatureValid) {
+          console.error(`FAIL: signature verification failed: ${res.error ?? "invalid signature"}`);
+          process.exitCode = 1;
+        } else if (res.signatureChecked && res.signatureValid) {
+          console.log(`OK: digest verified (${res.digest}), signature valid (key: ${res.keyId})`);
+        } else if (res.signed) {
+          console.log(`OK: digest verified (${res.digest}), pack is signed (key: ${res.keyId})`);
+        } else {
+          console.log(`OK: digest verified (${res.digest})`);
+        }
       }
       break;
     }
