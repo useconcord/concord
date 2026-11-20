@@ -213,6 +213,23 @@ describe("Concord", () => {
     chain.push(assetId, "clawback", 30, { from: h2, amount: u(5) });
   });
 
+  async function expectPagedSync(count: number, calls: number) {
+    const code = `PAGE${count}`;
+    const asset = await concord.watchAsset({ network: "testnet", asset: `${code}:${issuer}`, fromLedger: 1 });
+    const pushed = Array.from({ length: count }, () =>
+      chain.push(asset.id, "mint", 40, { to: h3, amount: 1n }).id,
+    );
+
+    chain.calls = 0;
+    expect(await concord.sync(code)).toEqual({ added: count });
+    expect(chain.calls).toBe(calls);
+    const stored = concord.db
+      .all<{ id: string }>("SELECT id FROM events WHERE asset_id = ? ORDER BY id", asset.id)
+      .map((row) => row.id);
+    expect(stored).toEqual(pushed);
+    expect(await concord.sync(code)).toEqual({ added: 0 });
+  }
+
   it("indexes in pages and is idempotent", async () => {
     for (let i = 0; i < 2500; i++) chain.push(assetId, "mint", 40, { to: h3, amount: 1n });
     expect(await concord.sync("FUND")).toEqual({ added: 2507 });
@@ -222,6 +239,16 @@ describe("Concord", () => {
     expect(h.supply).toBe("1144.00025");
     expect(h.holders.find((x) => x.address === h2)).toMatchObject({ units: "55", status: "frozen" });
     expect(concord.asset("FUND").syncedLedger).toBe(100);
+  });
+
+  it("pages across a boundary that splits several events of the same ledger without losing or duplicating any", async () => {
+    await expectPagedSync(999, 1);
+    await expectPagedSync(1000, 2);
+  });
+
+  it("keeps paging when a ledger fills more than one full page", async () => {
+    await expectPagedSync(1001, 2);
+    await expectPagedSync(2000, 3);
   });
 
   it("rejects reconciliation when no register has been imported", async () => {
