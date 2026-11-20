@@ -365,6 +365,36 @@ describe("Concord", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("refuses a fromLedger that is not a ledger sequence without leaving a row, and accepts ledger 1", async () => {
+    const asset = `LEDG:${key()}`;
+    const assetRows = () => concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM assets")!.n;
+    const before = assetRows();
+
+    for (const fromLedger of [0, -5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      // Deferred as well as blocking: a deferred watch never rolls back, so a row written ahead of
+      // the check would still be there afterwards.
+      for (const options of [{}, { defer: true }]) {
+        const refused = await concord
+          .watchAsset({ network: "testnet", asset, fromLedger }, options)
+          .catch((err: unknown) => err);
+        expect(refused, `fromLedger ${fromLedger}`).toBeInstanceOf(Invalid);
+        expect((refused as Error).message, `fromLedger ${fromLedger}`).toBe("fromLedger must be a ledger sequence");
+        expect(assetRows(), `asset rows after fromLedger ${fromLedger}`).toBe(before);
+      }
+    }
+    expect(concord.db.get("SELECT id FROM assets WHERE code = 'LEDG'")).toBeUndefined();
+
+    // Ledger 1 is the lowest sequence there is. The same asset is free to watch, as no refusal kept it.
+    const watched = await concord.watchAsset({ network: "testnet", asset, fromLedger: 1 });
+    expect(watched).toMatchObject({ code: "LEDG", startMode: "ledger", startLedger: 1, state: "ready" });
+    const row = concord.db.get<{ start_mode: string; start_ledger: number }>(
+      "SELECT start_mode, start_ledger FROM assets WHERE id = ?",
+      watched.id,
+    );
+    expect(row).toMatchObject({ start_mode: "ledger", start_ledger: 1 });
+    expect(assetRows()).toBe(before + 1);
+  });
+
   it("rejects a register from another asset and an unknown register id", async () => {
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
     await concord.watchAsset({ network: "testnet", asset: `OTHER:${issuer}`, fromLedger: 1 });
