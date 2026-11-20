@@ -79,6 +79,15 @@ export interface AssetRecord {
   createdAt: string;
 }
 
+/** What a destructive delete takes with it, so the CLI can show it before asking. */
+export interface DeletionCounts {
+  assets: number;
+  events: number;
+  registers: number;
+  runs: number;
+  notes: number;
+}
+
 export interface WatchInput {
   network: NetworkName;
   /** CODE:ISSUER or a contract id. */
@@ -488,6 +497,28 @@ export class Concord {
       asset.id,
     );
     return this.asset(asset.id);
+  }
+
+  /**
+   * The rows that deleting one asset, or the whole workspace, would remove. Counted from the same
+   * tables the deletes cascade through, so an operator sees the size of the loss first.
+   */
+  deletionCounts(ref?: string): DeletionCounts {
+    const asset = ref ? this.asset(ref) : undefined;
+    const args: string[] = asset ? [asset.id] : [];
+    // The assets table keys on `id`; everything else that belongs to an asset keys on `asset_id`.
+    const count = (table: string, column = "asset_id"): number =>
+      Number(
+        this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}${asset ? ` WHERE ${column} = ?` : ""}`, ...args)
+          ?.n ?? 0,
+      );
+    return {
+      assets: asset ? 1 : count("assets", "id"),
+      events: count("events"),
+      registers: count("registers"),
+      runs: count("runs"),
+      notes: count("break_notes"),
+    };
   }
 
   /** Stop watching: the asset, its events and every book uploaded against it are deleted. */

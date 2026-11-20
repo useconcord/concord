@@ -1,9 +1,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { backup } from "node:sqlite";
 import { parseArgs } from "node:util";
-import type { ActionInput, Actor, Concord, WatchInput } from "./concord.js";
+import type { ActionInput, Actor, Concord, DeletionCounts, WatchInput } from "./concord.js";
 import { isNetworkName, loadConfig } from "./config.js";
 import { openRuntime, startServer } from "./main.js";
 import { USAGE } from "./cli-usage.js";
@@ -40,6 +41,9 @@ async function main(): Promise<void> {
       out: { type: "string" },
       note: { type: "string" },
       json: { type: "boolean" },
+      "fail-on-breaks": { type: "boolean" },
+      yes: { type: "boolean", short: "y" },
+      "dry-run": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -59,6 +63,30 @@ async function main(): Promise<void> {
   const out = (value: unknown) => console.log(JSON.stringify(value, null, 2));
   const orgRef = values.org ?? process.env.CONCORD_ORG;
   const workspace = (): Concord => tenants.forOrg(auth.findOrg(need(orgRef, "--org (see `concord orgs`)")).id);
+  /**
+   * A delete shows what it would remove and then does nothing until the operator confirms, with
+   * `--yes` or by answering the prompt on a terminal. `--dry-run` stops after the counts.
+   */
+  const approved = async (what: string, counts: DeletionCounts): Promise<boolean> => {
+    if (values.json) out(counts);
+    else {
+      console.log(what);
+      table([{ ...counts }]);
+    }
+    if (values["dry-run"]) return false;
+    if (values.yes) return true;
+    if (process.stdin.isTTY) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const answer = await rl.question(`Delete ${what}? This cannot be undone. Type "yes" to continue: `);
+        if (answer.trim().toLowerCase() === "yes") return true;
+      } finally {
+        rl.close();
+      }
+      throw new Error(`nothing was deleted: ${what} was not confirmed`);
+    }
+    throw new Error(`nothing was deleted: ${what} needs --yes`);
+  };
   const printRun = (run: Awaited<ReturnType<Concord["reconcile"]>>) => {
     if (values.json) return out(run);
     console.log(`reconciliation ${run.id} · as of ${run.asOf} · ${run.status.toUpperCase()}`);
@@ -94,9 +122,12 @@ async function main(): Promise<void> {
       break;
     case "org-delete": {
       const org = auth.findOrg(need(a, "workspace"));
-      auth.deleteOrg(org.id);
-      tenants.drop(org.id);
-      console.log(`deleted ${org.name} (${org.id})`);
+      const what = `workspace ${org.name} (${org.id})`;
+      if (await approved(what, tenants.forOrg(org.id).deletionCounts())) {
+        auth.deleteOrg(org.id);
+        tenants.drop(org.id);
+        console.log(`deleted ${org.name} (${org.id})`);
+      }
       break;
     }
     case "backup": {
@@ -123,10 +154,16 @@ async function main(): Promise<void> {
       console.log(`watching ${asset.code} (${asset.id}) on ${asset.network} from ledger ${asset.startLedger}; ${added} events indexed`);
       break;
     }
-    case "unwatch":
-      await workspace().unwatchAsset(need(a, "asset"));
-      console.log("stopped watching; the asset and its books are deleted");
+    case "unwatch": {
+      const concord = workspace();
+      const asset = concord.asset(need(a, "asset"));
+      const what = `asset ${asset.code} (${asset.id}) on ${asset.network}`;
+      if (await approved(what, concord.deletionCounts(asset.id))) {
+        await concord.unwatchAsset(asset.id);
+        console.log("stopped watching; the asset and its books are deleted");
+      }
       break;
+    }
     case "rebuild": {
       const asset = await workspace().rebuild(need(a, "asset"));
       console.log(`rebuilt ${asset.code} from ledger ${asset.startLedger}`);
@@ -188,6 +225,82 @@ async function main(): Promise<void> {
     case "reconcile":
       printRun(await workspace().reconcile(need(a, "asset"), values.register ? Number(values.register) : undefined, actor));
       break;
+    case "reconcile-all": {
+      const network = values.network;
+      if (network !== undefined && !isNetworkName(network)) throw new Error("--network must be mainnet or testnet");
+      const concord = workspace();
+      // Only assets with an imported register can be reconciled, and a failing asset is
+      // recorded and stepped over so the rest of the workspace still runs.
+      const withRegister = new Set(
+        concord.db.all<{ asset_id: string }>("SELECT DISTINCT asset_id FROM registers").map((r) => r.asset_id),
+      );
+      const assets = concord.assets(network).filter((asset) => withRegister.has(asset.id));
+      type Result = {
+        asset: string;
+        code: string;
+        network: string;
+        status: "clean" | "breaks" | "error";
+        runId: number | null;
+        asOf: string | null;
+        openBreaks: number;
+        error: string | null;
+      };
+      const results: Result[] = [];
+      for (const asset of assets) {
+        const row = { asset: asset.id, code: asset.code, network: asset.network };
+        try {
+          const run = await concord.reconcile(asset.id, undefined, actor);
+          results.push({
+            ...row,
+            status: run.status,
+            runId: run.id,
+            asOf: run.asOf,
+            openBreaks: run.openBreaks,
+            error: null,
+          });
+        } catch (err) {
+          results.push({
+            ...row,
+            status: "error",
+            runId: null,
+            asOf: null,
+            openBreaks: 0,
+            error: (err as Error).message,
+          });
+        }
+      }
+      const count = (status: Result["status"]) => results.filter((r) => r.status === status).length;
+      const openBreaks = results.reduce((n, r) => n + r.openBreaks, 0);
+      if (values.json) {
+        out({
+          network: network ?? null,
+          results,
+          totals: {
+            assets: results.length,
+            clean: count("clean"),
+            breaks: count("breaks"),
+            failed: count("error"),
+            openBreaks,
+          },
+        });
+      } else if (results.length === 0) {
+        console.log("no watched asset has a register imported");
+      } else {
+        table(results);
+        console.log(
+          [
+            `${results.length} assets with a register`,
+            `${count("clean")} clean`,
+            `${count("breaks")} with breaks`,
+            `${count("error")} failed`,
+            `${openBreaks} open breaks`,
+          ].join(" · "),
+        );
+      }
+      // A failed asset is an error; unresolved breaks are only one when the caller asks.
+      if (count("error") > 0 || (values["fail-on-breaks"] && openBreaks > 0)) process.exitCode = 1;
+      break;
+    }
     case "action": {
       const type = need(b, "action type") as ActionInput["type"];
       const input: ActionInput = { type, recordTime: need(values.record, "--record"), exclude: list(values.exclude) };
