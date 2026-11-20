@@ -1090,6 +1090,57 @@ describe("Concord", () => {
       }),
     ).rejects.toThrow(`exclude contains an invalid Stellar address: "${invalidAddr}"`);
   });
+
+  it("trims and caps a new asset name, keeps the old one for a blank, and dedupes and caps the ignore list", () => {
+    type Patch = { name?: string; ignore?: string[] };
+    const stored = () => concord.asset(assetId);
+    const refuses = (patch: Patch, message: string) => {
+      let thrown: unknown;
+      try {
+        concord.updateAsset(assetId, patch);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(Invalid);
+      expect((thrown as Error).message).toBe(message);
+    };
+    expect(stored()).toMatchObject({ name: "FUND", ignore: [treasury] });
+
+    // A name is trimmed, and a patch that names no ignore list leaves the stored one alone.
+    expect(concord.updateAsset(assetId, { name: "  New  " }).name).toBe("New");
+    expect(stored()).toMatchObject({ name: "New", ignore: [treasury] });
+
+    // A blank name keeps the old one.
+    for (const blank of ["", "   "]) {
+      concord.updateAsset(assetId, { name: blank });
+      expect(stored().name).toBe("New");
+    }
+
+    // 120 characters is the longest a name can be. 121 is refused and the stored name stays.
+    const longest = "n".repeat(120);
+    concord.updateAsset(assetId, { name: longest });
+    expect(stored().name).toBe(longest);
+    refuses({ name: "n".repeat(121) }, "name must be text of at most 120 characters");
+    expect(stored().name).toBe(longest);
+
+    // Duplicates and blanks are dropped, in the order first given, and the name is left alone.
+    concord.updateAsset(assetId, { ignore: [h1, h1, h2, ""] });
+    expect(stored()).toMatchObject({ name: longest, ignore: [h1, h2] });
+
+    // 500 entries is the longest list. One more, an entry over 80 characters and a bare string are
+    // each refused, and the stored list stays.
+    const most = Array.from({ length: 500 }, () => key());
+    concord.updateAsset(assetId, { ignore: most });
+    expect(stored().ignore).toEqual(most);
+    for (const bad of [[...most, key()], [h1, "G".repeat(81)], h1 as unknown as string[]]) {
+      refuses({ ignore: bad }, "ignore must be a list of addresses");
+      expect(stored().ignore).toEqual(most);
+    }
+    // At exactly 80 characters an entry is read as an address, and refused as a bad one instead.
+    refuses({ ignore: ["G".repeat(80)] }, `ignore contains an invalid Stellar address: "${"G".repeat(80)}"`);
+    expect(stored().ignore).toEqual(most);
+  });
+
   it("serves the same operations over HTTP, to a signed-in user", async () => {
     const h = harness();
     h.chain.baselineResult = { ledger: 50, openings: new Map() };
