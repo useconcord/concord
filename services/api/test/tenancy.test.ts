@@ -658,6 +658,23 @@ describe("networks", () => {
     expect(() => loadConfig({ CONCORD_PUBLIC_URL: "not a url" })).toThrow(/must be a URL/);
   });
 
+  // Endpoint list parsing for CONCORD_MAINNET_RPC_URLS (list() + endpoints() in config.ts).
+  const DEFAULT_MAINNET_RPC = loadConfig({}).networks.mainnet.rpc.map((e) => e.url);
+  it.each<[string, string, string[] | RegExp]>([
+    ["trims whitespace, trailing slashes and empty items", " https://a.example/ , ,https://b.example//", ["https://a.example", "https://b.example"]],
+    // Current behaviour: duplicates are kept. A dedupe would be a separate follow-up.
+    ["keeps duplicate entries", "https://a.example,https://a.example", ["https://a.example", "https://a.example"]],
+    ["rejects a non-http scheme", "ftp://x", /CONCORD_MAINNET_RPC_URLS holds something that is not a URL/],
+    ["rejects something that is not a URL", "not a url", /CONCORD_MAINNET_RPC_URLS holds something that is not a URL/],
+    // CON-0314: credentials in the URL are now rejected rather than accepted as-is.
+    ["rejects credentials in the URL", "https://user:pw@a.example", /CONCORD_MAINNET_RPC_URLS must not contain URL credentials/],
+    ["falls back to the defaults when every entry is blank", " ,  , ", DEFAULT_MAINNET_RPC],
+  ])("parses CONCORD_MAINNET_RPC_URLS: %s", (_label, value, expected) => {
+    const load = () => loadConfig({ CONCORD_MAINNET_RPC_URLS: value });
+    if (expected instanceof RegExp) expect(load).toThrow(expected);
+    else expect(load().networks.mainnet.rpc.map((e) => e.url)).toEqual(expected);
+  });
+
   it("serves both networks with public endpoints by default and names retired settings", () => {
     const config = loadConfig({});
     expect(config.defaultNetwork).toBe("mainnet");
