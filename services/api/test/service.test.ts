@@ -1008,6 +1008,50 @@ describe("Concord", () => {
     expect(await concord.reconcileDue()).toBe(0);
   });
 
+  it("filters events outside the ledger window and respects both time and ledger bounds together", async () => {
+    const bank = key();
+    const cash = await concord.watchAsset({ network: "testnet", asset: `USDX:${bank}`, fromLedger: 1 });
+    // ledger 12: inside both ledger and time window
+    chain.push(cash.id, "transfer", 12, { from: treasury, to: h1, amount: u(10) });
+    // ledger 5: before windowFromLedger=10, should be ignored
+    chain.push(cash.id, "transfer", 5, { from: treasury, to: h2, amount: u(50) });
+    // ledger 80: after windowToLedger=70, should be ignored
+    chain.push(cash.id, "transfer", 80, { from: treasury, to: h1, amount: u(99) });
+
+    // Only ledger 12 is in [10, 70] AND after recordTime (ledger 3 / at(3))
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(3),
+      windowFromLedger: 10,
+      windowToLedger: 70,
+      ratePerUnit: "0.1",
+      payAsset: "USDX",
+      payer: treasury,
+    });
+    // h1 is entitled to 10 (100 units * 0.1) and received exactly 10 at ledger 12
+    // h2 received 50 at ledger 5, which is outside the ledger window
+    expect(action.result!.breaks.map((b) => b.address)).toContain(h2);
+    expect(action.result!.breaks.find((b) => b.address === h2)).toMatchObject({ type: "MISSING" });
+    expect(action.result!.breaks.find((b) => b.address === h1)).toBeUndefined();
+    // Params are stored and surfaced
+    expect(action.params).toMatchObject({ windowFromLedger: 10, windowToLedger: 70 });
+  });
+
+  it("validates windowFromLedger and windowToLedger as positive integers", async () => {
+    await expect(
+      concord.createAction("FUND", { type: "split", recordTime: at(5), num: "2", den: "1", windowFromLedger: 0 }),
+    ).rejects.toThrow(new Invalid("windowFromLedger must be a positive ledger sequence number"));
+    await expect(
+      concord.createAction("FUND", { type: "split", recordTime: at(5), num: "2", den: "1", windowFromLedger: -5 }),
+    ).rejects.toThrow(new Invalid("windowFromLedger must be a positive ledger sequence number"));
+    await expect(
+      concord.createAction("FUND", { type: "split", recordTime: at(5), num: "2", den: "1", windowToLedger: 0 }),
+    ).rejects.toThrow(new Invalid("windowToLedger must be a positive ledger sequence number"));
+    await expect(
+      concord.createAction("FUND", { type: "split", recordTime: at(5), num: "2", den: "1", windowToLedger: 1.5 }),
+    ).rejects.toThrow(new Invalid("windowToLedger must be a positive ledger sequence number"));
+  });
+
   it("refuses a code shared by two watched assets and a pay asset from another network", async () => {
     await concord.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
     expect(() => concord.asset("FUND")).toThrow(/more than one/);

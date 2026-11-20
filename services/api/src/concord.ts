@@ -103,6 +103,10 @@ export interface ActionInput {
   recordTime: string;
   /** End of the execution window. Open-ended when absent. */
   windowTo?: string;
+  /** First ledger of the execution window (inclusive). Events before this ledger are ignored. */
+  windowFromLedger?: number;
+  /** Last ledger of the execution window (inclusive). Events after this ledger are ignored. */
+  windowToLedger?: number;
   exclude?: string[];
   /** Dividend: pay-asset units per whole unit held. */
   ratePerUnit?: string;
@@ -1265,6 +1269,18 @@ export class Concord {
     const recordTime = isoTime(String(input.recordTime ?? ""), "recordTime");
     const params: Record<string, unknown> = { exclude: addresses(input.exclude, "exclude") };
     if (input.windowTo) params.windowTo = isoTime(input.windowTo, "windowTo");
+    if (input.windowFromLedger !== undefined) {
+      if (!Number.isInteger(input.windowFromLedger) || input.windowFromLedger < 1) {
+        throw new Invalid("windowFromLedger must be a positive ledger sequence number");
+      }
+      params.windowFromLedger = input.windowFromLedger;
+    }
+    if (input.windowToLedger !== undefined) {
+      if (!Number.isInteger(input.windowToLedger) || input.windowToLedger < 1) {
+        throw new Invalid("windowToLedger must be a positive ledger sequence number");
+      }
+      params.windowToLedger = input.windowToLedger;
+    }
     if (input.type === "dividend") {
       if (!input.ratePerUnit || !/^\d+(\.\d+)?$/.test(input.ratePerUnit)) {
         throw new Invalid("dividend needs ratePerUnit as a decimal");
@@ -1413,11 +1429,15 @@ export class Concord {
       }
     }
     const windowTo = params.windowTo as string | undefined;
+    const windowFromLedger = params.windowFromLedger as number | undefined;
+    const windowToLedger = params.windowToLedger as number | undefined;
     const observed = observeFlows(this.loadEvents(flowAsset.id), {
       afterTime: recordTime,
       plus,
       minus,
       ...(windowTo ? { untilTime: windowTo } : {}),
+      ...(windowFromLedger !== undefined ? { fromLedger: windowFromLedger } : {}),
+      ...(windowToLedger !== undefined ? { toLedger: windowToLedger } : {}),
       ...(payer ? { payer } : {}),
     });
     if (payer && observed.size === 0) {
