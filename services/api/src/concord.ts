@@ -874,7 +874,16 @@ export class Concord {
     });
   }
 
-  importJournal(ref: string, csv: string) {
+  importJournal(
+    ref: string,
+    csv: string,
+    options?: { mode?: "merge" | "replace"; allowPartial?: boolean },
+  ) {
+    const mode = options?.mode ?? "merge";
+    const allowPartial = options?.allowPartial ?? false;
+    if (mode !== "merge" && mode !== "replace") {
+      throw new Invalid("mode must be 'merge' or 'replace'");
+    }
     const asset = this.asset(ref);
     let parsed;
     try {
@@ -882,23 +891,82 @@ export class Concord {
     } catch (err) {
       throw new Invalid((err as Error).message);
     }
+    if (mode === "replace" && parsed.issues.length > 0 && !allowPartial) {
+      throw new Invalid(`cannot replace journal: CSV contains ${parsed.issues.length} parse errors and allowPartial is false`);
+    }
+
+    const existing = this.db.all<{ ref: string }>("SELECT ref FROM journal WHERE asset_id = ?", asset.id);
+    const existingRefs = new Set(existing.map((r) => r.ref));
+
+    let added = 0;
+    let replaced = 0;
+    let removed = 0;
+
     this.db.tx(() => {
-      for (const e of parsed.entries) {
-        this.db.insert(
-          `INSERT OR REPLACE INTO journal (asset_id, ref, date, type, from_addr, to_addr, units, tx_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          asset.id,
-          e.ref,
-          e.date,
-          e.type,
-          e.from ?? null,
-          e.to ?? null,
-          e.units.toString(),
-          e.txHash ?? null,
-        );
+      if (mode === "replace") {
+        const fileRefs = new Set(parsed.entries.map((e) => e.ref));
+        for (const r of existingRefs) {
+          if (!fileRefs.has(r)) {
+            removed++;
+          }
+        }
+        this.db.write("DELETE FROM journal WHERE asset_id = ?", asset.id);
+        const seenInFile = new Set<string>();
+        for (const e of parsed.entries) {
+          if (!seenInFile.has(e.ref)) {
+            seenInFile.add(e.ref);
+            if (existingRefs.has(e.ref)) {
+              replaced++;
+            } else {
+              added++;
+            }
+          }
+          this.db.insert(
+            `INSERT OR REPLACE INTO journal (asset_id, ref, date, type, from_addr, to_addr, units, tx_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            asset.id,
+            e.ref,
+            e.date,
+            e.type,
+            e.from ?? null,
+            e.to ?? null,
+            e.units.toString(),
+            e.txHash ?? null,
+          );
+        }
+      } else {
+        const seenInFile = new Set<string>();
+        for (const e of parsed.entries) {
+          if (!seenInFile.has(e.ref)) {
+            seenInFile.add(e.ref);
+            if (existingRefs.has(e.ref)) {
+              replaced++;
+            } else {
+              added++;
+            }
+          }
+          this.db.insert(
+            `INSERT OR REPLACE INTO journal (asset_id, ref, date, type, from_addr, to_addr, units, tx_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            asset.id,
+            e.ref,
+            e.date,
+            e.type,
+            e.from ?? null,
+            e.to ?? null,
+            e.units.toString(),
+            e.txHash ?? null,
+          );
+        }
       }
     });
-    return { entries: parsed.entries.length, issues: parsed.issues };
+    return {
+      entries: parsed.entries.length,
+      issues: parsed.issues,
+      added,
+      replaced,
+      removed,
+    };
   }
 
   private journal(assetId: string): JournalEntry[] {

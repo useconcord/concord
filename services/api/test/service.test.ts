@@ -1151,6 +1151,108 @@ describe("Concord", () => {
     const template = await client.call("/api/templates/register.csv");
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
   });
+
+  it("imports journal in merge mode by default, updating and adding entries (#540)", () => {
+    // Initial import: J1, J2
+    const res1 = concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\n`,
+    );
+    expect(res1).toMatchObject({ entries: 2, added: 2, replaced: 0, removed: 0 });
+
+    // Second import in merge mode: J2 (updated units), J3 (new)
+    const res2 = concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ2,${at(4)},issue,,${h2},70\nJ3,${at(5)},issue,,${h1},20\n`,
+      { mode: "merge" },
+    );
+    expect(res2).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 0 });
+
+    const rows = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    expect(rows).toEqual([
+      { ref: "J1", units: "1000000000" },
+      { ref: "J2", units: "700000000" },
+      { ref: "J3", units: "200000000" },
+    ]);
+  });
+
+  it("imports journal in replace mode, atomically swapping entries and removing absent ones (#540)", () => {
+    // Seed initial rows: J1, J2, J3
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\nJ3,${at(5)},issue,,${h1},20\n`,
+    );
+
+    // Replace with: J2 (different units), J4 (new). J1 and J3 should be removed.
+    const res = concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ2,${at(4)},issue,,${h2},80\nJ4,${at(6)},issue,,${h2},30\n`,
+      { mode: "replace" },
+    );
+    expect(res).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 2 });
+
+    const rows = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    expect(rows).toEqual([
+      { ref: "J2", units: "800000000" },
+      { ref: "J4", units: "300000000" },
+    ]);
+  });
+
+  it("refuses replace when journal has parse errors unless allowPartial is set (#540)", () => {
+    // Seed initial rows: J2, J4
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ2,${at(4)},issue,,${h2},80\nJ4,${at(6)},issue,,${h2},30\n`,
+    );
+
+    const badCsv = `ref,date,type,from_account,to_account,units\nJ5,${at(7)},unknown_type,,${h1},10\nJ2,${at(4)},issue,,${h2},99\n`;
+
+    // Without allowPartial: throws and does NOT wipe existing rows
+    expect(() => concord.importJournal("FUND", badCsv, { mode: "replace" })).toThrow(/parse error/i);
+
+    const rowsAfterFail = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    expect(rowsAfterFail).toEqual([
+      { ref: "J2", units: "800000000" },
+      { ref: "J4", units: "300000000" },
+    ]);
+
+    // With allowPartial: true: imports valid rows (J2) and removes absent rows (J4), reporting issues
+    const resPartial = concord.importJournal("FUND", badCsv, { mode: "replace", allowPartial: true });
+    expect(resPartial.issues).toHaveLength(1);
+    expect(resPartial.added).toBe(0);
+    expect(resPartial.replaced).toBe(1);
+    expect(resPartial.removed).toBe(1);
+
+    const rowsAfterPartial = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    expect(rowsAfterPartial).toEqual([
+      { ref: "J2", units: "990000000" },
+    ]);
+  });
+
+  it("handles replace via API endpoint /assets/:id/journal (#540)", async () => {
+    const client = await new Client(harness().app).signUp("journal_ops@example.test", "JournalOps");
+    const asset = await client.json<{ id: string }>("/api/assets", {
+      body: { network: "testnet", asset: `REPLACE:${key()}`, fromLedger: 1 },
+    });
+    const id = asset.id;
+
+    // Initial import
+    const res1 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(`/api/assets/${id}/journal`, {
+      body: {
+        csv: `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},10\nJ2,${at(3)},issue,,${h2},20\n`,
+      },
+    });
+    expect(res1).toMatchObject({ entries: 2, added: 2, replaced: 0, removed: 0 });
+
+    // Replace via API
+    const res2 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(`/api/assets/${id}/journal`, {
+      body: {
+        csv: `ref,date,type,from_account,to_account,units\nJ2,${at(3)},issue,,${h2},25\nJ3,${at(4)},issue,,${h1},30\n`,
+        mode: "replace",
+      },
+    });
+    expect(res2).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 1 });
+  });
 });
 
 describe("documented input files", () => {
