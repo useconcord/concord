@@ -7,6 +7,7 @@ import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/cha
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
 import { Db } from "../src/db.js";
+import { SIGNATURE_HEADER, WebhookSender, sign, webhookUrlProblem } from "../src/webhook.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
 const validateAuditPack = new Ajv({ allErrors: true, strict: true }).compile(
@@ -1239,5 +1240,152 @@ describe("README CLI examples", () => {
         expect(usageFlags.has(flag), `README example passes "${flag}", but the CLI usage text does not name it`).toBe(true);
       }
     }
+  });
+});
+
+describe("outbound webhooks", () => {
+  const event = {
+    type: "run.breaks" as const,
+    asset: { id: "CASSET", code: "FUND" },
+    count: 2,
+    url: "http://concord.test/#/a/CASSET/reconciliation",
+  };
+  const secret = "test-webhook-secret";
+  /** An endpoint whose host resolves to a public address, so only the fetch stub is exercised. */
+  const publicHost = async () => ["93.184.216.34"];
+
+  it("refuses private, loopback and non-https targets", async () => {
+    const refused = [
+      "http://hooks.example.com/concord",
+      "https://localhost/hook",
+      "https://127.0.0.1/hook",
+      "https://10.1.2.3/hook",
+      "https://172.16.0.1/hook",
+      "https://192.168.1.10/hook",
+      "https://169.254.169.254/latest/meta-data",
+      "https://[::1]/hook",
+      "https://user:pass@hooks.example.com/hook",
+      "https://hooks.example.com:0/hook",
+      "https://metadata/hook",
+    ];
+    for (const url of refused) expect(webhookUrlProblem(url), url).toBeDefined();
+    expect(webhookUrlProblem("https://hooks.example.com/concord")).toBeUndefined();
+
+    const sender = new WebhookSender({
+      resolve: async () => ["127.0.0.1"],
+      fetch: (async () => new Response(null, { status: 204 })) as typeof fetch,
+      pause: async () => {},
+    });
+    await expect(sender.send("https://hooks.example.com/hook", secret, event)).rejects.toThrow(
+      /private or loopback/,
+    );
+  });
+
+  it("signs the exact body so a receiver can verify it", async () => {
+    let received: { url: string; body: string; headers: Headers } | undefined;
+    const sender = new WebhookSender({
+      resolve: publicHost,
+      pause: async () => {},
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        received = {
+          url: String(input),
+          body: String(init?.body),
+          headers: new Headers(init?.headers),
+        };
+        return new Response(null, { status: 204 });
+      }) as typeof fetch,
+    });
+    await sender.notify("https://hooks.example.com/concord", secret, event);
+    expect(received?.url).toBe("https://hooks.example.com/concord");
+    expect(received?.headers.get("content-type")).toBe("application/json");
+    expect(received?.headers.get("x-concord-event")).toBe("run.breaks");
+    expect(JSON.parse(received!.body)).toEqual(event);
+    expect(received?.headers.get(SIGNATURE_HEADER)).toBe(sign(secret, received!.body));
+    expect(received?.headers.get(SIGNATURE_HEADER)).not.toBe(sign("another-secret", received!.body));
+  });
+
+  it("logs a failed delivery instead of throwing it", async () => {
+    const logged: string[] = [];
+    let tries = 0;
+    const sender = new WebhookSender({
+      resolve: publicHost,
+      attempts: 3,
+      baseDelayMs: 1,
+      pause: async () => {},
+      log: (message) => void logged.push(message),
+      fetch: (async () => {
+        tries++;
+        throw new Error("connect ECONNREFUSED");
+      }) as typeof fetch,
+    });
+    await expect(sender.notify("https://hooks.example.com/concord", secret, event)).resolves.toBeUndefined();
+    expect(tries).toBe(3);
+    expect(logged.at(-1)).toContain("was not delivered");
+
+    // A 4xx is the receiver saying no; retrying it would only be noise.
+    tries = 0;
+    const rejecting = new WebhookSender({
+      resolve: publicHost,
+      attempts: 3,
+      pause: async () => {},
+      log: () => {},
+      fetch: (async () => {
+        tries++;
+        return new Response(null, { status: 400 });
+      }) as typeof fetch,
+    });
+    await expect(rejecting.notify("https://hooks.example.com/concord", secret, event)).resolves.toBeUndefined();
+    expect(tries).toBe(1);
+  });
+
+  it("posts run.breaks from a reconciliation, over the owner's endpoint only", async () => {
+    const h = harness();
+    const issuer = key();
+    const holder = key();
+    const client = await new Client(h.app).signUp("alerts@example.test", "Alerts");
+    const ws = h.tenants.forOrg(client.orgId);
+    const asset = await ws.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+    h.chain.push(asset.id, "mint", 3, { to: holder, amount: u(100) });
+
+    expect((await client.call("/api/org/webhook", { method: "PUT", body: { url: "https://10.0.0.1/hook" } })).status).toBe(400);
+    const configured = await client.json<{ url: string; secret: string }>("/api/org/webhook", {
+      method: "PUT",
+      body: { url: "https://hooks.example.com/concord" },
+    });
+    expect(configured.url).toBe("https://hooks.example.com/concord");
+    expect(configured.secret).toBeTruthy();
+    expect(await client.json("/api/org/webhook")).toEqual(configured);
+
+    const delivered: Array<{ body: string; signature: string | null; event: string | null }> = [];
+    ws.webhooks = new WebhookSender({
+      resolve: publicHost,
+      pause: async () => {},
+      fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+        delivered.push({
+          body: String(init?.body),
+          signature: new Headers(init?.headers).get(SIGNATURE_HEADER),
+          event: new Headers(init?.headers).get("x-concord-event"),
+        });
+        return new Response(null, { status: 204 });
+      }) as typeof fetch,
+    });
+
+    // Holder A holds 100 on chain but the register says 90, so the run has breaks.
+    const created = await client.call(`/api/assets/${asset.id}/registers`, {
+      body: { csv: `holder_id,account,units\nA,${holder},90\n`, asOf: at(40) },
+    });
+    expect(created.status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(delivered).toHaveLength(1);
+    const body = JSON.parse(delivered[0]!.body) as typeof event;
+    expect(body).toMatchObject({
+      type: "run.breaks",
+      asset: { id: asset.id, code: "FUND" },
+      count: 2,
+    });
+    expect(body.url).toBe(`http://concord.test/#/a/${asset.id}/reconciliation`);
+    expect(delivered[0]!.event).toBe("run.breaks");
+    expect(delivered[0]!.signature).toBe(sign(configured.secret, delivered[0]!.body));
   });
 });

@@ -77,6 +77,8 @@ function probes(s: Seeded): Record<string, Probe> {
     "DELETE /api/org/members/:userId": p("DELETE", `/api/org/members/${s.a.userId}`),
     "PATCH /api/org": p("PATCH", "/api/org", { name: "Beta Partners" }),
     "DELETE /api/org": p("DELETE", "/api/org", { confirm: "Alpha Capital" }),
+    "GET /api/org/webhook": p("GET", "/api/org/webhook"),
+    "PUT /api/org/webhook": p("PUT", "/api/org/webhook", { url: "https://hooks.example.com/concord" }),
     "GET /api/overview": p("GET", "/api/overview"),
     "GET /api/lookup": p("GET", "/api/lookup?network=testnet&code=FUND"),
     "POST /api/assets": p("POST", "/api/assets", { network: "testnet", asset: "not an asset" }),
