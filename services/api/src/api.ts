@@ -312,6 +312,10 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json(await c.var.ws.createAction(id(c), await jsonBody<ActionInput>(c), c.var.actor), 201);
   });
   priv.get("/actions/:id", (c) => c.json(c.var.ws.action(numeric(c, "id"))));
+  priv.delete("/actions/:id", async (c) => {
+    await c.var.ws.deleteAction(numeric(c, "id"));
+    return c.json({ ok: true });
+  });
   priv.post("/actions/:id/reconcile", async (c) => {
     throttle(c, "reconcile", 20, 10 * 60_000);
     return c.json(await c.var.ws.reconcileAction(numeric(c, "id")));
