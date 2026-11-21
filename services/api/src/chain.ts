@@ -352,6 +352,7 @@ export class StellarSource implements ChainSource {
     return res;
   }
 
+  /** Parses JSON response, converting unparseable bodies (e.g. captive portal HTML, empty body) to retryable failure. */
   private async json<T>(res: Response): Promise<T> {
     try {
       return (await res.json()) as T;

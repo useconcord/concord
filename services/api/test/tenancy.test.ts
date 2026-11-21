@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync as readFixture } from "node:fs";
 import { StrKey } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
-import { StellarSource } from "../src/chain.js";
+import { ChainError, StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
 import { loadConfig } from "../src/config.js";
 import { Db } from "../src/db.js";
@@ -752,8 +752,16 @@ describe("chain endpoints", () => {
       if (!next) throw new TypeError("fetch failed");
       return next();
     }) as typeof globalThis.fetch;
-    const deps = { fetch, sleep: async (ms: number) => void (clock.value += ms), now: () => clock.value };
-    return { calls, clock, deps };
+    const sleeps: number[] = [];
+    const deps = {
+      fetch,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        clock.value += ms;
+      },
+      now: () => clock.value,
+    };
+    return { calls, clock, sleeps, deps };
   }
 
   it("URL-encodes unusual asset and issuer values in search, describe and baseline", async () => {
@@ -1054,6 +1062,61 @@ describe("chain endpoints", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain("h1.example: unexpected response");
     expect(err.message).toContain("h2.example: unexpected response");
+  });
+
+  it("retries an unreadable HTML response once, sleeping 250-500ms, and succeeds if next is valid", async () => {
+    const a = "https://a.example";
+    const { calls, sleeps, deps } = scripted({
+      [a]: [
+        () => new Response("<html><head><title>Sign in</title></head><body>Captive portal</body></html>", { status: 200, headers: { "content-type": "text/html" } }),
+        health,
+      ],
+    });
+    const source = new StellarSource(network([a]), deps);
+    const head = await source.latestLedger();
+    expect(head.latest).toBe(50);
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeGreaterThanOrEqual(250);
+    expect(sleeps[0]).toBeLessThanOrEqual(500);
+  });
+
+  it("retries an unreadable HTML response once and reports ChainError with unreadable response on second failure", async () => {
+    const a = "https://a.example";
+    const { calls, sleeps, deps } = scripted({
+      [a]: [
+        () => new Response("<html>502 Bad Gateway</html>", { status: 200 }),
+        () => new Response("<html>502 Bad Gateway</html>", { status: 200 }),
+      ],
+    });
+    const source = new StellarSource(network([a]), deps);
+    const err = await source.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(ChainError);
+    expect(err).not.toBeInstanceOf(SyntaxError);
+    expect((err as ChainError).message).toContain("a.example: unreadable response");
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeGreaterThanOrEqual(250);
+    expect(sleeps[0]).toBeLessThanOrEqual(500);
+  });
+
+  it("retries an empty response body once and reports ChainError with unreadable response on second failure", async () => {
+    const a = "https://a.example";
+    const { calls, sleeps, deps } = scripted({
+      [a]: [
+        () => new Response("", { status: 200 }),
+        () => new Response("", { status: 200 }),
+      ],
+    });
+    const source = new StellarSource(network([a]), deps);
+    const err = await source.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(ChainError);
+    expect(err).not.toBeInstanceOf(SyntaxError);
+    expect((err as ChainError).message).toContain("a.example: unreadable response");
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeGreaterThanOrEqual(250);
+    expect(sleeps[0]).toBeLessThanOrEqual(500);
   });
 });
 
