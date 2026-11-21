@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync as readFixture } from "node:fs";
 import { StrKey } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
@@ -1381,6 +1381,48 @@ describe("what ships", () => {
 
     const cfgAny = loadConfig({ CONCORD_HOST: "::", CONCORD_PORT: "4400" });
     expect(cfgAny.publicUrl).toBe("http://127.0.0.1:4400");
+  });
+
+  it("loadConfig(process.env) loads .env with real environment variables taking precedence (#489)", () => {
+    const origEnv = { ...process.env };
+    const origLoadEnvFile = process.loadEnvFile;
+    const tempDir = mkdtempSync(join(tmpdir(), "concord-env-test-"));
+    const tempEnvFile = join(tempDir, ".env");
+    writeFileSync(tempEnvFile, "CONCORD_PORT=5000\nCONCORD_SYNC_INTERVAL=7\n", "utf8");
+
+    try {
+      // Preset process.env.CONCORD_PORT=6000 to test precedence
+      process.env.CONCORD_PORT = "6000";
+      delete process.env.CONCORD_SYNC_INTERVAL;
+
+      // Spy process.loadEnvFile to redirect to the temp .env file
+      vi.spyOn(process, "loadEnvFile").mockImplementation(() => {
+        origLoadEnvFile.call(process, tempEnvFile);
+      });
+
+      const config = loadConfig(process.env);
+      // Environment variable (6000) beats the file (5000)
+      expect(config.port).toBe(6000);
+      // The file fills gaps (7)
+      expect(config.syncIntervalSec).toBe(7);
+
+      // Now test with the spy throwing ENOENT: expect defaults and no error
+      vi.spyOn(process, "loadEnvFile").mockImplementation(() => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      });
+      delete process.env.CONCORD_PORT;
+      delete process.env.CONCORD_SYNC_INTERVAL;
+      const defaultConfig = loadConfig(process.env);
+      expect(defaultConfig.port).toBe(4400);
+      expect(defaultConfig.syncIntervalSec).toBe(30);
+    } finally {
+      vi.restoreAllMocks();
+      for (const key of Object.keys(process.env)) {
+        if (!(key in origEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, origEnv);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("serves static files with correct MIME types for Vite assets and falls back to octet-stream", async () => {
