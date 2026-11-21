@@ -283,6 +283,72 @@ describe("workspace isolation", () => {
     expect((await new Client(s.h.app).call("/api/auth/signin", { body: { email: "ann@alpha.test", password: "correct horse battery" } })).status).toBe(401);
     expect((await s.b.call("/api/overview")).status).toBe(200);
   });
+
+  it("isolates a failing workspace during syncAll, reports its error and advances due actions in healthy ones (#501)", async () => {
+    const chain = new FakeChain();
+    chain.latest = 50;
+    const org1 = "1111111111111111";
+    const org2 = "2222222222222222";
+    const org3 = "3333333333333333";
+    const orgIds = [org1, org2, org3];
+
+    const dbs = new Map<string, Db>();
+    const store = {
+      open: (id: string) => {
+        if (id === org2) throw new Error("disk full");
+        if (!dbs.has(id)) dbs.set(id, new Db(":memory:", ORG_MIGRATIONS));
+        return dbs.get(id)!;
+      },
+      remove: (id: string) => dbs.delete(id),
+    };
+
+    const tenants = new Tenants(store, { testnet: { passphrase: PASSPHRASE, chain } }, () => true, () => orgIds);
+
+    try {
+      const w1 = tenants.forOrg(org1);
+      const w3 = tenants.forOrg(org3);
+
+      const a1 = await w1.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
+      const a3 = await w3.watchAsset({ network: "testnet", asset: `BOND:${key()}`, fromLedger: 1 });
+
+      // Schedule a split in w1 beyond chain.latest (recordTime at ledger 250)
+      const action = await w1.createAction(a1.id, {
+        type: "split",
+        recordTime: at(250),
+        num: "1",
+        den: "1",
+      });
+
+      // Before chain advances, action is scheduled and has no snapshot
+      expect(action.state).toBe("scheduled");
+      expect(action.snapshot).toBeNull();
+
+      // First syncAll pass with chain.latest = 50
+      const results1 = await tenants.syncAll();
+      expect(results1).toEqual([
+        { orgId: org1, assetId: a1.id, added: 0 },
+        { orgId: org2, assetId: "", error: "disk full" },
+        { orgId: org3, assetId: a3.id, added: 0 },
+      ]);
+      expect(w1.action(action.id).state).toBe("scheduled");
+
+      // Advance chain to 300 so recordTime (at(250)) is reached
+      chain.latest = 300;
+      const results2 = await tenants.syncAll();
+      expect(results2).toEqual([
+        { orgId: org1, assetId: a1.id, added: 0 },
+        { orgId: org2, assetId: "", error: "disk full" },
+        { orgId: org3, assetId: a3.id, added: 0 },
+      ]);
+
+      // ReconcileDue ran during syncAll and advanced the scheduled action to clean
+      const advanced = w1.action(action.id);
+      expect(advanced.state).toBe("clean");
+      expect(advanced.snapshot).not.toBeNull();
+    } finally {
+      tenants.close();
+    }
+  });
 });
 
 describe("accounts and sessions", () => {
