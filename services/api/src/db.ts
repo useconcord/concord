@@ -71,7 +71,11 @@ export class Db {
     }
   }
 
-  /** Changes whenever another connection commits to this file. */
+  /**
+   * Changes whenever another connection commits to this file. A connection's own commit leaves
+   * it unchanged, and another connection's uncommitted transaction does not move it. Concord
+   * polls this to notice a CLI write to the same file, so keep those three cases distinct.
+   */
   dataVersion(): number {
     return this.pragma("data_version");
   }
