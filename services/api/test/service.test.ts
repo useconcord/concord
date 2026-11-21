@@ -5,7 +5,7 @@ import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
-import { Concord, Invalid, NotFound } from "../src/concord.js";
+import { Concord, Invalid, NotFound, describeFailure } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
@@ -899,11 +899,39 @@ describe("Concord", () => {
     const stalled = concord.asset("FUND");
     // The first page is kept, but the asset does not claim to be indexed to ledger 200.
     expect(stalled).toMatchObject({ syncedLedger: 100, syncedAt: before.syncedAt });
-    expect(stalled.syncError).toBe("Indexing stopped on an unexpected error.");
+    expect(stalled.syncError).toBe("[internal] Indexing stopped on an unexpected error.");
     expect(await concord.sync("FUND")).toEqual({ added: 500 });
     const healed = concord.asset("FUND");
     expect(healed.syncedLedger).toBe(200);
     expect(healed.syncError).toBeUndefined();
+  });
+
+  it("maps SQLite busy and full errors to distinct user-facing messages (#534)", () => {
+    const errBusyCode = Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
+    const errBusyNum = Object.assign(new Error("database is locked"), { code: "ERR_SQLITE_ERROR", errcode: 5, errstr: "busy" });
+    const errLocked = Object.assign(new Error("database table is locked"), { code: "ERR_SQLITE_ERROR", errcode: 6, errstr: "database table is locked" });
+    const errFullCode = Object.assign(new Error("SQLITE_FULL: database or disk is full"), { code: "SQLITE_FULL" });
+    const errFullNum = Object.assign(new Error("database or disk is full"), { code: "ERR_SQLITE_ERROR", errcode: 13, errstr: "database or disk is full" });
+    const errEnospc = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    const errGeneric = new Error("something unexpected failed");
+
+    const logged: unknown[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args[0]); };
+    try {
+      expect(describeFailure(errBusyCode)).toBe("[db_locked] Database is locked.");
+      expect(describeFailure(errBusyNum)).toBe("[db_locked] Database is locked.");
+      expect(describeFailure(errLocked)).toBe("[db_locked] Database is locked.");
+      expect(describeFailure(errFullCode)).toBe("[disk_full] Database or disk is full.");
+      expect(describeFailure(errFullNum)).toBe("[disk_full] Database or disk is full.");
+      expect(describeFailure(errEnospc)).toBe("[disk_full] Database or disk is full.");
+      expect(describeFailure(errGeneric)).toBe("[internal] Indexing stopped on an unexpected error.");
+      expect(logged).toHaveLength(7);
+      expect(logged[0]).toBe(errBusyCode);
+      expect(logged[6]).toBe(errGeneric);
+    } finally {
+      console.error = origError;
+    }
   });
 
   it("reports an unreadable saved cursor instead of a parse error or a skipped gap check", async () => {

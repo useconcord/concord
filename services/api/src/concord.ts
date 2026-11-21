@@ -213,11 +213,47 @@ function label(value: unknown, field: string, max = 120): string | undefined {
   return value.trim() || undefined;
 }
 
+function isDbLockedError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  if (typeof e.errcode === "number") {
+    const primary = e.errcode & 0xff;
+    if (primary === 5 || primary === 6) return true;
+  }
+  if (e.code === "SQLITE_BUSY" || e.code === "SQLITE_LOCKED") return true;
+  const msg = typeof e.message === "string" ? e.message : "";
+  const errstr = typeof e.errstr === "string" ? e.errstr : "";
+  return (
+    /sqlite_busy|sqlite_locked/i.test(msg) ||
+    /database is locked|database table is locked/i.test(msg) ||
+    /database is locked|busy/i.test(errstr)
+  );
+}
+
+function isDiskFullError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  if (typeof e.errcode === "number") {
+    const primary = e.errcode & 0xff;
+    if (primary === 13) return true;
+  }
+  if (e.code === "SQLITE_FULL" || e.code === "ENOSPC") return true;
+  const msg = typeof e.message === "string" ? e.message : "";
+  const errstr = typeof e.errstr === "string" ? e.errstr : "";
+  return (
+    /sqlite_full|enospc/i.test(msg) ||
+    /database or disk is full|disk full|no space left/i.test(msg) ||
+    /database or disk is full/i.test(errstr)
+  );
+}
+
 /** What to tell the dashboard about a failed pass. Internals stay in the server log. */
-function describeFailure(err: unknown): string {
+export function describeFailure(err: unknown): string {
   if (err instanceof ChainError || err instanceof Invalid || err instanceof NotFound) return err.message;
   console.error(err);
-  return "Indexing stopped on an unexpected error.";
+  if (isDbLockedError(err)) return "[db_locked] Database is locked.";
+  if (isDiskFullError(err)) return "[disk_full] Database or disk is full.";
+  return "[internal] Indexing stopped on an unexpected error.";
 }
 
 function toAsset(row: Row): AssetRecord {

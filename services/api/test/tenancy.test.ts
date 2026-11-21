@@ -631,7 +631,7 @@ describe("networks", () => {
     testnet.failOnCall = 1;
     const results = await concord.syncAll();
     expect(results[onMain.id]).toEqual({ added: 1 });
-    expect(results[onTest.id]).toEqual({ error: "Indexing stopped on an unexpected error." });
+    expect(results[onTest.id]).toEqual({ error: "[internal] Indexing stopped on an unexpected error." });
     expect(concord.holdings(onMain.id).supply).toBe("7");
     expect(concord.asset(onTest.id).syncError).toBeTruthy();
     await concord.syncAll();
