@@ -17,7 +17,9 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   holdings ASSET [--as-of ISO]     on-chain holders
   register ASSET FILE --as-of ISO  import a register export and reconcile it
   journal ASSET FILE               import the register's transaction journal
+  journal-list ASSET [--limit N] [--before REF|ISO]  list imported journal entries
   instructions ASSET FILE          import control instructions
+  instructions-list ASSET          list imported control instructions
   reconcile ASSET [--register ID]  re-run a reconciliation
   action ASSET dividend --record ISO --rate R [--pay-asset A] [--payer G...] [--until ISO]
   action ASSET split|redemption --record ISO --ratio NUM:DEN [--until ISO]
