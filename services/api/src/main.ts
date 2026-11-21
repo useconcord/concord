@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
-import { Hono } from "hono";
+import { Hono, type Context, type Handler } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import { createApi } from "./api.js";
 import { Auth } from "./auth.js";
@@ -67,6 +67,44 @@ export function openRuntime(config: Config): Runtime {
   };
 }
 
+export function createStaticHandler(webDir: string): Handler {
+  return (c: Context) => {
+    if (!existsSync(webDir)) {
+      return c.text("Concord API is running. Build the dashboard with `pnpm build` to serve it here.");
+    }
+    let requested: string;
+    try {
+      requested = decodeURIComponent(c.req.path);
+    } catch {
+      return c.text("Bad request", 400);
+    }
+    // Refuse dotfile segments (e.g. /.hidden, /a/.git/config).
+    const segments = requested.split("/").filter(Boolean);
+    if (segments.some((s) => s.startsWith("."))) {
+      return c.text("Not found", 404);
+    }
+
+    const path = normalize(join(webDir, requested));
+    // The separator matters: without it a sibling directory sharing the prefix would count as inside.
+    const inside = path === webDir || path.startsWith(webDir + sep);
+    const found = inside && existsSync(path) && statSync(path).isFile();
+    // A build asset that is not there, or any missing file with an extension, is a 404; only extensionless routes fall back to the app shell.
+    const lastSegment = segments[segments.length - 1] ?? "";
+    const hasExtension = extname(lastSegment) !== "";
+    if (!found && (hasExtension || requested.startsWith("/assets/"))) return c.text("Not found", 404);
+    const file = found ? path : join(webDir, "index.html");
+    const assetsDir = normalize(join(webDir, "assets"));
+    const isAsset = found && (path === assetsDir || path.startsWith(assetsDir + sep));
+    return c.body(new Uint8Array(readFileSync(file)), 200, {
+      "content-type": MIME[extname(file)] ?? "application/octet-stream",
+      // Vite names build assets by content hash, so they never change under a given name.
+      "cache-control": isAsset ? "public, max-age=31536000, immutable" : "no-cache",
+    });
+  };
+}
+
+export { createStaticHandler as staticHandler };
+
 export function createServerApp(runtime: Runtime, config: Config): Hono {
   const secure = config.publicUrl.startsWith("https://");
   const app = new Hono();
@@ -107,39 +145,7 @@ export function createServerApp(runtime: Runtime, config: Config): Hono {
   );
 
   // The built dashboard, with index.html standing in for client-side routes.
-  app.get("*", (c) => {
-    if (!existsSync(config.webDir)) {
-      return c.text("Concord API is running. Build the dashboard with `pnpm build` to serve it here.");
-    }
-    let requested: string;
-    try {
-      requested = decodeURIComponent(c.req.path);
-    } catch {
-      return c.text("Bad request", 400);
-    }
-    // Refuse dotfile segments (e.g. /.hidden, /a/.git/config).
-    const segments = requested.split("/").filter(Boolean);
-    if (segments.some((s) => s.startsWith("."))) {
-      return c.text("Not found", 404);
-    }
-
-    const path = normalize(join(config.webDir, requested));
-    // The separator matters: without it a sibling directory sharing the prefix would count as inside.
-    const inside = path === config.webDir || path.startsWith(config.webDir + sep);
-    const found = inside && existsSync(path) && statSync(path).isFile();
-    // A build asset that is not there, or any missing file with an extension, is a 404; only extensionless routes fall back to the app shell.
-    const lastSegment = segments[segments.length - 1] ?? "";
-    const hasExtension = extname(lastSegment) !== "";
-    if (!found && (hasExtension || requested.startsWith("/assets/"))) return c.text("Not found", 404);
-    const file = found ? path : join(config.webDir, "index.html");
-    const assetsDir = normalize(join(config.webDir, "assets"));
-    const isAsset = found && (path === assetsDir || path.startsWith(assetsDir + sep));
-    return c.body(new Uint8Array(readFileSync(file)), 200, {
-      "content-type": MIME[extname(file)] ?? "application/octet-stream",
-      // Vite names build assets by content hash, so they never change under a given name.
-      "cache-control": isAsset ? "public, max-age=31536000, immutable" : "no-cache",
-    });
-  });
+  app.get("*", createStaticHandler(config.webDir));
 
   return app;
 }
