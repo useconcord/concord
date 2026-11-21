@@ -658,6 +658,59 @@ describe("networks", () => {
     expect(() => loadConfig({ CONCORD_PUBLIC_URL: "not a url" })).toThrow(/must be a URL/);
   });
 
+  it.each([
+    {
+      name: "CONCORD_PUBLIC_URL beats RENDER_EXTERNAL_URL",
+      env: { CONCORD_PUBLIC_URL: "https://public.example", RENDER_EXTERNAL_URL: "https://render.example" },
+      expected: "https://public.example",
+    },
+    {
+      name: "RENDER_EXTERNAL_URL beats default http://host:port",
+      env: { RENDER_EXTERNAL_URL: "https://render.example" },
+      expected: "https://render.example",
+    },
+    {
+      name: "default http://host:port fallback",
+      env: { CONCORD_HOST: "127.0.0.1", CONCORD_PORT: "4400" },
+      expected: "http://127.0.0.1:4400",
+    },
+    {
+      name: "trailing slash is dropped",
+      env: { CONCORD_PUBLIC_URL: "https://x.example/" },
+      expected: "https://x.example",
+    },
+    {
+      name: "0.0.0.0 host maps to 127.0.0.1",
+      env: { CONCORD_HOST: "0.0.0.0", CONCORD_PORT: "4400" },
+      expected: "http://127.0.0.1:4400",
+    },
+    {
+      name: "IPv6 ::1 host brackets to [::1]",
+      env: { CONCORD_HOST: "::1", CONCORD_PORT: "4400" },
+      expected: "http://[::1]:4400",
+    },
+    {
+      // Sub-paths were previously stripped silently; current behavior rejects them explicitly
+      // to avoid cookies and OAuth redirect URI pointing to the wrong root origin.
+      name: "path is rejected (sub-path hosting not supported)",
+      env: { CONCORD_PUBLIC_URL: "https://x.example/app/" },
+      error: /sub-path hosting is not supported/,
+    },
+    {
+      // Current behavior accepts non-http schemes like ftp:// because any valid URL
+      // with pathname "/" is parsed by new URL() and its origin is preserved.
+      name: "ftp scheme is accepted",
+      env: { CONCORD_PUBLIC_URL: "ftp://x.example" },
+      expected: "ftp://x.example",
+    },
+  ])("derives publicUrl correctly: $name (#488)", ({ env, expected, error }) => {
+    if (error) {
+      expect(() => loadConfig(env)).toThrow(error);
+    } else {
+      expect(loadConfig(env).publicUrl).toBe(expected);
+    }
+  });
+
   it("serves both networks with public endpoints by default and names retired settings", () => {
     const config = loadConfig({});
     expect(config.defaultNetwork).toBe("mainnet");
