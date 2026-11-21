@@ -43,6 +43,21 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("opens the v2 workspace database with default matching windows and keeps v3 custom windows", () => {
+    upgraded("org-v2.db", ORG_MIGRATIONS, (db) => {
+      const row = db.get<{ instruction_window_hours: number; movement_window_hours: number }>(
+        "SELECT instruction_window_hours, movement_window_hours FROM assets WHERE id = 'usd-mainnet'",
+      );
+      expect(row).toEqual({ instruction_window_hours: 72, movement_window_hours: 24 });
+    });
+    upgraded("org-v3.db", ORG_MIGRATIONS, (db) => {
+      const row = db.get<{ instruction_window_hours: number; movement_window_hours: number }>(
+        "SELECT instruction_window_hours, movement_window_hours FROM assets WHERE id = 'usd-mainnet'",
+      );
+      expect(row).toEqual({ instruction_window_hours: 48, movement_window_hours: 12 });
+    });
+  });
+
   it("backfills sign-off history from the v1 notes when upgrading", () => {
     upgraded("org-v1.db", ORG_MIGRATIONS, (db) => {
       expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM break_note_history")?.n).toBe(0);

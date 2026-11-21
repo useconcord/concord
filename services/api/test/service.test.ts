@@ -682,7 +682,9 @@ describe("Concord", () => {
         "asset.indexedFromLedger",
         "asset.indexedTo",
         "asset.indexedToLedger",
+        "asset.instructionWindowHours",
         "asset.issuer",
+        "asset.movementWindowHours",
         "asset.name",
         "asset.network",
         "controls.asOf",
@@ -1150,6 +1152,70 @@ describe("Concord", () => {
     expect(await csv.text()).toContain(h1);
     const template = await client.call("/api/templates/register.csv");
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
+  });
+
+  it("applies per-asset instructionWindowHours and movementWindowHours and includes them in the audit pack", async () => {
+    const h = harness();
+    const client = await new Client(h.app).signUp("windows@example.test", "Windows Org");
+    const issuer = key();
+    const holder = key();
+    const concord = h.tenants.forOrg(client.orgId);
+
+    await expect(
+      concord.watchAsset({ network: "testnet", asset: `BAD:${issuer}`, fromLedger: 1, instructionWindowHours: 0 }),
+    ).rejects.toThrow(/between 1 and 720/);
+    await expect(
+      concord.watchAsset({ network: "testnet", asset: `BAD:${issuer}`, fromLedger: 1, movementWindowHours: 721 }),
+    ).rejects.toThrow(/between 1 and 720/);
+
+    // Custom tight windows: 2h for instructions, 2h for movements.
+    // Recall FakeChain helper at(n) advances 60s per ledger (60 ledgers = 1h).
+    const asset = await concord.watchAsset({
+      network: "testnet",
+      asset: `FUND:${issuer}`,
+      fromLedger: 1,
+      instructionWindowHours: 2,
+      movementWindowHours: 2,
+    });
+    expect(asset.instructionWindowHours).toBe(2);
+    expect(asset.movementWindowHours).toBe(2);
+
+    // Mint executes at ledger 185 (~3h after ledger 5) and freeze executes at ledger 185 (~3h after ledger 5).
+    h.chain.latest = 200;
+    h.chain.push(asset.id, "mint", 185, { to: holder, amount: u(50), txHash: "tx-mint" });
+    h.chain.push(asset.id, "set_authorized", 185, { from: holder, authorized: false, txHash: "tx-freeze" });
+    await concord.sync(asset.id);
+
+    concord.importJournal(asset.id, `ref,date,type,from_account,to_account,units\nJ1,${at(5)},issue,,${holder},50\n`);
+    concord.importInstructions(asset.id, `ref,type,account,units,issued_at\nI1,freeze,${holder},,${at(5)}\n`);
+    concord.importRegister(asset.id, {
+      csv: `holder_id,account,units\nH1,${holder},50\n`,
+      asOf: at(190),
+    });
+
+    // Under 2h windows: ledger 185 is 180 minutes (3h) after ledger 5 -> outside both windows.
+    const runTight = await concord.reconcile(asset.id);
+    expect(runTight.breaks.some((b) => b.type === "UNSETTLED_ENTRY" && b.ref === "J1")).toBe(true);
+    const controlsTight = concord.controls(asset.id);
+    expect(controlsTight.breaks.some((b) => b.type === "UNEXECUTED_INSTRUCTION" && b.ref === "I1")).toBe(true);
+
+    // Widen both windows to 4h -> the 3h delay now matches cleanly.
+    const updated = await client.json<{ instructionWindowHours: number; movementWindowHours: number }>(`/api/assets/${asset.id}`, {
+      method: "PATCH",
+      body: { instructionWindowHours: 4, movementWindowHours: 4 },
+    });
+    expect(updated).toMatchObject({ instructionWindowHours: 4, movementWindowHours: 4 });
+
+    const runWide = await concord.reconcile(asset.id);
+    expect(runWide.breaks.some((b) => b.type === "UNSETTLED_ENTRY")).toBe(false);
+    const controlsWide = concord.controls(asset.id);
+    expect(controlsWide.breaks).toEqual([]);
+    expect(controlsWide.summary.instructed).toBe(1);
+
+    const pack = concord.auditExport(asset.id);
+    expect(pack.asset.instructionWindowHours).toBe(4);
+    expect(pack.asset.movementWindowHours).toBe(4);
+    expect(validateAuditPack(pack), JSON.stringify(validateAuditPack.errors)).toBe(true);
   });
 });
 

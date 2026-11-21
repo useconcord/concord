@@ -101,7 +101,9 @@
         "historyFrom",
         "indexedToLedger",
         "indexedTo",
-        "ignoredAddresses"
+        "ignoredAddresses",
+        "instructionWindowHours",
+        "movementWindowHours"
       ],
       "properties": {
         "id": { "type": "string" },
@@ -115,7 +117,9 @@
         "historyFrom": { "$ref": "#/definitions/nullableDateTime" },
         "indexedToLedger": { "type": ["integer", "null"] },
         "indexedTo": { "$ref": "#/definitions/nullableDateTime" },
-        "ignoredAddresses": { "type": "array", "items": { "type": "string" } }
+        "ignoredAddresses": { "type": "array", "items": { "type": "string" } },
+        "instructionWindowHours": { "type": "integer", "minimum": 1, "maximum": 720 },
+        "movementWindowHours": { "type": "integer", "minimum": 1, "maximum": 720 }
       }
     },
     "period": {
