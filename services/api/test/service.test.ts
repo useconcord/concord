@@ -165,6 +165,106 @@ describe("decodeEvent", () => {
     expect(page.latestLedger).toBe(100);
     expect(page.cursor).toBe("cursor-1");
   });
+
+  it("never throws across 5000 seeded fuzz inputs", () => {
+    const seed = 0x512c0de;
+    let state = seed >>> 0;
+    const nextU32 = () => {
+      state = (state + 0x6d2b79f5) >>> 0;
+      let t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return (t ^ (t >>> 14)) >>> 0;
+    };
+    const nextInt = (max: number) => nextU32() % max;
+    const randBase64 = (len: number) => {
+      const buf = Buffer.allocUnsafe(len);
+      for (let j = 0; j < len; j++) buf[j] = nextInt(256);
+      return buf.toString("base64");
+    };
+
+    const validTemplates = [
+      { topic: [sym("transfer"), addr(a), addr(b), str(`FUND:${a}`)], value: i128(5n) },
+      { topic: [sym("mint"), addr(a), addr(b), str(`FUND:${a}`)], value: i128(7n) },
+      { topic: [sym("burn"), addr(b), str(`FUND:${a}`)], value: i128(3n) },
+      { topic: [sym("clawback"), addr(a), addr(b), str(`FUND:${a}`)], value: i128(2n) },
+      { topic: [sym("set_authorized"), addr(b), str(`FUND:${a}`)], value: nativeToScVal(true).toXDR("base64") },
+    ];
+    const hugeVecXdr = nativeToScVal(Array.from({ length: 120 }, (_, k) => k)).toXDR("base64");
+    const extraTopics = [sym("transfer"), sym("mint"), sym("approve"), addr(a), str("extra"), hugeVecXdr];
+    const weirdDates = [
+      "",
+      "garbage",
+      "0",
+      "1970-01-01T00:00:00Z",
+      "+275760-09-13T00:00:00.000Z",
+      "-271821-04-20T00:00:00.000Z",
+      "9999-12-31T23:59:59.999Z",
+      "2026-10-01T00:00:00Z",
+      "2026-02-30T25:61:61Z",
+    ];
+    const mutateB64 = (b64: string) => {
+      const buf = Buffer.from(b64, "base64");
+      if (buf.length === 0) return randBase64(8);
+      const op = nextInt(3);
+      if (op === 0) {
+        buf[nextInt(buf.length)] ^= 1 << nextInt(8);
+        return buf.toString("base64");
+      }
+      if (op === 1) {
+        return buf.subarray(0, nextInt(buf.length)).toString("base64");
+      }
+      return b64.slice(0, Math.max(1, nextInt(b64.length)));
+    };
+
+    const started = performance.now();
+    for (let i = 0; i < 5000; i++) {
+      const mode = i % 4;
+      let topic: string[];
+      let value: string;
+      let ledgerClosedAt = "2026-10-01T00:00:00Z";
+
+      if (mode === 0) {
+        const count = nextInt(6);
+        topic = Array.from({ length: count }, () => randBase64(nextInt(40)));
+        value = randBase64(nextInt(48));
+      } else if (mode === 1) {
+        const tmpl = validTemplates[nextInt(validTemplates.length)]!;
+        topic = [...tmpl.topic];
+        if (nextInt(2) === 0 && topic.length > 0) topic[nextInt(topic.length)] = mutateB64(topic[nextInt(topic.length)]!);
+        if (nextInt(2) === 0 && topic.length >= 2) {
+          const x = nextInt(topic.length);
+          const y = nextInt(topic.length);
+          [topic[x], topic[y]] = [topic[y]!, topic[x]!];
+        }
+        value = nextInt(2) === 0 ? mutateB64(tmpl.value) : tmpl.value;
+      } else if (mode === 2) {
+        const tmpl = validTemplates[nextInt(validTemplates.length)]!;
+        topic = [...tmpl.topic, ...Array.from({ length: 80 }, () => extraTopics[nextInt(extraTopics.length)]!)];
+        value = nextInt(2) === 0 ? hugeVecXdr : tmpl.value;
+      } else {
+        const tmpl = validTemplates[nextInt(validTemplates.length)]!;
+        topic = [...tmpl.topic];
+        value = tmpl.value;
+        ledgerClosedAt = weirdDates[nextInt(weirdDates.length)]!;
+      }
+
+      const candidate = {
+        ...raw(topic, value),
+        ledgerClosedAt,
+      };
+      let decoded: ReturnType<typeof decodeEvent>;
+      try {
+        decoded = decodeEvent(candidate);
+      } catch (err) {
+        throw new Error(`decodeEvent threw on seed=0x${seed.toString(16)} iter=${i}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (decoded !== undefined && (typeof decoded !== "object" || decoded === null || typeof decoded.kind !== "string")) {
+        throw new Error(`Unexpected decodeEvent return on seed=0x${seed.toString(16)} iter=${i}`);
+      }
+    }
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
 });
 
 describe("cursorLedger", () => {
