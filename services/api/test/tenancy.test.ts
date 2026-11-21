@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { describe, expect, it } from "vitest";
 import { readFileSync as readFixture } from "node:fs";
-import { StrKey } from "@stellar/stellar-sdk";
+import { Asset, StrKey } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
 import { StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
@@ -994,6 +994,45 @@ describe("chain endpoints", () => {
     ]);
     expect(found[0]!.asset).toBe(`BENJI:${i2}`);
     expect(found[0]!.contractId).toMatch(/^C[A-Z2-7]{55}$/);
+  });
+
+  it("prefers Horizon contract_id in search(), derives it when absent, keeps tie order, and returns [] on empty records", async () => {
+    const [i1, i2, i3] = [key(), key(), key()];
+    const record = (issuer: string, authorized: number, contract_id?: string) => ({
+      asset_code: "BENJI",
+      asset_issuer: issuer,
+      ...(contract_id ? { contract_id } : {}),
+      accounts: { authorized, authorized_to_maintain_liabilities: 0, unauthorized: 0 },
+      balances: { authorized: "10.0000000" },
+      flags: { auth_required: false, auth_revocable: false, auth_clawback_enabled: false },
+    });
+    const url = "https://horizon.example/assets?asset_code=BENJI&limit=200";
+    const { deps } = scripted({
+      [url]: [
+        () =>
+          new Response(
+            JSON.stringify({
+              _embedded: {
+                records: [
+                  record(i1, 50, "CVERBATIM"),
+                  record(i2, 50),
+                  record(i3, 100),
+                ],
+              },
+            }),
+          ),
+        () => new Response(JSON.stringify({ _embedded: { records: [] } })),
+      ],
+    });
+    const source = new StellarSource(network(["https://rpc.example"]), deps);
+    const found = await source.search("BENJI");
+    expect(found.map((f) => [f.issuer, f.contractId, f.trustlines])).toEqual([
+      [i3, new Asset("BENJI", i3).contractId(MAINNET_PASSPHRASE), 100],
+      [i1, "CVERBATIM", 50],
+      [i2, new Asset("BENJI", i2).contractId(MAINNET_PASSPHRASE), 50],
+    ]);
+
+    expect(await source.search("BENJI")).toEqual([]);
   });
 
   it("fails over to the next Horizon endpoint when _embedded.records is omitted, and reports ChainError naming hosts if all fail", async () => {
