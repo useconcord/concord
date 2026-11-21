@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync as readFixture } from "node:fs";
 import { StrKey } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
-import { StellarSource } from "../src/chain.js";
+import { ChainError, StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
 import { loadConfig } from "../src/config.js";
 import { Db } from "../src/db.js";
@@ -1054,6 +1054,46 @@ describe("chain endpoints", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain("h1.example: unexpected response");
     expect(err.message).toContain("h2.example: unexpected response");
+  });
+
+  it.each([
+    ["1.00000001"],
+    [""],
+    ["NaN"],
+  ])("surfaces malformed or over-precise Horizon balance %s as a typed ChainError naming the account", async (badBalance) => {
+    const issuer = key();
+    const accountId = key();
+    const h1 = "https://h1.example";
+    const h2 = "https://h2.example";
+    const record = {
+      account_id: accountId,
+      balances: [{ asset_code: "FUND", asset_issuer: issuer, balance: badBalance }],
+    };
+    const { calls, deps } = scripted({
+      [`${h1}/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`]: [
+        () => new Response(JSON.stringify({ _embedded: { records: [record] } }), {
+          headers: { "latest-ledger": "100" },
+        }),
+      ],
+      [`${h2}/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`]: [
+        () => new Response(JSON.stringify({ _embedded: { records: [] } }), {
+          headers: { "latest-ledger": "100" },
+        }),
+      ],
+    });
+    const net = {
+      name: "mainnet" as const,
+      passphrase: MAINNET_PASSPHRASE,
+      rpc: [{ url: "https://rpc.example" }],
+      horizon: [{ url: h1 }, { url: h2 }],
+    };
+    const source = new StellarSource(net, deps);
+    const err = await source.baseline("FUND", issuer, 7).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ChainError);
+    expect((err as ChainError).kind).toBe("rejected");
+    expect((err as Error).message).toContain(accountId.slice(0, 8));
+    expect((err as Error).message).toContain(`"${badBalance}"`);
+    expect(calls).toHaveLength(1);
   });
 });
 
