@@ -39,6 +39,8 @@ async function main(): Promise<void> {
       csv: { type: "string" },
       out: { type: "string" },
       note: { type: "string" },
+      scope: { type: "string" },
+      key: { type: "string" },
       json: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -232,6 +234,16 @@ async function main(): Promise<void> {
           instruction: r.instruction?.ref ?? "— none —",
         })),
       );
+      break;
+    }
+    case "break-history": {
+      const concord = workspace();
+      const asset = need(a, "asset");
+      const scope = need(b ?? values.scope, "scope");
+      const key = need(positionals[3] ?? values.key, "break key");
+      const history = concord.breakHistory(asset, scope, key);
+      if (values.json) return out(history);
+      table(history);
       break;
     }
     case "export": {

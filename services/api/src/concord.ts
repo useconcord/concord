@@ -1160,6 +1160,22 @@ export class Concord {
     for (const n of this.db.all("SELECT * FROM break_notes WHERE asset_id = ? AND scope = ?", assetId, scope)) {
       notes.set(String(n.key), n);
     }
+    const histories = new Map<string, Array<{ status: string; note: string; author: string | null; at: string }>>();
+    for (const h of this.db.all(
+      "SELECT key, status, note, author, at FROM break_note_history WHERE asset_id = ? AND scope = ? ORDER BY id ASC",
+      assetId,
+      scope,
+    )) {
+      const k = String(h.key);
+      const list = histories.get(k) ?? [];
+      list.push({
+        status: String(h.status),
+        note: String(h.note),
+        author: h.author ? String(h.author) : null,
+        at: String(h.at),
+      });
+      histories.set(k, list);
+    }
     return breaks.map((b) => {
       const n = notes.get(b.key);
       const current = n !== undefined && String(n.fingerprint) === b.fingerprint;
@@ -1171,6 +1187,7 @@ export class Concord {
         noteAuthor: n?.author ? String(n.author) : null,
         noteAt: n ? String(n.updated_at) : null,
         noteStale: n !== undefined && !current,
+        history: histories.get(b.key) ?? [],
       };
     });
   }
@@ -1251,6 +1268,27 @@ export class Concord {
         scope: String(r.scope),
         key: String(r.key),
         fingerprint: String(r.fingerprint),
+        status: String(r.status),
+        note: String(r.note),
+        author: r.author ? String(r.author) : null,
+        at: String(r.at),
+      }));
+  }
+
+  /** Sign-off history for one break, oldest first: who, when, what status, and the note. */
+  breakHistory(ref: string, scope: string, key: string) {
+    const asset = this.asset(ref);
+    if (!scope || !key) throw new Invalid("scope and key are required");
+    return this.db
+      .all(
+        `SELECT status, note, author, at FROM break_note_history
+         WHERE asset_id = ? AND scope = ? AND key = ?
+         ORDER BY id ASC`,
+        asset.id,
+        scope,
+        key,
+      )
+      .map((r) => ({
         status: String(r.status),
         note: String(r.note),
         author: r.author ? String(r.author) : null,
@@ -1776,8 +1814,12 @@ export class Concord {
             "status",
             "note",
             "noteAuthor",
+            "history",
           ],
-          rows,
+          rows.map((r) => ({
+            ...r,
+            history: Array.isArray(r.history) && r.history.length > 0 ? JSON.stringify(r.history) : "",
+          })),
         );
       }
       default:

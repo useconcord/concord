@@ -333,6 +333,20 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json(c.var.ws.noteHistory(id(c), c.req.query("scope") || undefined, c.req.query("key") || undefined));
   });
 
+  priv.get("/assets/:id/breaks/history", (c) => {
+    const scope = c.req.query("scope");
+    const key = c.req.query("key");
+    if (!scope || !key) throw new Invalid("scope and key are required");
+    return c.json(c.var.ws.breakHistory(id(c), scope, key));
+  });
+
+  priv.get("/assets/:id/break-history", (c) => {
+    const scope = c.req.query("scope");
+    const key = c.req.query("key");
+    if (!scope || !key) throw new Invalid("scope and key are required");
+    return c.json(c.var.ws.breakHistory(id(c), scope, key));
+  });
+
   priv.get("/assets/:id/export", (c) => {
     const { ws } = c.var;
     const asset = ws.asset(id(c));

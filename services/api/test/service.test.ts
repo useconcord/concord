@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
+import { parseCsv } from "@concord/core";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
@@ -326,6 +327,30 @@ describe("Concord", () => {
     expect(concord.auditExport("FUND").signoffHistory).toEqual(history);
     // Sign-offs are wall-clock events, so the period (chain time) does not narrow the trail.
     expect(concord.auditExport("FUND", { from: "2020-01-01", to: "2020-01-02" }).signoffHistory).toEqual(history);
+
+    // breakHistory returns oldest first with status, note, author, and timestamp (#538)
+    const bHistory = concord.breakHistory("FUND", "recon", brk.key);
+    expect(bHistory).toEqual(
+      history.map((h) => ({ status: h.status, note: h.note, author: h.author, at: h.at })),
+    );
+    expect(concord.breakHistory("FUND", "recon", "SOMETHING_ELSE")).toEqual([]);
+
+    // Break objects in the audit pack include history, and audit pack digest covers it
+    const packBefore = concord.auditExport("FUND");
+    const packBreak = packBefore.reconciliations[0]!.breaks.find((b) => b.key === brk.key)!;
+    expect(packBreak.history).toEqual(bHistory);
+
+    // Breaks CSV includes history column
+    const csv = concord.exportCsv("FUND", "breaks");
+    expect(csv.split("\n")[0]).toContain("history");
+    const parsed = parseCsv(csv);
+    const histCol = parsed[0]!.indexOf("history");
+    expect(parsed[1]![histCol]).toBe(JSON.stringify(bHistory));
+
+    // Digest changes when signoff history is updated
+    sign("acknowledged", "more info added", "charlie");
+    const packAfter = concord.auditExport("FUND");
+    expect(packAfter.sha256).not.toBe(packBefore.sha256);
   });
 
   it("narrows the whole controls section of an audit pack to the period, not just its records", async () => {
@@ -690,6 +715,7 @@ describe("Concord", () => {
         "controls.breaks[].address",
         "controls.breaks[].eventId",
         "controls.breaks[].fingerprint",
+        "controls.breaks[].history[]",
         "controls.breaks[].key",
         "controls.breaks[].message",
         "controls.breaks[].note",
@@ -750,6 +776,7 @@ describe("Concord", () => {
         "corporateActions[].result.breaks[].difference",
         "corporateActions[].result.breaks[].expected",
         "corporateActions[].result.breaks[].fingerprint",
+        "corporateActions[].result.breaks[].history[]",
         "corporateActions[].result.breaks[].key",
         "corporateActions[].result.breaks[].message",
         "corporateActions[].result.breaks[].note",
@@ -822,6 +849,11 @@ describe("Concord", () => {
         "reconciliations[].breaks[].difference",
         "reconciliations[].breaks[].fingerprint",
         "reconciliations[].breaks[].firstSeen",
+        "reconciliations[].breaks[].history[]",
+        "reconciliations[].breaks[].history[].at",
+        "reconciliations[].breaks[].history[].author",
+        "reconciliations[].breaks[].history[].note",
+        "reconciliations[].breaks[].history[].status",
         "reconciliations[].breaks[].holderIds[]",
         "reconciliations[].breaks[].key",
         "reconciliations[].breaks[].message",
@@ -1148,6 +1180,11 @@ describe("Concord", () => {
     const csv = await client.call("/api/assets/FUND/export?section=holdings");
     expect(csv.headers.get("content-type")).toContain("text/csv");
     expect(await csv.text()).toContain(h1);
+    const histRes = await client.call(`/api/assets/FUND/breaks/history?scope=recon&key=${encodeURIComponent(run.breaks[0]!.key)}`);
+    expect(histRes.status).toBe(200);
+    const histJson = await histRes.json();
+    expect(Array.isArray(histJson)).toBe(true);
+
     const template = await client.call("/api/templates/register.csv");
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
   });
