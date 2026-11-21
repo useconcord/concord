@@ -745,6 +745,7 @@ describe("chain endpoints", () => {
   function scripted(answers: Record<string, Array<() => Response | Promise<Response>>>) {
     const calls: Array<{ url: string; headers: Record<string, string> }> = [];
     const clock = { value: 1_000_000 };
+    const sleeps: number[] = [];
     const fetch = (async (url: unknown, init?: RequestInit) => {
       const u = String(url);
       calls.push({ url: u, headers: (init?.headers ?? {}) as Record<string, string> });
@@ -752,8 +753,15 @@ describe("chain endpoints", () => {
       if (!next) throw new TypeError("fetch failed");
       return next();
     }) as typeof globalThis.fetch;
-    const deps = { fetch, sleep: async (ms: number) => void (clock.value += ms), now: () => clock.value };
-    return { calls, clock, deps };
+    const deps = {
+      fetch,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        clock.value += ms;
+      },
+      now: () => clock.value,
+    };
+    return { calls, clock, deps, sleeps };
   }
 
   it("URL-encodes unusual asset and issuer values in search, describe and baseline", async () => {
@@ -972,6 +980,129 @@ describe("chain endpoints", () => {
     });
     await expect(new StellarSource(network(["https://rpc.example"]), lagging.deps).baseline("FUND", issuer, 7)).rejects.toThrow(/back in time/);
   });
+
+  it.each([
+    {
+      scenario: "503, 503, 200 on page 2",
+      page1Pages: 1,
+      page2Responses: [
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => "ok" as const,
+      ],
+      expectedPage1Calls: 1,
+      expectedPage2Calls: 3,
+      expectedSleepRanges: [
+        [500, 750],
+        [1000, 1250],
+      ],
+      expectedError: undefined,
+    },
+    {
+      scenario: "503 x3 on one Horizon",
+      page1Pages: 2,
+      page2Responses: [
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => "ok" as const,
+      ],
+      expectedPage1Calls: 2,
+      expectedPage2Calls: 4,
+      expectedSleepRanges: [
+        [500, 750],
+        [1000, 1250],
+        [250, 500],
+      ],
+      expectedError: undefined,
+    },
+    {
+      scenario: "429 on page 2",
+      page1Pages: 1,
+      page2Responses: [
+        () => new Response("slow down", { status: 429 }),
+      ],
+      expectedPage1Calls: 1,
+      expectedPage2Calls: 1,
+      expectedSleepRanges: [],
+      expectedError: /rate limited/,
+    },
+  ])(
+    "baseline() retries a failing page up to three times without restarting from page one ($scenario)",
+    async ({
+      page1Pages,
+      page2Responses,
+      expectedPage1Calls,
+      expectedPage2Calls,
+      expectedSleepRanges,
+      expectedError,
+    }) => {
+      const issuer = key();
+      const [h1, h2] = [key(), key()];
+      const line = (balance: string) => ({
+        asset_code: "FUND",
+        asset_issuer: issuer,
+        balance,
+        is_authorized: true,
+      });
+      const record = (id: string, balance: string) => ({ account_id: id, balances: [line(balance)] });
+      const many = Array.from({ length: 199 }, () => record(key(), "1.0000000"));
+      const first = `https://horizon.example/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`;
+      const second = "https://horizon.example/accounts?cursor=abc&limit=200";
+
+      const page1Response = () =>
+        new Response(
+          JSON.stringify({
+            _links: { next: { href: second } },
+            _embedded: { records: [record(h1, "70.0000000"), ...many] },
+          }),
+          { headers: { "latest-ledger": "150" } },
+        );
+      const page2Ok = () =>
+        new Response(
+          JSON.stringify({
+            _links: {},
+            _embedded: { records: [record(h2, "30.5000000")] },
+          }),
+          { headers: { "latest-ledger": "152" } },
+        );
+
+      const p2Answers = page2Responses.map((fn) => {
+        const res = fn();
+        return res === "ok" ? page2Ok : () => res;
+      });
+
+      const p1Answers = Array.from({ length: page1Pages }, () => page1Response);
+
+      const { calls, deps, sleeps } = scripted({
+        [first]: p1Answers,
+        [second]: p2Answers,
+      });
+
+      const source = new StellarSource(network(["https://rpc.example"]), deps);
+      const run = () => source.baseline("FUND", issuer, 7);
+
+      if (expectedError) {
+        await expect(run()).rejects.toThrow(expectedError);
+      } else {
+        const res = await run();
+        expect(res.ledger).toBe(150);
+        expect(res.openings.size).toBe(201);
+      }
+
+      // URL call counts asserted per row
+      expect(calls.filter((c) => c.url === first)).toHaveLength(expectedPage1Calls);
+      expect(calls.filter((c) => c.url === second)).toHaveLength(expectedPage2Calls);
+
+      // Sleep ranges asserted
+      expect(sleeps).toHaveLength(expectedSleepRanges.length);
+      for (let i = 0; i < expectedSleepRanges.length; i++) {
+        const [min, max] = expectedSleepRanges[i]!;
+        expect(sleeps[i]).toBeGreaterThanOrEqual(min);
+        expect(sleeps[i]).toBeLessThanOrEqual(max);
+      }
+    },
+  );
 
   it("finds classic assets by code, most widely held first", async () => {
     const [i1, i2] = [key(), key()];
