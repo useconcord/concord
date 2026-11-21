@@ -802,6 +802,33 @@ describe("chain endpoints", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it.each<{ name: string; header: (now: number) => string | undefined; seconds: number }>([
+    { name: "seconds '40' -> 40s", header: () => "40", seconds: 40 },
+    { name: "zero '0' -> 1s minimum floor", header: () => "0", seconds: 1 },
+    { name: "HTTP-date 20s ahead -> 20s", header: (now) => new Date(now + 20_000).toUTCString(), seconds: 20 },
+    { name: "garbage 'soon' -> 30s default", header: () => "soon", seconds: 30 },
+    { name: "absent header -> 30s default", header: () => undefined, seconds: 30 },
+    { name: "'999' above 900s MAX_REST_MS cap -> 900s", header: () => "999", seconds: 900 },
+  ])("handles 429 Retry-After ($name)", async ({ header, seconds }) => {
+    const url = "https://limited.example";
+    const { calls, clock, deps } = scripted({
+      [url]: [
+        () => {
+          const value = header(clock.value);
+          return new Response("slow down", {
+            status: 429,
+            ...(value !== undefined ? { headers: { "retry-after": value } } : {}),
+          });
+        },
+        health,
+      ],
+    });
+    const source = new StellarSource(network([url]), deps);
+    await expect(source.latestLedger()).rejects.toThrow(/rate limited/);
+    await expect(source.latestLedger()).rejects.toThrow(`not answering; trying again in ${seconds}s`);
+    expect(calls).toHaveLength(1);
+  });
+
   it("moves to the next endpoint when one is rate limited, and rests the first", async () => {
     const a = "https://a.example/secret-key-123";
     const b = "https://b.example";
