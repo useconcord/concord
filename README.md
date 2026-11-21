@@ -112,7 +112,7 @@ TLS: [nginx and Certbot](./docs/deploy/nginx.md), [Caddy](./docs/deploy/caddy.md
 [Docker Compose](./docs/deploy/docker-compose.md) (copy `.env.example` to `.env` at the repository
 root, then `docker compose -f deploy/docker-compose.yml up -d --build`), [Fly.io](./docs/deploy/fly.md) (with the [single-machine template](./deploy/fly.toml)),
 [systemd](./docs/deploy/systemd.md). Running it: [monitoring](./docs/monitoring.md),
-[versioning](./docs/versioning.md), [upgrading and rolling back](./docs/upgrading.md).
+[backup and restore](./docs/backup-restore.md), [versioning](./docs/versioning.md), [upgrading and rolling back](./docs/upgrading.md).
 
 ## Layout and more documentation
 
