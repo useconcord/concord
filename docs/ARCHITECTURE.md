@@ -92,6 +92,73 @@ Once the chain has passed that time, `reconcileAction` takes holdings at the rec
 computes expected entitlements, observes the actual flows in the execution window, and diffs
 them. An action recorded ahead of its record time is picked up by `reconcileDue`.
 
+## Endpoint failover and resilience
+
+Concord queries Stellar RPC and Horizon endpoints across both networks. To handle temporary network faults, node restarts, and provider rate limits, `StellarSource` delegates outbound calls to an `EndpointPool` (`services/api/src/chain.ts#L240-L286`). The pool manages endpoint health, executes retries, rotates through backup endpoints, and enforces cooldown periods.
+
+### State flow
+
+```mermaid
+flowchart TD
+    Req["Request initiated"] --> CheckAwake{"Any awake endpoints?<br>(restUntil <= now)"}
+    CheckAwake -- No --> NotAnswering["Throw ChainError: 'label is not answering; trying again in Ns'"]
+    CheckAwake -- Yes --> TryEndpoint["Attempt request on awake endpoint"]
+    TryEndpoint --> Success["Success (return result)"]
+    TryEndpoint --> FailType{"Failure type?"}
+
+    FailType -- "400 / 404 / 422<br>invalid RPC params" --> Rejected["Throw terminal ChainError: 'HTTP status' or 'RPC error'<br>(no retry / no failover)"]
+
+    FailType -- "Timeout / 5xx / unreachable<br>(retrySame: true)" --> RetryCheck{"Attempt < 2 AND<br>elapsed < 90s?"}
+    RetryCheck -- Yes --> Backoff["Sleep backoff (250ms * 2^(attempt-1) + jitter)"] --> TryEndpoint
+    RetryCheck -- No --> RestEndpoint["Mark endpoint rested (now + 30s)"]
+
+    FailType -- "429 / RPC rate limit<br>(limited: true)" --> RestRateLimit["Mark endpoint rested (now + Retry-After or 30s)"]
+    FailType -- "401 / 403 (bad API key)" --> RestAuth["Mark endpoint rested (now + 30s)"]
+
+    RestEndpoint --> NextCheck{"Budget remaining?<br>(elapsed < 90s) & more endpoints?"}
+    RestRateLimit --> NextCheck
+    RestAuth --> NextCheck
+
+    NextCheck -- Yes --> NextEndpoint["Failover to next awake endpoint"] --> TryEndpoint
+    NextCheck -- No --> Unavailable["Throw ChainError: 'label is unavailable (hosts: reasons)'"]
+```
+
+### Constants and configuration
+
+The failover thresholds and timing budgets are defined in `services/api/src/chain.ts#L213-L223`:
+
+| Constant | Value | Role | Source |
+|---|---|---|---|
+| `ATTEMPT_TIMEOUT_MS` | `20_000` (20s) | Timeout for standard single requests and small responses | `services/api/src/chain.ts#L213` |
+| `PAGE_TIMEOUT_MS` | `60_000` (60s) | Extended timeout for large payloads (full pages of events or accounts) | `services/api/src/chain.ts#L215` |
+| `ATTEMPTS_PER_ENDPOINT` | `2` | Number of attempts allowed on the same endpoint before failing over | `services/api/src/chain.ts#L216` |
+| `PAGE_ATTEMPTS` | `3` | Attempts at a single page of a multi-page read before aborting | `services/api/src/chain.ts#L218` |
+| `REST_MS` | `30_000` (30s) | Default cooldown period when an endpoint fails or rate limits without `Retry-After` | `services/api/src/chain.ts#L219` |
+| `MAX_REST_MS` | `900_000` (15m) | Maximum cooldown duration accepted from a provider's `Retry-After` header | `services/api/src/chain.ts#L221` |
+| `BUDGET_MS` | `90_000` (90s) | Overall wall-clock budget for an operation across all endpoints before giving up | `services/api/src/chain.ts#L223` |
+
+### Failover rules: 429 vs 5xx vs client faults
+
+- **Rate limits (HTTP 429 & JSON-RPC rate limits):** A 429 response or JSON-RPC error (code `-32005` or error text containing "rate limit" / "too many requests") sets `limited: true` and parses any `Retry-After` header (clamped between 1s and 15m; falls back to 30s). The endpoint is rested immediately without retrying on the same URL, and the pool immediately fails over to the next awake endpoint.
+- **Transient server faults (HTTP 5xx, timeouts, network drops):** These set `retrySame: true`. The pool retries the same endpoint once (`ATTEMPTS_PER_ENDPOINT = 2`) with an exponential backoff (`250ms * 2^(attempt-1) + jitter`). If the retry also fails or budget runs out, the endpoint is placed into cooldown for `REST_MS` (30s) and the pool tries the next endpoint.
+- **Authentication failures (HTTP 401 / 403):** The endpoint is marked with failure reason `"bad API key"`, rested for `REST_MS` (30s), and the pool fails over to the next endpoint without retrying the same one.
+- **Client request rejections (HTTP 400, 404, 422, invalid RPC parameters):** These represent malformed queries or ledger range violations. They throw a terminal `ChainError` (`"rejected"`) immediately: neither retry nor failover is attempted.
+
+### Security: API keys never appear in errors
+
+Provider credentials frequently reside in URL path segments (for example, `https://rpc.example/key/<SECRET>/`) or query parameters. Concord sanitizes all failure messages by extracting only the hostname using `hostOf(url) = new URL(url).host` (`services/api/src/chain.ts#L226`). API keys, path components, and headers never appear in operator logs, dashboard error banners, or downstream error messages.
+
+### User-visible error messages
+
+When endpoint failures surface to the operator, they follow standardized patterns:
+
+| Scenario | Operator Message | Notes |
+|---|---|---|
+| All endpoints currently resting | `<label> is not answering; trying again in <N>s` | Signals temporary cooldown; `<N>` is the shortest remaining rest duration among configured endpoints. |
+| All endpoints failed / budget exhausted | `<label> is unavailable (<host1>: <reason1>; <host2>: <reason2>)` | Lists all attempted hostnames and their sanitized failure reasons (e.g. `timed out`, `unreachable`, `HTTP 502`, `bad API key`, `rate limited`). |
+| All endpoints rate limited | `<label> is unavailable (<host1>: rate limited; <host2>: rate limited)` | Carries a dedicated `"rate_limited"` error code when every endpoint failed specifically from rate limiting. |
+| Terminal request failure | `HTTP 400` / `HTTP 404` / `HTTP 422` / `Stellar RPC <method>: <message>` | Surface the provider error message without retrying. |
+
 ## Audit pack contract
 
 The JSON returned by `GET /api/assets/:id/export` is the artifact auditors keep. Its shape is
