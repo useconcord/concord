@@ -266,6 +266,7 @@ function toEvent(row: Row): AssetEvent {
  */
 export class Concord {
   private readonly syncing = new Map<string, Promise<{ added: number }>>();
+  private readonly removing = new Set<string>();
   /** Current holdings per asset; replaying every event on each dashboard poll is too slow. */
   private readonly stateMemo = new Map<string, HoldingsState>();
   private seenVersion: number;
@@ -349,7 +350,7 @@ export class Concord {
     } catch (err) {
       throw new Invalid((err as Error).message);
     }
-    if (this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
+    if (this.removing.has(resolved.id) || this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
       throw new Invalid(`${resolved.code} is already watched`);
     }
     const ignore = addresses(input.ignore, "ignore");
@@ -391,7 +392,7 @@ export class Concord {
 
     // The check above ran before the awaits on the chain; another request may have watched the
     // same asset since. Nothing awaits between this check and the insert.
-    if (this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
+    if (this.removing.has(resolved.id) || this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
       throw new Invalid(`${resolved.code} is already watched`);
     }
     try {
@@ -493,10 +494,15 @@ export class Concord {
   /** Stop watching: the asset, its events and every book uploaded against it are deleted. */
   async unwatchAsset(ref: string): Promise<void> {
     const asset = this.asset(ref);
-    // A pass still running would write its events into an asset watched again under the same id.
-    await this.syncing.get(asset.id)?.catch(() => {});
-    this.db.write("DELETE FROM assets WHERE id = ?", asset.id);
-    this.touch(asset.id);
+    this.removing.add(asset.id);
+    try {
+      // A pass still running would write its events into an asset watched again under the same id.
+      await this.syncing.get(asset.id)?.catch(() => {});
+      this.db.write("DELETE FROM assets WHERE id = ?", asset.id);
+      this.touch(asset.id);
+    } finally {
+      this.removing.delete(asset.id);
+    }
   }
 
   /**
@@ -506,7 +512,9 @@ export class Concord {
    */
   async rebuild(ref: string, options: { defer?: boolean } = {}): Promise<AssetRecord> {
     const asset = this.asset(ref);
+    if (this.removing.has(asset.id)) throw new NotFound(`asset ${ref} is not watched`);
     await this.syncing.get(asset.id)?.catch(() => {});
+    if (this.removing.has(asset.id)) throw new NotFound(`asset ${ref} is not watched`);
     this.db.tx(() => {
       this.db.write("DELETE FROM events WHERE asset_id = ?", asset.id);
       this.db.write("DELETE FROM openings WHERE asset_id = ?", asset.id);
@@ -529,6 +537,7 @@ export class Concord {
   /** Pull new events for one asset. Concurrent calls share one pass. */
   sync(ref: string, head?: ChainHead): Promise<{ added: number }> {
     const asset = this.asset(ref);
+    if (this.removing.has(asset.id)) throw new NotFound(`asset ${ref} is not watched`);
     const running = this.syncing.get(asset.id);
     if (running) return running;
     const pass = this.runSync(asset, head).finally(() => this.syncing.delete(asset.id));
@@ -588,11 +597,13 @@ export class Concord {
         }
       }
       const out = await this.syncPass(ready, chain);
+      if (this.removing.has(asset.id)) return { added: 0 };
       if (asset.syncError) {
         this.db.write("UPDATE assets SET sync_error = NULL, sync_error_at = NULL WHERE id = ?", asset.id);
       }
       return out;
     } catch (err) {
+      if (this.removing.has(asset.id)) throw err;
       this.db.write(
         "UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?",
         describeFailure(err),
@@ -611,7 +622,9 @@ export class Concord {
       : { startLedger: asset.startLedger };
     let added = 0;
     for (let i = 0; i < 10_000; i++) {
+      if (this.removing.has(asset.id)) break;
       const page = await chain.getEvents(asset.id, from, limit);
+      if (this.removing.has(asset.id)) break;
       const cursor = page.cursor ?? page.events.at(-1)?.id;
       const previous = "cursor" in from ? from.cursor : undefined;
       // Caught up when the cursor stops moving, or a short page ends at the chain's tip.

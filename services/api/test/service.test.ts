@@ -957,6 +957,41 @@ describe("Concord", () => {
     expect(concord.holdings("FUND").holderCount).toBe(0);
   });
 
+  it("prevents sync from racing an in-flight unwatchAsset and throws NotFound", async () => {
+    let releaseGate: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+
+    let syncStarted: () => void;
+    const whenSyncStarted = new Promise<void>((resolve) => {
+      syncStarted = resolve;
+    });
+
+    chain.onGetEvents = () => {
+      syncStarted();
+    };
+    chain.gate = gate;
+
+    // Start a sync pass that pauses inside getEvents
+    const syncPromise = concord.sync("FUND");
+    await whenSyncStarted;
+
+    // Start unwatching FUND while sync is in flight
+    const unwatchPromise = concord.unwatchAsset("FUND");
+
+    // Concurrently calling sync for the asset being removed throws NotFound
+    expect(() => concord.sync("FUND")).toThrow(NotFound);
+
+    // Release the gate so the in-flight sync pass finishes
+    releaseGate!();
+    await syncPromise;
+    await unwatchPromise;
+
+    // Asset is deleted
+    expect(() => concord.asset("FUND")).toThrow(NotFound);
+  });
+
   it("rebuilds from fresh opening balances and keeps the books", async () => {
     await concord.sync("FUND");
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });

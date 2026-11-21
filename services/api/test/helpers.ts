@@ -28,6 +28,10 @@ export class FakeChain implements ChainSource {
   calls = 0;
   /** Throw on this getEvents call (1-based), once. */
   failOnCall: number | undefined;
+  /** A promise to await inside getEvents before proceeding, for deterministic concurrency tests. */
+  gate: Promise<void> | undefined;
+  /** A callback fired upon entering getEvents before awaiting gate. */
+  onGetEvents: (() => void | Promise<void>) | undefined;
 
   push(assetId: string, kind: EventKind, ledger: number, f: Partial<AssetEvent> = {}): AssetEvent {
     const toid = (BigInt(ledger) << 32n).toString().padStart(19, "0");
@@ -51,6 +55,8 @@ export class FakeChain implements ChainSource {
 
   async getEvents(contractId: string, from: { startLedger: number } | { cursor: string }, limit: number): Promise<EventPage> {
     this.calls++;
+    if (this.onGetEvents) await this.onGetEvents();
+    if (this.gate) await this.gate;
     if (this.failOnCall === this.calls) {
       this.failOnCall = undefined;
       throw new Error("connection reset");
