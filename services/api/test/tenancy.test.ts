@@ -731,6 +731,47 @@ describe("networks", () => {
       expect(() => loadConfig({ CONCORD_RPC_HEADERS: invalid }), invalid).toThrow(/CONCORD_RPC_HEADERS must be JSON/);
     }
   });
+
+  it.each([
+    {
+      description: "whitespace, empty items and trailing slashes",
+      input: " https://a.example/ , ,https://b.example//",
+      expected: ["https://a.example", "https://b.example"],
+    },
+    {
+      // dedupe follow-up: duplicates are currently kept as-is
+      description: "duplicates are preserved",
+      input: "https://a.example, https://a.example",
+      expected: ["https://a.example", "https://a.example"],
+    },
+    {
+      description: "non-http scheme throws",
+      input: "ftp://x",
+      error: "CONCORD_MAINNET_RPC_URLS holds something that is not a URL",
+    },
+    {
+      description: "non-URL string throws",
+      input: "not a url",
+      error: "CONCORD_MAINNET_RPC_URLS holds something that is not a URL",
+    },
+    {
+      // CON-0314: credentials in URL are rejected; configure Authorization via CONCORD_RPC_HEADERS
+      description: "credentials in URL throw",
+      input: "https://user:pw@a.example",
+      error: "CONCORD_MAINNET_RPC_URLS must not contain URL credentials; configure Authorization via CONCORD_RPC_HEADERS",
+    },
+    {
+      description: "blank input falls back to defaults",
+      input: "   ",
+      expected: loadConfig({}).networks.mainnet.rpc.map((e) => e.url),
+    },
+  ])("$description", ({ input, expected, error }) => {
+    if (error) {
+      expect(() => loadConfig({ CONCORD_MAINNET_RPC_URLS: input })).toThrow(error);
+    } else {
+      expect(loadConfig({ CONCORD_MAINNET_RPC_URLS: input }).networks.mainnet.rpc.map((e) => e.url)).toEqual(expected);
+    }
+  });
 });
 
 describe("chain endpoints", () => {
