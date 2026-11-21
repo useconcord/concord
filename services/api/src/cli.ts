@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join, resolve } from "node:path";
-import { backup } from "node:sqlite";
+import { DatabaseSync, backup } from "node:sqlite";
 import { parseArgs } from "node:util";
 import type { ActionInput, Actor, Concord, WatchInput } from "./concord.js";
 import { isNetworkName, loadConfig } from "./config.js";
@@ -11,6 +11,43 @@ import { USAGE } from "./cli-usage.js";
 function table(rows: Array<Record<string, unknown>>): void {
   if (rows.length === 0) return console.log("(none)");
   console.table(rows);
+}
+
+function need(value: string | undefined, what: string): string {
+  if (!value) throw new Error(`missing ${what}\n\n${USAGE}`);
+  return value;
+}
+
+export function verifyBackupFile(filePath: string, expectedUserVersion: number): void {
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(filePath, { readOnly: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`corrupted backup: ${filePath} failed to open (${msg})`);
+  }
+  try {
+    const rows = db.prepare("PRAGMA integrity_check").all() as Array<Record<string, unknown>>;
+    const result = rows.length > 0 ? String(Object.values(rows[0]!)[0]) : "";
+    if (result !== "ok") {
+      throw new Error(`corrupted backup: ${filePath} failed integrity check (${result})`);
+    }
+    const versionRow = db.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
+    const version = versionRow ? Number(Object.values(versionRow)[0]) : -1;
+    if (version !== expectedUserVersion) {
+      throw new Error(
+        `corrupted backup: ${filePath} user_version mismatch (expected ${expectedUserVersion}, got ${version})`,
+      );
+    }
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.startsWith("corrupted backup:")) {
+      throw err;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`corrupted backup: ${filePath} failed integrity check (${msg})`);
+  } finally {
+    db.close();
+  }
 }
 
 async function main(): Promise<void> {
@@ -40,22 +77,46 @@ async function main(): Promise<void> {
       out: { type: "string" },
       note: { type: "string" },
       json: { type: "boolean" },
+      verify: { type: "boolean" },
+      into: { type: "string" },
+      force: { type: "boolean", short: "f" },
       help: { type: "boolean", short: "h" },
     },
   });
   const [command, a, b] = positionals;
   if (!command || values.help) return console.log(USAGE);
   if (command === "serve") return startServer();
+  if (command === "restore") {
+    const srcDir = resolve(need(a, "backup directory"));
+    const config = loadConfig();
+    const destDir = resolve(values.into ?? config.dataDir);
+    const controlSrc = join(srcDir, "control.db");
+    if (!existsSync(controlSrc)) {
+      throw new Error(`not a valid backup directory: missing control.db in ${srcDir}`);
+    }
+    if (existsSync(destDir)) {
+      const entries = readdirSync(destDir);
+      if (entries.length > 0 && !values.force) {
+        throw new Error(`destination directory ${destDir} is not empty; pass --force to overwrite`);
+      }
+    }
+    mkdirSync(destDir, { recursive: true });
+    cpSync(srcDir, destDir, { recursive: true, force: true });
+    console.log(`restored backup from ${srcDir} into ${destDir}`);
+    return;
+  }
 
   const config = loadConfig();
   const runtime = openRuntime(config);
   const { auth, tenants } = runtime;
   const actor: Actor = { id: "cli", label: `cli:${userInfo().username}` };
-  const need = (value: string | undefined, what: string): string => {
-    if (!value) throw new Error(`missing ${what}\n\n${USAGE}`);
-    return value;
-  };
-  const list = (value: string | undefined) => (value ? value.split(",").map((s) => s.trim()).filter(Boolean) : []);
+  const list = (value: string | undefined) =>
+    value
+      ? value
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
   const out = (value: unknown) => console.log(JSON.stringify(value, null, 2));
   const orgRef = values.org ?? process.env.CONCORD_ORG;
   const workspace = (): Concord => tenants.forOrg(auth.findOrg(need(orgRef, "--org (see `concord orgs`)")).id);
@@ -102,8 +163,24 @@ async function main(): Promise<void> {
     case "backup": {
       const dir = resolve(need(a, "directory"));
       mkdirSync(join(dir, "orgs"), { recursive: true });
-      await backup(runtime.control.raw, join(dir, "control.db"));
-      for (const id of auth.orgIds()) await backup(tenants.forOrg(id).db.raw, join(dir, "orgs", `${id}.db`));
+      const controlFile = join(dir, "control.db");
+      await backup(runtime.control.raw, controlFile);
+      if (values.verify) {
+        const controlVerRow = runtime.control.raw.prepare("PRAGMA user_version").get() as
+          Record<string, unknown> | undefined;
+        const expectedVer = controlVerRow ? Number(Object.values(controlVerRow)[0]) : 0;
+        verifyBackupFile(controlFile, expectedVer);
+      }
+      for (const id of auth.orgIds()) {
+        const orgFile = join(dir, "orgs", `${id}.db`);
+        const orgDb = tenants.forOrg(id).db.raw;
+        await backup(orgDb, orgFile);
+        if (values.verify) {
+          const orgVerRow = orgDb.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
+          const expectedVer = orgVerRow ? Number(Object.values(orgVerRow)[0]) : 0;
+          verifyBackupFile(orgFile, expectedVer);
+        }
+      }
       console.log(`backed up control.db and ${auth.orgIds().length} workspaces to ${dir}`);
       break;
     }
@@ -120,7 +197,9 @@ async function main(): Promise<void> {
       const concord = workspace();
       const asset = await concord.watchAsset(input, { actor });
       const { added } = await concord.sync(asset.id);
-      console.log(`watching ${asset.code} (${asset.id}) on ${asset.network} from ledger ${asset.startLedger}; ${added} events indexed`);
+      console.log(
+        `watching ${asset.code} (${asset.id}) on ${asset.network} from ledger ${asset.startLedger}; ${added} events indexed`,
+      );
       break;
     }
     case "unwatch":
@@ -173,10 +252,15 @@ async function main(): Promise<void> {
       if (imported.duplicate) {
         console.log(`register ${imported.registerId}: already imported (same file and as-of time), not added again`);
       } else {
-        console.log(`register ${imported.registerId}: ${imported.positions} positions, ${imported.issues.length} rejected rows`);
+        console.log(
+          `register ${imported.registerId}: ${imported.positions} positions, ${imported.issues.length} rejected rows`,
+        );
         for (const issue of imported.issues) console.log(`  line ${issue.line}: ${issue.message}`);
       }
-      printRun((imported.duplicate && concord.latestRunForRegister(imported.registerId)) || (await concord.reconcile(asset, imported.registerId, actor)));
+      printRun(
+        (imported.duplicate && concord.latestRunForRegister(imported.registerId)) ||
+          (await concord.reconcile(asset, imported.registerId, actor)),
+      );
       break;
     }
     case "journal":
@@ -186,7 +270,9 @@ async function main(): Promise<void> {
       out(workspace().importInstructions(need(a, "asset"), readFileSync(need(b, "file"), "utf8")));
       break;
     case "reconcile":
-      printRun(await workspace().reconcile(need(a, "asset"), values.register ? Number(values.register) : undefined, actor));
+      printRun(
+        await workspace().reconcile(need(a, "asset"), values.register ? Number(values.register) : undefined, actor),
+      );
       break;
     case "action": {
       const type = need(b, "action type") as ActionInput["type"];

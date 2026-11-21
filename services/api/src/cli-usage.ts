@@ -33,7 +33,8 @@ Operator commands.
   signup-code [--note TEXT]        a code that lets one new workspace be created (CONCORD_SIGNUP=code)
   reset-link EMAIL                 a one-day link for setting a new password
   org-delete ORG                   delete a workspace and everything in it
-  backup DIR                       copy every database to DIR while the server runs
+  backup DIR [--verify]            copy every database to DIR while the server runs
+  restore DIR [--into DIR2] [--force] restore databases from a backup directory
   serve                            run the API and dashboard
 
 ASSET is a code or a contract id. Add --json to most commands for machine-readable output,
