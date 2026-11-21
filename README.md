@@ -125,6 +125,7 @@ Architecture decisions: [`docs/adr/`](./docs/adr/README.md).
 - [`docs/overview.md`](./docs/overview.md): what it does, what it flags, why now, who buys it.
 - [`docs/limits.md`](./docs/limits.md): the deliberate limits; [`docs/ROADMAP.md`](./docs/ROADMAP.md)
   says which are next to fall.
+- [`docs/troubleshooting-indexing.md`](./docs/troubleshooting-indexing.md): troubleshooting guide for indexing and chain errors.
 - [`docs/prior-art.md`](./docs/prior-art.md): the prior-art check against the brief's first kill
   criterion (someone already ships this for Stellar): dated sources, kill criteria, re-check schedule.
 - [`docs/demo-testnet.md`](./docs/demo-testnet.md): `pnpm demo:testnet` issues a practice asset on
