@@ -2,10 +2,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { nativeToScVal } from "@stellar/stellar-sdk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
-import { Concord, Invalid, NotFound } from "../src/concord.js";
+import { Concord, EXPORT_CSV_SECTIONS, Invalid, NotFound } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
@@ -1148,8 +1148,56 @@ describe("Concord", () => {
     const csv = await client.call("/api/assets/FUND/export?section=holdings");
     expect(csv.headers.get("content-type")).toContain("text/csv");
     expect(await csv.text()).toContain(h1);
+    const invalidExport = await client.call("/api/assets/FUND/export?section=typo");
+    expect(invalidExport.status).toBe(400);
+    expect(await invalidExport.text()).toContain("section must be holdings, events, controls or breaks");
     const template = await client.call("/api/templates/register.csv");
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
+  });
+
+  it("rejects an invalid section before auditExport or any database read", () => {
+    const auditExportSpy = vi.spyOn(concord, "auditExport");
+    const dbAllSpy = vi.spyOn(concord.db, "all");
+    const dbGetSpy = vi.spyOn(concord.db, "get");
+
+    expect(() => concord.exportCsv("FUND", "typo")).toThrow(
+      new Invalid("section must be holdings, events, controls or breaks"),
+    );
+
+    expect(auditExportSpy).not.toHaveBeenCalled();
+    expect(dbAllSpy).not.toHaveBeenCalled();
+    expect(dbGetSpy).not.toHaveBeenCalled();
+
+    auditExportSpy.mockRestore();
+    dbAllSpy.mockRestore();
+    dbGetSpy.mockRestore();
+  });
+
+  it("exports every valid section with the expected CSV format and data", async () => {
+    await concord.sync("FUND");
+    const reg = concord.importRegister("FUND", {
+      csv: `holder_id,account,units\nA,${h1},90\nB,${h2},50\n`,
+      asOf: at(40),
+    });
+    await concord.reconcile("FUND", reg.registerId);
+
+    expect(EXPORT_CSV_SECTIONS).toEqual(["holdings", "events", "controls", "breaks"]);
+
+    const expectedHeaders: Record<(typeof EXPORT_CSV_SECTIONS)[number], string> = {
+      holdings: "address,units,share,status,ignored",
+      events: "id,ledger,closedAt,kind,from,to,units,authorized,txHash",
+      controls: "closedAt,ledger,type,account,units,txHash,instructionRef,approvedBy,reason",
+      breaks:
+        "source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor",
+    };
+
+    for (const section of EXPORT_CSV_SECTIONS) {
+      const csv = concord.exportCsv("FUND", section);
+      expect(typeof csv).toBe("string");
+      const lines = csv.trimEnd().split("\n");
+      expect(lines[0]).toBe(expectedHeaders[section]);
+      expect(lines.length).toBeGreaterThan(1);
+    }
   });
 });
 

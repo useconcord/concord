@@ -171,6 +171,9 @@ const now = () => new Date().toISOString();
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const MAX_REGISTER_CLOCK_SKEW_MS = 5 * 60_000;
 
+export const EXPORT_CSV_SECTIONS = ["holdings", "events", "controls", "breaks"] as const;
+export type ExportCsvSection = (typeof EXPORT_CSV_SECTIONS)[number];
+
 function isoTime(input: string, field: string): string {
   const t = Date.parse(input);
   if (Number.isNaN(t)) throw new Invalid(`${field} is not a valid date: "${input}"`);
@@ -1731,8 +1734,12 @@ export class Concord {
 
   /** One section of the audit pack as CSV. */
   exportCsv(ref: string, section: string, period: { from?: string; to?: string } = {}): string {
+    if (!(EXPORT_CSV_SECTIONS as readonly string[]).includes(section)) {
+      throw new Invalid("section must be holdings, events, controls or breaks");
+    }
     const pack = this.auditExport(ref, period);
-    switch (section) {
+    const s: ExportCsvSection = section as ExportCsvSection;
+    switch (s) {
       case "holdings":
         return toCsv(["address", "units", "share", "status", "ignored"], pack.holdings.holders);
       case "events":
@@ -1780,8 +1787,10 @@ export class Concord {
           rows,
         );
       }
-      default:
+      default: {
+        const _exhaustive: never = s;
         throw new Invalid("section must be holdings, events, controls or breaks");
+      }
     }
   }
 }
