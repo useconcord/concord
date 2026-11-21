@@ -203,12 +203,65 @@ describe("workspace isolation", () => {
     expect(JSON.stringify(packB)).not.toContain("ALPHA-HOLDER-7");
   });
 
-  it("opens only workspaces it knows, under ids it generated", () => {
-    const h = harness();
-    for (const bad of ["../x", "..%2Fx", "", "ZZZZZZZZZZZZZZZZ", "0123456789abcdef"]) {
-      expect(() => h.tenants.forOrg(bad), bad).toThrow(/no such workspace/);
+  it("opens only workspaces it knows, under ids it generated, returning one shared instance (#499)", () => {
+    const temp = mkdtempSync(join(tmpdir(), "concord-for-org-"));
+    const orgDir = join(temp, "orgs");
+    try {
+      const tenants = new Tenants(fileStore(temp), {}, () => true, () => []);
+      const valid = "0123456789abcdef";
+
+      // Regex-only rejection proven by known being true:
+      // uppercase hex, ../../etc, empty string, 15 and 17 characters all throw
+      const badIds = [
+        "../../etc",
+        "../x",
+        "..%2Fx",
+        "",
+        "0123456789ABCDEF",
+        "0123456789abcde",
+        "0123456789abcdef0",
+        undefined as unknown as string,
+      ];
+      for (const bad of badIds) {
+        expect(() => tenants.forOrg(bad), String(bad)).toThrow(/no such workspace/);
+      }
+
+      // Rejections created no file under tmp/orgs
+      expect(existsSync(orgDir) ? readdirSync(orgDir) : []).toEqual([]);
+
+      // Returns one shared instance per workspace
+      const a = tenants.forOrg(valid);
+      const b = tenants.forOrg(valid);
+      expect(a).toBe(b);
+
+      // When known returns false, even a structurally valid id throws
+      const unknownTenants = new Tenants(fileStore(temp), {}, () => false, () => []);
+      expect(() => unknownTenants.forOrg(valid)).toThrow(/no such workspace/);
+
+      // A store whose open throws propagates and is retried, not cached
+      let attempts = 0;
+      const retryStore = {
+        open: () => {
+          attempts++;
+          if (attempts === 1) throw new Error("transient open failure");
+          return new Db(":memory:", ORG_MIGRATIONS);
+        },
+        remove: () => {},
+      };
+      const retrying = new Tenants(retryStore, {}, () => true, () => []);
+      expect(() => retrying.forOrg(valid)).toThrow("transient open failure");
+      expect(attempts).toBe(1);
+
+      const recovered = retrying.forOrg(valid);
+      expect(recovered).toBeDefined();
+      expect(attempts).toBe(2);
+      expect(retrying.forOrg(valid)).toBe(recovered);
+      expect(attempts).toBe(2);
+      retrying.drop(valid);
+      tenants.drop(valid);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
     }
-    expect(() => h.tenants.forOrg(undefined as unknown as string)).toThrow(/no such workspace/);
   });
 
   it("refuses a database that belongs to another workspace", () => {
