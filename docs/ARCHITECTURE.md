@@ -69,8 +69,79 @@ Two kinds of database, all under `CONCORD_DATA_DIR`:
   Schema is `ORG_MIGRATIONS`: watched assets, indexed events, uploaded registers, journals,
   instructions, reconciliation runs, corporate actions, notes.
 
-Migrations are an ordered list; `PRAGMA user_version` is the count applied. Add to the end and
-never edit one that has shipped. Amounts are stored as decimal strings of the smallest unit.
+### Workspace database layout (`orgs/<id>.db`)
+
+```mermaid
+erDiagram
+    assets ||--o{ events : "asset_id"
+    assets ||--o{ openings : "asset_id"
+    assets ||--o{ registers : "asset_id"
+    assets ||--o{ journal : "asset_id"
+    assets ||--o{ instructions : "asset_id"
+    assets ||--o{ runs : "asset_id"
+    assets ||--o{ actions : "asset_id"
+    assets ||--o{ break_notes : "asset_id"
+    assets ||--o{ break_note_history : "asset_id"
+    registers ||--o{ register_positions : "register_id"
+    registers ||--o{ runs : "register_id"
+```
+
+Foreign keys enforce referential integrity (`PRAGMA foreign_keys = ON`). All relationships cascade:
+- Deleting an asset (`assets`) automatically cascades to delete all its `events`, `openings`, `registers` (and their `register_positions` and `runs`), `journal`, `instructions`, `actions`, `break_notes`, and `break_note_history`.
+- Deleting a register (`registers`) cascades to delete its `register_positions` and all reconciliation `runs` generated against it.
+- `meta` stores workspace configuration and stands alone without foreign keys.
+
+### Control database layout (`control.db`)
+
+```mermaid
+erDiagram
+    users ||--o{ credentials : "user_id"
+    users ||--o{ memberships : "user_id"
+    orgs ||--o{ memberships : "org_id"
+    memberships ||--o{ sessions : "(org_id, user_id)"
+    orgs ||--o{ invites : "org_id"
+    users ||--o{ one_time_tokens : "user_id"
+```
+
+Cascades manage identity lifecycles:
+- Deleting an organization (`orgs`) cascades to delete its `memberships`, `invites`, and associated `sessions`.
+- Deleting a user (`users`) cascades to remove their `credentials`, `memberships`, `sessions`, and `one_time_tokens`.
+- `sessions` holds a composite foreign key on `(org_id, user_id)` referencing `memberships(org_id, user_id) ON DELETE CASCADE ON UPDATE CASCADE`, ensuring sessions are strictly scoped to active workspace memberships.
+
+### Columns holding derived JSON blobs
+
+Several columns store derived structured data as serialized JSON text (`services/api/src/concord.ts`):
+
+| Table | Column | Shape / Type | Description |
+|---|---|---|---|
+| `assets` | `ignore_addresses` | `string[]` | Addresses omitted from balance and reconciliation calculation (e.g. issuer or distributor accounts). |
+| `registers` | `issues` | `Array<{ line: number; message: string }>` | Parsing issues or validation warnings encountered when importing the register CSV. |
+| `runs` | `result` | `ReconcileRunResult` | Full reconciliation outcome, including position breaks, movement breaks, summary totals, and holdings snapshot. |
+| `actions` | `params` | Corporate action terms object | Specific parameters for the corporate action (e.g. `{ dividendRate, payAsset }` or `{ splitNumerator, splitDenominator }`). |
+| `actions` | `snapshot` | `Record<string, string>` | Map of account addresses to integer balance strings (in smallest units) captured at the action's record time. |
+| `actions` | `result` | Corporate action reconciliation object | Detailed distribution results: observed vs expected entitlements, diffs, and execution breaks. |
+
+### Why amounts are stored as TEXT
+
+All currency and token quantities in database columns (`events.amount`, `openings.amount`, `register_positions.units`, `journal.units`, `instructions.units`) are stored as `TEXT`:
+- Values represent exact decimal strings of the asset's *smallest unit* (e.g. integer stroops on Stellar).
+- SQLite's numeric types (`INTEGER` up to 64-bit signed, `REAL` IEEE-754 double) risk precision loss or overflow when handling large integer quantities or 128-bit Soroban token balances.
+- Storing balances as decimal strings guarantees zero loss of precision. The asset's `assets.decimals` defines the fractional exponent for display.
+- Inside JSON objects (`runs.result`, `actions.result`), amounts are formatted for human readability as decimal strings in whole units (e.g. `"100.5"`), while `actions.snapshot` retains smallest-unit integer strings.
+
+### Cache invalidation with `PRAGMA data_version`
+
+`Concord` instances cache in-memory `HoldingsState` in `stateMemo` (`services/api/src/concord.ts#L270-L292`).
+- When a local operation alters an asset, it calls `touch(assetId)` to invalidate that asset's cached entry.
+- When multiple processes access the same database file (such as the API server and the CLI), `fresh()` queries SQLite's `PRAGMA data_version` via `db.dataVersion()`.
+- SQLite increments `data_version` whenever an external connection commits a change to the database file. If `version !== seenVersion`, `fresh()` clears all memoized entries in `stateMemo`, ensuring readers never serve stale cached balances.
+
+### Migration rules
+
+- Schemas are defined as ordered migration arrays in `services/api/src/schema.ts` (`ORG_MIGRATIONS` and `CONTROL_MIGRATIONS`).
+- `PRAGMA user_version` tracks the number of migrations applied.
+- Migrations are strictly append-only: never edit or remove an existing migration that has shipped.
+- Every new migration requires a committed upgrade fixture under `services/api/test/fixtures/db/` (generated with `make-db-fixtures.ts`). Unit tests in `migrations.test.ts` verify that databases from previous versions upgrade cleanly.
 
 ## How the main flows work
 
