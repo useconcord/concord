@@ -1055,6 +1055,47 @@ describe("chain endpoints", () => {
     expect(err.message).toContain("h1.example: unexpected response");
     expect(err.message).toContain("h2.example: unexpected response");
   });
+
+  it("stops retrying and fails immediately when budget is exceeded on the first attempt", async () => {
+    const a = "https://a.example";
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
+      [a]: [
+        () => {
+          clock.value += 95_000;
+          return new Response("", { status: 503 });
+        },
+      ],
+      [b]: [health],
+    });
+    const source = new StellarSource(network([a, b]), deps);
+    const err = await source.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("a.example: HTTP 503");
+    expect(calls.map((c) => c.url)).toEqual([a]);
+  });
+
+  it("retries and falls over to the next endpoint when within budget", async () => {
+    const a = "https://a.example";
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
+      [a]: [
+        () => {
+          clock.value += 10_000;
+          return new Response("", { status: 503 });
+        },
+        () => {
+          clock.value += 10_000;
+          return new Response("", { status: 503 });
+        },
+      ],
+      [b]: [health],
+    });
+    const source = new StellarSource(network([a, b]), deps);
+    const head = await source.latestLedger();
+    expect(head.latest).toBe(50);
+    expect(calls.map((c) => c.url)).toEqual([a, a, b]);
+  });
 });
 
 describe("what ships", () => {
