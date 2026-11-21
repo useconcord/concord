@@ -155,6 +155,10 @@ CREATE INDEX break_note_history_key ON break_note_history (asset_id, scope, key,
 INSERT INTO break_note_history (asset_id, scope, key, fingerprint, status, note, author, author_id, at)
   SELECT asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at FROM break_notes;
 `,
+  // v3: hidden flow-only pay assets watched automatically for dividend actions.
+  `
+ALTER TABLE assets ADD COLUMN flow_only INTEGER NOT NULL DEFAULT 0;
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */
