@@ -265,6 +265,7 @@ class EndpointPool {
           return await call(endpoint);
         } catch (err) {
           if (!(err instanceof EndpointFailure)) throw err;
+          // The budget is checked between attempts, not during one.
           const outOfTime = this.deps.now() - started >= BUDGET_MS;
           if (err.options.retrySame && attempt < ATTEMPTS_PER_ENDPOINT && !outOfTime) {
             await this.deps.sleep(250 * 2 ** (attempt - 1) + Math.random() * 250);
@@ -276,6 +277,7 @@ class EndpointPool {
           break;
         }
       }
+      // The budget is checked between attempts, not during one.
       if (this.deps.now() - started >= BUDGET_MS) break;
     }
     throw new ChainError(
