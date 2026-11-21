@@ -1090,13 +1090,19 @@ export class Concord {
       movement,
       breaks,
     };
+    const openBreaks = this.annotate(asset.id, "recon", breaks).filter((b) => b.status === "open").length;
     const id = this.db.insert(
-      "INSERT INTO runs (asset_id, register_id, as_of, created_by, created_at, result) VALUES (?, ?, ?, ?, ?, ?)",
+      `INSERT INTO runs (asset_id, register_id, as_of, created_by, created_at, summary, status, chain_behind, open_breaks, result)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       asset.id,
       Number(reg.id),
       asOf,
       actor?.label ?? null,
       now(),
+      JSON.stringify(result.summary),
+      result.status,
+      chainBehind ? 1 : 0,
+      openBreaks,
       JSON.stringify(result),
     );
     return this.run(id);
@@ -1117,22 +1123,35 @@ export class Concord {
     };
   }
 
+  /**
+   * The last 200 reconciliations as summaries. Everything comes from columns so that listing
+   * never parses a stored result body, which for a thousand-holder register is hundreds of KB.
+   */
   runs(ref: string) {
     const asset = this.asset(ref);
     return this.db
-      .all<{ id: number }>("SELECT id FROM runs WHERE asset_id = ? ORDER BY id DESC LIMIT 200", asset.id)
-      .map(({ id }) => {
-        const r = this.run(id);
-        return {
-          id: r.id,
-          asOf: r.asOf,
-          createdAt: r.createdAt,
-          status: r.status,
-          chainBehind: r.chainBehind,
-          summary: r.summary,
-          openBreaks: r.openBreaks,
-        };
-      });
+      .all<{
+        id: number;
+        as_of: string;
+        created_at: string;
+        status: string;
+        chain_behind: number;
+        summary: string;
+        open_breaks: number;
+      }>(
+        `SELECT id, as_of, created_at, status, chain_behind, summary, open_breaks
+         FROM runs WHERE asset_id = ? ORDER BY id DESC LIMIT 200`,
+        asset.id,
+      )
+      .map((r) => ({
+        id: Number(r.id),
+        asOf: String(r.as_of),
+        createdAt: String(r.created_at),
+        status: String(r.status) as RunResult["status"],
+        chainBehind: Number(r.chain_behind) === 1,
+        summary: JSON.parse(String(r.summary)) as RunResult["summary"],
+        openBreaks: Number(r.open_breaks),
+      }));
   }
 
   /** The newest reconciliation of one register, if it has been reconciled. */
@@ -1233,8 +1252,31 @@ export class Concord {
         actor?.id ?? null,
         at,
       );
+      // A sign-off moves a break out of the open count the runs list reads from a column.
+      if (scope === "recon") this.countOpenBreaks(asset.id);
     });
     return { ok: true };
+  }
+
+  /**
+   * Rewrite the stored open-break count for every reconciliation of an asset, applying the same
+   * overlay as `annotate`. This is the only listing-adjacent path that reads result bodies, and it
+   * runs on a sign-off rather than on every list request.
+   */
+  private countOpenBreaks(assetId: string): void {
+    this.db.write(
+      `UPDATE runs SET open_breaks = (
+         SELECT COUNT(*) FROM json_each(runs.result, '$.breaks') b
+         WHERE NOT EXISTS (
+           SELECT 1 FROM break_notes n
+           WHERE n.asset_id = runs.asset_id AND n.scope = 'recon'
+             AND n.key = json_extract(b.value, '$.key')
+             AND n.fingerprint = json_extract(b.value, '$.fingerprint')
+             AND n.status <> 'open'
+         )
+       ) WHERE asset_id = ?`,
+      assetId,
+    );
   }
 
   /** Every sign-off change for one break, oldest first: who, when, what status, and the note. */

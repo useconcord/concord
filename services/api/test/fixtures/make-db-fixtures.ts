@@ -60,6 +60,48 @@ build(join(outDir, "org-v2.db"), ORG_MIGRATIONS.slice(0, 2), (db) => {
            ('usd-mainnet', 'recon', 'SUPPLY_MISMATCH', '10|12', 'resolved', 'corrected', 'bob', 'u2', '2024-01-05T00:00:00Z')`);
 });
 
+build(join(outDir, "org-v3.db"), ORG_MIGRATIONS.slice(0, 3), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v3')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '2024-01-01T00:00:00Z')`);
+  db.exec(`INSERT INTO registers (id, asset_id, as_of, source, sha256, issues, imported_by, imported_at)
+    VALUES (1, 'usd-mainnet', '2024-01-03', 'upload', 'abc', '[]', 'u1', '2024-01-03T00:00:00Z')`);
+  db.exec(`INSERT INTO break_notes (asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at)
+    VALUES ('usd-mainnet', 'recon', 'K1', '10|12', 'resolved', 'corrected', 'bob', 'u2', '2024-01-05T00:00:00Z')`);
+  // One signed-off break and one open one, so the backfilled counters are not trivially equal.
+  db.prepare(
+    `INSERT INTO runs (asset_id, register_id, as_of, created_by, created_at, summary, status, chain_behind, open_breaks, result)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "usd-mainnet",
+    1,
+    "2024-01-03",
+    "u1",
+    "2024-01-03T00:00:00Z",
+    JSON.stringify({ chainSupply: "10", registerTotal: "12", breakCount: 2 }),
+    "breaks",
+    0,
+    1,
+    JSON.stringify({
+      registerId: 1,
+      registerSha256: "abc",
+      asOf: "2024-01-03",
+      chainLedger: 100,
+      chainSyncedAt: "2024-01-03T00:00:00Z",
+      chainBehind: false,
+      warnings: [],
+      status: "breaks",
+      summary: { chainSupply: "10", registerTotal: "12", breakCount: 2 },
+      lines: [],
+      movement: null,
+      breaks: [
+        { key: "K1", fingerprint: "10|12" },
+        { key: "K2", fingerprint: "9|12" },
+      ],
+    }),
+  );
+});
+
 build(join(outDir, "control-v1.db"), CONTROL_MIGRATIONS.slice(0, 1), (db) => {
   db.exec(`INSERT INTO users (id, email, name, email_verified, created_at)
     VALUES ('u1', 'alice@example.org', 'Alice', 1, '2024-01-01T00:00:00Z')`);
