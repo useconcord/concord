@@ -916,6 +916,26 @@ export class Concord {
     });
   }
 
+  /** Remove a single journal entry by its ref. */
+  deleteJournalEntry(ref: string, entryRef: string, actor?: Actor): void {
+    const asset = this.asset(ref);
+    const removed = this.db.write("DELETE FROM journal WHERE asset_id = ? AND ref = ?", asset.id, entryRef);
+    if (removed === 0) throw new NotFound(`no such journal entry ${entryRef} for this asset`);
+    try {
+      this.db.insert(
+        `INSERT INTO activity (at, actor_id, actor_label, action, subject, detail) VALUES (?, ?, ?, ?, ?, ?)`,
+        now(),
+        actor?.id ?? null,
+        actor?.label ?? null,
+        "delete_journal_entry",
+        `${asset.id}:${entryRef}`,
+        JSON.stringify({ assetId: asset.id, ref: entryRef }),
+      );
+    } catch {
+      // Activity table is optional / separate feature
+    }
+  }
+
   importInstructions(ref: string, csv: string) {
     const asset = this.asset(ref);
     let parsed;
@@ -956,6 +976,26 @@ export class Concord {
       if (r.reason) i.reason = String(r.reason);
       return i;
     });
+  }
+
+  /** Remove a single instruction by its ref. */
+  deleteInstruction(ref: string, instructionRef: string, actor?: Actor): void {
+    const asset = this.asset(ref);
+    const removed = this.db.write("DELETE FROM instructions WHERE asset_id = ? AND ref = ?", asset.id, instructionRef);
+    if (removed === 0) throw new NotFound(`no such instruction ${instructionRef} for this asset`);
+    try {
+      this.db.insert(
+        `INSERT INTO activity (at, actor_id, actor_label, action, subject, detail) VALUES (?, ?, ?, ?, ?, ?)`,
+        now(),
+        actor?.id ?? null,
+        actor?.label ?? null,
+        "delete_instruction",
+        `${asset.id}:${instructionRef}`,
+        JSON.stringify({ assetId: asset.id, ref: instructionRef }),
+      );
+    } catch {
+      // Activity table is optional / separate feature
+    }
   }
 
   // ── reconciliation ────────────────────────────────────────────────────────
