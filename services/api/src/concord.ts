@@ -812,13 +812,14 @@ export class Concord {
     }
     const registerId = this.db.tx(() => {
       const id = this.db.insert(
-        "INSERT INTO registers (asset_id, as_of, source, sha256, issues, imported_by, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO registers (asset_id, as_of, source, sha256, issues, imported_by, imported_by_id, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         asset.id,
         asOf,
         label(input.source, "source", 200) ?? "upload",
         sha256(input.csv),
         JSON.stringify(parsed.issues),
         actor?.label ?? null,
+        actor?.id ?? null,
         now(),
       );
       for (const p of parsed.positions) {
@@ -1205,6 +1206,44 @@ export class Concord {
           ? this.controls(asset.id).breaks
           : this.action(Number(scope.slice("action:".length))).result?.breaks;
     if (!current?.some((b) => b.key === key)) throw new NotFound(`no break ${key} in the current ${scope.split(":")[0]} results`);
+
+    if (this.requireSecondSigner && input.status === "resolved") {
+      const actorId = actor?.id;
+      const actorLabel = actor?.label;
+      if (actorId || actorLabel) {
+        const existingNote = this.db.get<{ status: string; author: string | null; author_id: string | null }>(
+          "SELECT status, author, author_id FROM break_notes WHERE asset_id = ? AND scope = ? AND key = ?",
+          asset.id,
+          scope,
+          key,
+        );
+        if (existingNote && existingNote.status === "acknowledged") {
+          const sameId = actorId && existingNote.author_id && existingNote.author_id === actorId;
+          const sameLabel = actorLabel && existingNote.author && existingNote.author === actorLabel;
+          if (sameId || sameLabel) {
+            throw new Invalid("four-eyes rule: the resolver cannot be the same user who acknowledged the break");
+          }
+        }
+
+        if (scope === "recon") {
+          const run = this.latestRun(asset.id);
+          if (run) {
+            const reg = this.db.get<{ imported_by: string | null; imported_by_id: string | null }>(
+              "SELECT imported_by, imported_by_id FROM registers WHERE id = ?",
+              run.registerId,
+            );
+            if (reg) {
+              const sameId = actorId && reg.imported_by_id && reg.imported_by_id === actorId;
+              const sameLabel = actorLabel && reg.imported_by && reg.imported_by === actorLabel;
+              if (sameId || sameLabel) {
+                throw new Invalid("four-eyes rule: the person who signs off a break cannot be the one who imported the books");
+              }
+            }
+          }
+        }
+      }
+    }
+
     const at = now();
     this.db.tx(() => {
       this.db.insert(
@@ -1783,5 +1822,29 @@ export class Concord {
       default:
         throw new Invalid("section must be holdings, events, controls or breaks");
     }
+  }
+
+  get requireSecondSigner(): boolean {
+    const row = this.db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'require_second_signer'");
+    return row?.value === "true";
+  }
+
+  setRequireSecondSigner(enabled: boolean): void {
+    this.db.write(
+      "INSERT INTO meta (key, value) VALUES ('require_second_signer', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      String(enabled),
+    );
+  }
+
+  settings(): { requireSecondSigner: boolean } {
+    return { requireSecondSigner: this.requireSecondSigner };
+  }
+
+  updateSettings(patch: { requireSecondSigner?: boolean }): { requireSecondSigner: boolean } {
+    if (patch.requireSecondSigner !== undefined) {
+      if (typeof patch.requireSecondSigner !== "boolean") throw new Invalid("requireSecondSigner must be a boolean");
+      this.setRequireSecondSigner(patch.requireSecondSigner);
+    }
+    return this.settings();
   }
 }

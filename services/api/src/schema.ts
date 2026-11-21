@@ -65,6 +65,7 @@ CREATE TABLE registers (
   sha256 TEXT NOT NULL,
   issues TEXT NOT NULL,
   imported_by TEXT,
+  imported_by_id TEXT,
   imported_at TEXT NOT NULL
 );
 CREATE INDEX registers_asset ON registers (asset_id, as_of);
