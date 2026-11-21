@@ -25,6 +25,8 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   actions ASSET                    corporate actions and their state
   controls ASSET                   freeze, authorisation and clawback log
   export ASSET [--from ISO] [--to ISO] [--csv SECTION] [--out FILE]
+  signoff ASSET --scope recon|controls|action:N --key KEY --status open|acknowledged|resolved
+        [--note TEXT] [--run N]
 
 Operator commands.
 

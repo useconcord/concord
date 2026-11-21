@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { backup } from "node:sqlite";
 import { parseArgs } from "node:util";
 import type { ActionInput, Actor, Concord, WatchInput } from "./concord.js";
+import { NotFound } from "./concord.js";
 import { isNetworkName, loadConfig } from "./config.js";
 import { openRuntime, startServer } from "./main.js";
 import { USAGE } from "./cli-usage.js";
@@ -39,6 +40,10 @@ async function main(): Promise<void> {
       csv: { type: "string" },
       out: { type: "string" },
       note: { type: "string" },
+      scope: { type: "string" },
+      status: { type: "string" },
+      key: { type: "string" },
+      run: { type: "string" },
       json: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -249,6 +254,49 @@ async function main(): Promise<void> {
       } else {
         process.stdout.write(text);
       }
+      break;
+    }
+    case "signoff": {
+      const asset = need(a, "asset");
+      const scope = need(values.scope, "--scope");
+      const key = need(values.key, "--key");
+      const rawStatus = need(values.status, "--status");
+      // Validate scope format.
+      if (!/^(recon|controls|action:[1-9]\d*)$/.test(scope)) {
+        throw new Error("--scope must be recon, controls, or action:N (N a positive integer)");
+      }
+      // Validate status values.
+      if (!["open", "acknowledged", "resolved"].includes(rawStatus)) {
+        throw new Error("--status must be open, acknowledged, or resolved");
+      }
+      const status = rawStatus as "open" | "acknowledged" | "resolved";
+      // A note is required when signing off or acknowledging; optional for open.
+      const note = values.note ?? "";
+      if (status !== "open" && !note.trim()) {
+        throw new Error(`--note is required when --status is ${status}`);
+      }
+      const concord = workspace();
+      const assetRecord = concord.asset(asset);
+      // Resolve the fingerprint from the run / scope referenced.
+      const runIdArg = values.run;
+      let breaks: Array<{ key: string; fingerprint: string }>;
+      if (scope === "recon") {
+        const r = runIdArg !== undefined ? concord.run(Number(runIdArg)) : concord.latestRun(assetRecord.id);
+        if (!r) throw new Error("no reconciliation run found for this asset");
+        breaks = r.breaks;
+      } else if (scope === "controls") {
+        breaks = concord.controls(assetRecord.id).breaks;
+      } else {
+        // action:N
+        const actionId = Number(scope.slice("action:".length));
+        const actionResult = concord.action(actionId);
+        breaks = actionResult.result?.breaks ?? [];
+      }
+      const brk = breaks.find((b) => b.key === key);
+      if (!brk) throw new NotFound(`no break ${key} in the current ${scope.split(":")[0]} results`);
+      concord.setNote(asset, scope, key, { fingerprint: brk.fingerprint, status, note }, actor);
+      if (values.json) return out({ ok: true, asset, scope, key, status });
+      console.log(`signed off: ${key} → ${status.toUpperCase()}`);
       break;
     }
     default:
