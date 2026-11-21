@@ -666,6 +666,7 @@ describe("Concord", () => {
     await concord.createAction("FUND", { type: "split", recordTime: at(5), num: "2", den: "1" });
 
     const pack = concord.auditExport("FUND");
+    expect(pack.schemaVersion).toBe(1);
     expect(validateAuditPack(pack), JSON.stringify(validateAuditPack.errors, null, 2)).toBe(true);
 
     // The schema rejects added fields and misses required ones. This list catches a field that
@@ -875,6 +876,7 @@ describe("Concord", () => {
         "reconciliations[].summary.supplyDifference",
         "reconciliations[].summary.unmappedUnits",
         "reconciliations[].warnings[]",
+        "schemaVersion",
         "sha256",
         "signoffHistory[]",
         "signoffHistory[].at",
