@@ -36,7 +36,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # The API and the dashboard import packages/core from its build output, so build first.
+      # The API and the dashboard import packages/core from its build output, and tests exercise built artifacts, so build first.
       - run: pnpm build
 
       - run: pnpm typecheck
