@@ -11,9 +11,9 @@ import { StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
 import { loadConfig } from "../src/config.js";
 import { Db } from "../src/db.js";
-import { createServerApp } from "../src/main.js";
+import { createServerApp, openRuntime } from "../src/main.js";
 import { CONTROL_MIGRATIONS, ORG_MIGRATIONS } from "../src/schema.js";
-import { Tenants, fileStore, memoryStore } from "../src/tenants.js";
+import { Tenants, fileStore, memoryStore, type OrgStore } from "../src/tenants.js";
 import { Client, FakeChain, MAINNET_PASSPHRASE, ORIGIN, PASSPHRASE, at, harness, key, u, type Harness } from "./helpers.js";
 
 /** Strings that exist only in workspace A. None may ever reach workspace B. */
@@ -268,6 +268,107 @@ describe("workspace isolation", () => {
       tenants.close();
       rmSync(temp, { recursive: true, force: true });
     }
+  });
+
+  describe("shutting down", () => {
+    const alpha = "aaaaaaaaaaaaaaaa";
+    const beta = "bbbbbbbbbbbbbbbb";
+
+    /** Workspaces over in-memory databases that record, in order, each id closed and each id removed. */
+    function recorded(): { tenants: Tenants; closed: string[]; removed: string[] } {
+      const closed: string[] = [];
+      const removed: string[] = [];
+      const store: OrgStore = {
+        open: (orgId) => {
+          const db = new Db(":memory:", ORG_MIGRATIONS);
+          const close = db.close.bind(db);
+          db.close = () => {
+            closed.push(orgId);
+            close();
+          };
+          return db;
+        },
+        remove: (orgId) => void removed.push(orgId),
+      };
+      return { tenants: new Tenants(store, {}, () => true, () => [alpha, beta]), closed, removed };
+    }
+
+    it("closes every open workspace once, and closing again does nothing", () => {
+      const { tenants, closed } = recorded();
+      const handles = [tenants.forOrg(alpha).db, tenants.forOrg(beta).db];
+
+      tenants.close();
+      expect([...closed].sort()).toEqual([alpha, beta]);
+      for (const db of handles) expect(() => db.get("SELECT 1")).toThrow(/not open/);
+
+      // Shutdown reaches close() from more than one path.
+      expect(() => tenants.close()).not.toThrow();
+      expect(closed).toHaveLength(2);
+    });
+
+    it("does not close a dropped workspace a second time", () => {
+      const { tenants, closed, removed } = recorded();
+      tenants.forOrg(alpha);
+      const kept = tenants.forOrg(beta).db;
+
+      tenants.drop(alpha);
+      expect(closed).toEqual([alpha]);
+      expect(removed).toEqual([alpha]);
+      // The neighbour is untouched by the drop.
+      expect(kept.get<{ value: string }>("SELECT value FROM meta WHERE key = 'org_id'")?.value).toBe(beta);
+
+      tenants.close();
+      expect(closed).toEqual([alpha, beta]);
+      // Nor does a drop after close() reach a handle that is already closed.
+      tenants.drop(beta);
+      expect(closed).toEqual([alpha, beta]);
+      expect(removed).toEqual([alpha, beta]);
+    });
+
+    it("opens a new instance for a workspace asked for after close()", () => {
+      const { tenants, closed } = recorded();
+      const before = tenants.forOrg(alpha);
+      expect(tenants.forOrg(alpha)).toBe(before);
+
+      tenants.close();
+      const after = tenants.forOrg(alpha);
+      expect(after).not.toBe(before);
+      expect(after.db).not.toBe(before.db);
+      // The handle from before stays closed; the new one is the workspace's own and is open.
+      expect(() => before.db.get("SELECT 1")).toThrow(/not open/);
+      expect(after.db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'org_id'")?.value).toBe(alpha);
+      expect(tenants.forOrg(alpha)).toBe(after);
+
+      tenants.close();
+      expect(closed).toEqual([alpha, alpha]);
+    });
+
+    it("closes the runtime twice without throwing, and frees its files", async () => {
+      const temp = mkdtempSync(join(tmpdir(), "concord-runtime-close-"));
+      try {
+        // The cheapest password cost the config accepts: the sign-up is only here to make a workspace.
+        const runtime = openRuntime(loadConfig({ CONCORD_DATA_DIR: temp, CONCORD_PASSWORD_COST: "16384:8:1" }));
+        const { orgId } = await runtime.auth.signUp({
+          email: "ann@alpha.test",
+          name: "Ann Alpha",
+          password: "correct horse battery",
+          orgName: "Alpha Capital",
+        });
+        const workspace = runtime.tenants.forOrg(orgId).db;
+        expect(existsSync(join(temp, "control.db"))).toBe(true);
+        expect(readdirSync(join(temp, "orgs"))).toContain(`${orgId}.db`);
+
+        runtime.close();
+        // The second close used to throw "database is not open" from the control database.
+        expect(() => runtime.close()).not.toThrow();
+        // Both are closed: the identity records, and the workspace opened through the runtime.
+        for (const db of [runtime.control, workspace]) expect(() => db.get("SELECT 1")).toThrow(/not open/);
+      } finally {
+        // On Windows this fails while a handle is still open, so it checks the close as well.
+        rmSync(temp, { recursive: true, force: true });
+      }
+      expect(existsSync(temp)).toBe(false);
+    });
   });
 
   it("deletes a workspace without touching its neighbour", async () => {
