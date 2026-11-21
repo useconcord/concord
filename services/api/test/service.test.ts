@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
+import { ChainError, StellarSource, cursorLedger, decodeEvent, type AssetCandidate } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
 import { Db } from "../src/db.js";
@@ -925,6 +925,42 @@ describe("Concord", () => {
     chain.oldest = 400_000;
     await expect(concord.sync("FUND")).rejects.toThrow(/longer than the network keeps events/);
     expect(concord.asset("FUND").syncError).toMatch(/Rebuild this asset/);
+  });
+
+  it("rejects watching an asset outside known when known is set (#509)", async () => {
+    chain.known = new Set();
+    const badIssuer = key();
+    await expect(
+      concord.watchAsset({ network: "testnet", asset: `FUND:${badIssuer}`, fromLedger: 1 }),
+    ).rejects.toThrow("testnet has no asset FUND from that issuer");
+    chain.known = undefined;
+  });
+
+  it("lookup returns candidates for a code from search (#509)", async () => {
+    const candidate: AssetCandidate = {
+      asset: `CAND:${key()}`,
+      code: "CAND",
+      issuer: key(),
+      contractId: "C123",
+      trustlines: 10,
+      authorizedUnits: "100",
+      authRequired: false,
+      authRevocable: false,
+      clawbackEnabled: false,
+    };
+    chain.candidates = [candidate];
+    expect(await concord.lookup("testnet", "CAND")).toEqual([candidate]);
+    expect(await concord.lookup("testnet", "NONE")).toEqual([]);
+    chain.candidates = [];
+  });
+
+  it("advances chain past retention yielding the rebuild gap error (#509)", async () => {
+    const issuer = key();
+    const watched = await concord.watchAsset({ network: "testnet", asset: `ADV:${issuer}`, fromLedger: 1 });
+    await concord.sync(watched.id);
+    chain.advance(100, { retain: 50 });
+    await expect(concord.sync(watched.id)).rejects.toThrow(/longer than the network keeps events/);
+    expect(concord.asset(watched.id).syncError).toMatch(/Rebuild this asset/);
   });
 
   it("stops watching and takes every dependent row with it", async () => {

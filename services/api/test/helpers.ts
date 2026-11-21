@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 import type { AssetEvent, EventKind } from "@concord/core";
 import { createApi, type ApiOptions } from "../src/api.js";
 import { Auth } from "../src/auth.js";
-import type { Baseline, ChainSource, EventPage } from "../src/chain.js";
+import type { AssetCandidate, AssetDescription, Baseline, ChainSource, EventPage, ResolvedAsset } from "../src/chain.js";
 import type { Networks } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { CONTROL_MIGRATIONS } from "../src/schema.js";
@@ -72,6 +72,28 @@ export class FakeChain implements ChainSource {
   async baseline(): Promise<Baseline> {
     if (!this.baselineResult) throw new Error("no baseline");
     return this.baselineResult;
+  }
+
+  known?: Set<string>;
+  candidates: AssetCandidate[] = [];
+
+  async describe(asset: ResolvedAsset): Promise<AssetDescription | undefined> {
+    if (this.known === undefined) return {};
+    if (!this.known.has(asset.id) && !this.known.has(asset.code) && !(asset.issuer && this.known.has(`${asset.code}:${asset.issuer}`))) {
+      return undefined;
+    }
+    return { code: asset.code, issuer: asset.issuer, decimals: 7 };
+  }
+
+  async search(code: string): Promise<AssetCandidate[]> {
+    return this.candidates.filter((c) => c.code.toUpperCase() === code.toUpperCase());
+  }
+
+  advance(n: number, options: { retain?: number } = {}): void {
+    this.latest += n;
+    if (options.retain !== undefined) {
+      this.oldest = Math.max(this.oldest, this.latest - options.retain + 1);
+    }
   }
 }
 
