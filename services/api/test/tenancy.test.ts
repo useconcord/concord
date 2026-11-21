@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { describe, expect, it } from "vitest";
 import { readFileSync as readFixture } from "node:fs";
-import { StrKey } from "@stellar/stellar-sdk";
+import { Address, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
 import { StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
@@ -743,11 +743,15 @@ describe("chain endpoints", () => {
   const health = () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { latestLedger: 50, oldestLedger: 10, oldestLedgerCloseTime: "1790000000" } }));
 
   function scripted(answers: Record<string, Array<() => Response | Promise<Response>>>) {
-    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const calls: Array<{ url: string; headers: Record<string, string>; body?: string }> = [];
     const clock = { value: 1_000_000 };
     const fetch = (async (url: unknown, init?: RequestInit) => {
       const u = String(url);
-      calls.push({ url: u, headers: (init?.headers ?? {}) as Record<string, string> });
+      calls.push({
+        url: u,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        ...(typeof init?.body === "string" ? { body: init.body } : {}),
+      });
       const next = answers[u]?.shift();
       if (!next) throw new TypeError("fetch failed");
       return next();
@@ -1054,6 +1058,68 @@ describe("chain endpoints", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain("h1.example: unexpected response");
     expect(err.message).toContain("h2.example: unexpected response");
+  });
+
+  it("describe() for a contract id reads the instance entry via getLedgerEntries and handles missing entries", async () => {
+    const rpc = "https://rpc.example";
+    const contractId = StrKey.encodeContract(Buffer.alloc(32, 9));
+    const expectedKey = xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract: Address.fromString(contractId).toScAddress(),
+        key: xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: xdr.ContractDataDurability.persistent,
+      }),
+    ).toXDR("base64");
+
+    const instanceEntry = xdr.LedgerEntryData.contractData(
+      new xdr.ContractDataEntry({
+        ext: xdr.ExtensionPoint.v0(),
+        contract: Address.fromString(contractId).toScAddress(),
+        key: xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: xdr.ContractDataDurability.persistent,
+        val: xdr.ScVal.scvContractInstance(
+          new xdr.ScContractInstance({
+            executable: xdr.ContractExecutable.contractExecutableStellarAsset(),
+            storage: [
+              new xdr.ScMapEntry({
+                key: nativeToScVal("METADATA", { type: "symbol" }),
+                val: nativeToScVal(
+                  { decimal: 7, name: "Franklin Benji", symbol: "BENJI" },
+                  { type: { decimal: ["symbol", "u32"], name: ["symbol", "string"], symbol: ["symbol", "string"] } },
+                ),
+              }),
+            ],
+          }),
+        ),
+      }),
+    ).toXDR("base64");
+
+    const { calls, deps } = scripted({
+      [rpc]: [
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { entries: [{ xdr: instanceEntry }] } })),
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })),
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { entries: null } })),
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { entries: [] } })),
+      ],
+    });
+    const source = new StellarSource(network([rpc]), deps);
+
+    expect(await source.describe({ id: contractId, code: contractId })).toEqual({
+      decimals: 7,
+      code: "BENJI",
+      name: "Franklin Benji",
+    });
+    expect(await source.describe({ id: contractId, code: contractId })).toBeUndefined();
+    expect(await source.describe({ id: contractId, code: contractId })).toBeUndefined();
+    expect(await source.describe({ id: contractId, code: contractId })).toBeUndefined();
+
+    expect(calls).toHaveLength(4);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getLedgerEntries",
+      params: { keys: [expectedKey] },
+    });
   });
 });
 
