@@ -1151,6 +1151,52 @@ describe("Concord", () => {
     const template = await client.call("/api/templates/register.csv");
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
   });
+
+  it("exports a corporate action entitlement table as CSV and refuses unknown or cross-asset actions", async () => {
+    const h = harness();
+    const client = await new Client(h.app).signUp("csvaction@example.test", "Action CSV");
+    const issuer1 = key();
+    const issuer2 = key();
+    const h1 = key();
+    const h2 = key();
+    const payer = key();
+    const concord = h.tenants.forOrg(client.orgId);
+
+    const fund = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer1}`, fromLedger: 1 });
+    const other = await concord.watchAsset({ network: "testnet", asset: `OTHER:${issuer2}`, fromLedger: 1 });
+    h.chain.push(fund.id, "mint", 2, { to: h1, amount: u(100) });
+    h.chain.push(fund.id, "mint", 2, { to: h2, amount: u(50) });
+    h.chain.push(fund.id, "transfer", 10, { from: payer, to: h1, amount: u(10), txHash: "tx-a" });
+    h.chain.push(fund.id, "transfer", 11, { from: payer, to: h1, amount: u(5), txHash: "tx-b" });
+    await concord.sync(fund.id);
+
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(5),
+      ratePerUnit: "0.2",
+      payer,
+    });
+
+    const csv = concord.exportCsv("FUND", "action", { id: action.id });
+    const lines = csv.trim().split("\n");
+    expect(lines[0]).toBe("address,recordHolding,expected,observed,difference,status,txHashes");
+    expect(lines.slice(1)).toHaveLength(2);
+    expect(lines.slice(1)).toEqual(
+      expect.arrayContaining([
+        `${h1},100,20,15,-5,SHORT,tx-a;tx-b`,
+        `${h2},50,10,0,-10,MISSING,`,
+      ]),
+    );
+
+    const httpRes = await client.call(`/api/assets/${fund.id}/export?section=action&id=${action.id}`);
+    expect(httpRes.status).toBe(200);
+    expect(httpRes.headers.get("content-type")).toContain("text/csv");
+    expect(await httpRes.text()).toBe(csv);
+
+    expect(() => concord.exportCsv("FUND", "action", { id: 999999 })).toThrow(NotFound);
+    expect(() => concord.exportCsv(other.id, "action", { id: action.id })).toThrow(Invalid);
+    expect((await client.call(`/api/assets/${other.id}/export?section=action&id=${action.id}`)).status).toBe(400);
+  });
 });
 
 describe("documented input files", () => {
