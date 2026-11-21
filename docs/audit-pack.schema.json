@@ -327,7 +327,8 @@
           }
         },
         "breaks": { "type": "array", "items": { "$ref": "#/definitions/break" } },
-        "openBreaks": { "type": "integer" }
+        "openBreaks": { "type": "integer" },
+        "tolerance": { "type": ["string", "null"] }
       }
     },
     "corporateAction": {

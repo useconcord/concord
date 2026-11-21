@@ -155,6 +155,8 @@ CREATE INDEX break_note_history_key ON break_note_history (asset_id, scope, key,
 INSERT INTO break_note_history (asset_id, scope, key, fingerprint, status, note, author, author_id, at)
   SELECT asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at FROM break_notes;
 `,
+  // v3: per-asset reconciliation tolerance (smallest units as TEXT to preserve bigint precision).
+  `ALTER TABLE assets ADD COLUMN tolerance TEXT;`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */

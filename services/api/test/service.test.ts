@@ -411,6 +411,43 @@ describe("Concord", () => {
     expect(run.warnings).toHaveLength(1);
   });
 
+  it("treats a difference at or below tolerance as matched, records tolerance on the run, and clears it when set to null", async () => {
+    // h1 holds 90 on-chain after the clawback; register says 91 — 1-unit rounding difference.
+    // With 7 decimals, 1 display unit = 10_000_000 smallest units.
+    const csv = `holder_id,account,units\nA,${h1},91\nB,${h2},55\n`;
+    const reg = concord.importRegister("FUND", { csv, asOf: at(40) });
+
+    // Without tolerance the 1-unit difference on h1 breaks.
+    const noTol = await concord.reconcile("FUND", reg.registerId);
+    expect(noTol.breaks.some((b) => b.address === h1 && b.type === "QUANTITY_MISMATCH")).toBe(true);
+    expect(noTol.tolerance).toBeNull();
+
+    // Set tolerance to 10000000 (= 1 display unit at 7 decimals) — the h1 difference disappears.
+    const updated = concord.updateAsset("FUND", { tolerance: "10000000" });
+    expect(updated.tolerance).toBe("10000000");
+
+    const withTol = await concord.reconcile("FUND", reg.registerId);
+    expect(withTol.breaks.some((b) => b.address === h1 && b.type === "QUANTITY_MISMATCH")).toBe(false);
+    expect(withTol.tolerance).toBe("10000000");
+    expect(withTol.status).toBe("clean");
+
+    // Tolerance is preserved on the stored run so old runs stay explainable.
+    const fetched = concord.run(withTol.id);
+    expect(fetched.tolerance).toBe("10000000");
+
+    // Clear tolerance; the break returns.
+    concord.updateAsset("FUND", { tolerance: null });
+    const cleared = await concord.reconcile("FUND", reg.registerId);
+    expect(cleared.tolerance).toBeNull();
+    expect(cleared.breaks.some((b) => b.address === h1 && b.type === "QUANTITY_MISMATCH")).toBe(true);
+  });
+
+  it("rejects a non-integer or negative tolerance", () => {
+    expect(() => concord.updateAsset("FUND", { tolerance: "1.5" })).toThrow(Invalid);
+    expect(() => concord.updateAsset("FUND", { tolerance: "abc" })).toThrow(Invalid);
+    expect(() => concord.updateAsset("FUND", { tolerance: "-1" })).toThrow(Invalid);
+  });
+
   it("reconciles movements only once a journal exists, skipping ignored-only flows", async () => {
     const csv = `holder_id,account,units\nA,${h1},90\nB,${h2},55\n`;
     concord.importJournal(
@@ -874,6 +911,7 @@ describe("Concord", () => {
         "reconciliations[].summary.registerTotal",
         "reconciliations[].summary.supplyDifference",
         "reconciliations[].summary.unmappedUnits",
+        "reconciliations[].tolerance",
         "reconciliations[].warnings[]",
         "sha256",
         "signoffHistory[]",

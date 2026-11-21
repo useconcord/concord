@@ -43,6 +43,13 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("opens the v3 workspace database and reads the tolerance column", () => {
+    upgraded("org-v3.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v3");
+      expect(db.get<{ tolerance: string }>("SELECT tolerance FROM assets WHERE id = 'usd-mainnet'")?.tolerance).toBe("5");
+    });
+  });
+
   it("backfills sign-off history from the v1 notes when upgrading", () => {
     upgraded("org-v1.db", ORG_MIGRATIONS, (db) => {
       expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM break_note_history")?.n).toBe(0);

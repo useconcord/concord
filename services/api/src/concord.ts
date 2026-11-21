@@ -76,6 +76,8 @@ export interface AssetRecord {
   syncError?: string;
   syncErrorAt?: string;
   ignore: string[];
+  /** Absolute per-address difference (in smallest units) still treated as a match. */
+  tolerance?: string;
   createdAt: string;
 }
 
@@ -151,6 +153,7 @@ interface RunResult {
   chainBehind: boolean;
   warnings: string[];
   status: "clean" | "breaks";
+  tolerance: string | null;
   summary: Record<string, string | number | null>;
   lines: Array<Record<string, unknown>>;
   movement: Record<string, unknown> | null;
@@ -241,6 +244,7 @@ function toAsset(row: Row): AssetRecord {
   if (row.synced_at) asset.syncedAt = String(row.synced_at);
   if (row.sync_error) asset.syncError = String(row.sync_error);
   if (row.sync_error_at) asset.syncErrorAt = String(row.sync_error_at);
+  if (row.tolerance) asset.tolerance = String(row.tolerance);
   return asset;
 }
 
@@ -478,13 +482,25 @@ export class Concord {
     return this.asset(asset.id);
   }
 
-  updateAsset(ref: string, patch: { name?: string; ignore?: string[] }): AssetRecord {
+  updateAsset(ref: string, patch: { name?: string; ignore?: string[]; tolerance?: string | null }): AssetRecord {
     const asset = this.asset(ref);
     const name = label(patch.name, "name");
+    let tolerance: string | null = asset.tolerance ?? null;
+    if (patch.tolerance !== undefined) {
+      if (patch.tolerance === null || patch.tolerance === "") {
+        tolerance = null;
+      } else {
+        if (!/^\d+$/.test(patch.tolerance) || BigInt(patch.tolerance) < 0n) {
+          throw new Invalid("tolerance must be a non-negative integer (smallest units)");
+        }
+        tolerance = patch.tolerance;
+      }
+    }
     this.db.write(
-      "UPDATE assets SET name = ?, ignore_addresses = ? WHERE id = ?",
+      "UPDATE assets SET name = ?, ignore_addresses = ?, tolerance = ? WHERE id = ?",
       name ?? asset.name,
       JSON.stringify(patch.ignore === undefined ? asset.ignore : addresses(patch.ignore, "ignore")),
+      tolerance,
       asset.id,
     );
     return this.asset(asset.id);
@@ -986,7 +1002,10 @@ export class Concord {
     }
     const events = this.loadEvents(asset.id);
     const state = this.state(asset, asOf, events);
-    const positions = reconcilePositions(state, this.registerPositions(Number(reg.id)), { ignore: asset.ignore });
+    const positions = reconcilePositions(state, this.registerPositions(Number(reg.id)), {
+      ignore: asset.ignore,
+      ...(asset.tolerance ? { tolerance: BigInt(asset.tolerance) } : {}),
+    });
 
     const breaks: StoredBreak[] = positions.breaks.map((b) => ({
       scope: "position",
@@ -1065,6 +1084,7 @@ export class Concord {
       chainBehind,
       warnings,
       status: breaks.length === 0 ? "clean" : "breaks",
+      tolerance: asset.tolerance ?? null,
       summary: {
         chainSupply: fmt(s.chainSupply),
         registerTotal: fmt(s.registerTotal),
