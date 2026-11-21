@@ -169,6 +169,72 @@ interface ActionResult {
 
 const now = () => new Date().toISOString();
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+/**
+ * Serializes a value into RFC 8785 canonical JSON.
+ * - Object keys sorted lexicographically by UTF-16 code units
+ * - Primitives formatted according to ECMAScript standard JSON rules (-0 formatted as "0")
+ * - Whitespace stripped
+ * - undefined, functions, and symbols in objects omitted; in arrays rendered as null
+ */
+export function canonicalJson(value: unknown): string {
+  if (value && typeof (value as { toJSON?: unknown }).toJSON === "function") {
+    value = (value as { toJSON: () => unknown }).toJSON();
+  }
+  if (value === null || typeof value !== "object") {
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return "null";
+      if (Object.is(value, -0)) return "0";
+      return JSON.stringify(value);
+    }
+    if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
+      return undefined as unknown as string;
+    }
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    const items = value.map((v) => {
+      const s = canonicalJson(v);
+      return s === undefined ? "null" : s;
+    });
+    return `[${items.join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const entries: string[] = [];
+  for (const k of keys) {
+    const val = obj[k];
+    if (val === undefined || typeof val === "function" || typeof val === "symbol") continue;
+    const json = canonicalJson(val);
+    if (json !== undefined) {
+      entries.push(`${JSON.stringify(k)}:${json}`);
+    }
+  }
+  return `{${entries.join(",")}}`;
+}
+
+/**
+ * Computes the SHA-256 digest of an audit pack over RFC 8785 canonical JSON,
+ * excluding volatile/digest fields sha256 and generatedAt.
+ */
+export function auditPackDigest(pack: Record<string, unknown>): string {
+  const { sha256: _sha256, generatedAt: _generatedAt, ...content } = pack;
+  return sha256(canonicalJson(content));
+}
+
+/**
+ * Verifies that an audit pack's sha256 matches the recomputed RFC 8785 digest.
+ */
+export function verifyPack(packOrRaw: string | Record<string, unknown>): { ok: boolean; expected: string; actual: string } {
+  const pack = (typeof packOrRaw === "string" ? JSON.parse(packOrRaw) : packOrRaw) as Record<string, unknown>;
+  const expected = typeof pack.sha256 === "string" ? pack.sha256 : "";
+  const actual = auditPackDigest(pack);
+  return {
+    ok: Boolean(expected) && actual === expected,
+    expected,
+    actual,
+  };
+}
 const MAX_REGISTER_CLOCK_SKEW_MS = 5 * 60_000;
 
 function isoTime(input: string, field: string): string {
@@ -1726,7 +1792,13 @@ export class Concord {
         .filter((e) => inPeriod(e.closedAt))
         .map((e) => this.eventJson(e, asset.decimals)),
     };
-    return { generatedAt: now(), generator: "concord/0.1.0", sha256: sha256(JSON.stringify(content)), ...content };
+    const pack = { generator: "concord/0.1.0", ...content };
+    return { generatedAt: now(), generator: pack.generator, sha256: auditPackDigest(pack), ...content };
+  }
+
+  /** Verifies an audit pack against its RFC 8785 canonical sha256 digest. */
+  verifyPack(packOrRaw: string | Record<string, unknown>) {
+    return verifyPack(packOrRaw);
   }
 
   /** One section of the audit pack as CSV. */

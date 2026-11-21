@@ -25,6 +25,7 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   actions ASSET                    corporate actions and their state
   controls ASSET                   freeze, authorisation and clawback log
   export ASSET [--from ISO] [--to ISO] [--csv SECTION] [--out FILE]
+  verify-pack FILE                 verify an audit pack against its sha256 digest
 
 Operator commands.
 

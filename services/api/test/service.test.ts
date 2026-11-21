@@ -5,7 +5,7 @@ import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
-import { Concord, Invalid, NotFound } from "../src/concord.js";
+import { Concord, Invalid, NotFound, auditPackDigest, canonicalJson, verifyPack } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
@@ -634,6 +634,51 @@ describe("Concord", () => {
     expect(concord.auditExport("FUND").sha256).toBe(pack.sha256);
     expect(concord.exportCsv("FUND", "controls").split("\n")[0]).toContain("instructionRef");
     expect(concord.exportCsv("FUND", "breaks")).toContain("UNINSTRUCTED_CONTROL");
+
+    // RFC 8785 Canonical JSON and verify-pack verification
+    const verification = concord.verifyPack(pack);
+    expect(verification).toEqual({ ok: true, expected: pack.sha256, actual: pack.sha256 });
+    expect(verifyPack(JSON.stringify(pack)).ok).toBe(true);
+
+    // Reordering keys in the file does not change the digest
+    const reordered: Record<string, unknown> = {};
+    for (const key of Object.keys(pack).reverse()) {
+      reordered[key] = pack[key as keyof typeof pack];
+    }
+    // Deeply reorder nested object keys as well
+    reordered.asset = {
+      decimals: pack.asset.decimals,
+      code: pack.asset.code,
+      id: pack.asset.id,
+      network: pack.asset.network,
+      name: pack.asset.name,
+      ignoredAddresses: pack.asset.ignoredAddresses,
+      issuer: pack.asset.issuer,
+      historyFrom: pack.asset.historyFrom,
+      baselineLedger: pack.asset.baselineLedger,
+      indexedFromLedger: pack.asset.indexedFromLedger,
+      indexedTo: pack.asset.indexedTo,
+      indexedToLedger: pack.asset.indexedToLedger,
+    };
+    expect(auditPackDigest(reordered)).toBe(pack.sha256);
+    expect(verifyPack(reordered).ok).toBe(true);
+
+    // Editing any value makes verification fail
+    const tamperedAsset = JSON.parse(JSON.stringify(pack));
+    tamperedAsset.asset.code = "CORRUPTED";
+    expect(verifyPack(tamperedAsset).ok).toBe(false);
+
+    const tamperedHoldings = JSON.parse(JSON.stringify(pack));
+    tamperedHoldings.holdings.supply = "999999";
+    expect(verifyPack(tamperedHoldings).ok).toBe(false);
+
+    const tamperedGenerator = JSON.parse(JSON.stringify(pack));
+    tamperedGenerator.generator = "fake/0.0.1";
+    expect(verifyPack(tamperedGenerator).ok).toBe(false);
+
+    const tamperedDigest = JSON.parse(JSON.stringify(pack));
+    tamperedDigest.sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    expect(verifyPack(tamperedDigest).ok).toBe(false);
   });
 
   it("keeps the audit pack inside the published schema", async () => {
@@ -1239,5 +1284,25 @@ describe("README CLI examples", () => {
         expect(usageFlags.has(flag), `README example passes "${flag}", but the CLI usage text does not name it`).toBe(true);
       }
     }
+  });
+});
+
+describe("RFC 8785 canonicalJson", () => {
+  it("serializes numbers according to ECMAScript and formats -0 as 0", () => {
+    expect(canonicalJson(0)).toBe("0");
+    expect(canonicalJson(-0)).toBe("0");
+    expect(canonicalJson(123.456)).toBe("123.456");
+    expect(canonicalJson(1e21)).toBe("1e+21");
+    expect(canonicalJson(-123)).toBe("-123");
+  });
+
+  it("sorts object keys lexicographically by UTF-16 code units", () => {
+    expect(canonicalJson({ b: 2, a: 1, c: 3 })).toBe('{"a":1,"b":2,"c":3}');
+    expect(canonicalJson({ "\u00e9": 1, e: 2 })).toBe('{"e":2,"\u00e9":1}');
+  });
+
+  it("omits undefined, functions, and symbols from objects, and converts them to null in arrays", () => {
+    expect(canonicalJson({ a: undefined, b: () => {}, c: Symbol("test"), d: 1 })).toBe('{"d":1}');
+    expect(canonicalJson([undefined, () => {}, Symbol("test"), 1])).toBe("[null,null,null,1]");
   });
 });

@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { backup } from "node:sqlite";
 import { parseArgs } from "node:util";
-import type { ActionInput, Actor, Concord, WatchInput } from "./concord.js";
+import { verifyPack, type ActionInput, type Actor, type Concord, type WatchInput } from "./concord.js";
 import { isNetworkName, loadConfig } from "./config.js";
 import { openRuntime, startServer } from "./main.js";
 import { USAGE } from "./cli-usage.js";
@@ -248,6 +248,23 @@ async function main(): Promise<void> {
         console.log(`wrote ${values.out}`);
       } else {
         process.stdout.write(text);
+      }
+      break;
+    }
+    case "verify-pack": {
+      const file = need(a, "FILE");
+      const target = existsSync(file) ? file : resolve(process.env.INIT_CWD ?? process.cwd(), file);
+      const text = readFileSync(target, "utf8");
+      const pack = JSON.parse(text) as Record<string, unknown>;
+      const result = verifyPack(pack);
+      if (values.json) {
+        out(result);
+        if (!result.ok) process.exitCode = 1;
+      } else if (result.ok) {
+        console.log("OK");
+      } else {
+        process.exitCode = 1;
+        console.error(`mismatch: expected ${result.expected}, got ${result.actual}`);
       }
       break;
     }
