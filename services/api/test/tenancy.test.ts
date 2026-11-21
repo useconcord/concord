@@ -899,22 +899,41 @@ describe("chain endpoints", () => {
     await expect(source.describe({ id: contractId })).rejects.toThrow("Stellar RPC getLedgerEntries returned no result");
   });
 
-  it("does not rest an endpoint on request faults (400, 404, 422)", async () => {
+  it.each([
+    [400, "surfaces to caller", "surface"],
+    [404, "surfaces to caller", "surface"],
+    [422, "surfaces to caller", "surface"],
+    [401, "rests endpoint and fails over", "failover"],
+    [403, "rests endpoint and fails over", "failover"],
+    [429, "rests endpoint and fails over", "failover"],
+  ] as const)("classifies HTTP %i (%s)", async (status, _label, mode) => {
     const a = "https://a.example";
-    const { calls, deps } = scripted({
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
       [a]: [
-        () => new Response("bad request", { status: 400 }),
+        () => new Response("status response", { status, headers: status === 429 ? { "retry-after": "60" } : {} }),
         health,
       ],
+      [b]: [health, health],
     });
-    const source = new StellarSource(network([a, "https://b.example"]), deps);
-    await expect(source.latestLedger()).rejects.toThrow(/HTTP 400/);
-    expect(calls).toHaveLength(1);
-    // Endpoint `a` was not rested: the subsequent call hits `a` immediately rather than falling back or waiting.
-    const head = await source.latestLedger();
-    expect(head.latest).toBe(50);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]!.url).toBe(a);
+    const source = new StellarSource(network([a, b]), deps);
+    if (mode === "surface") {
+      await expect(source.latestLedger()).rejects.toThrow(`HTTP ${status}`);
+      expect(calls.map((c) => c.url)).toEqual([a]);
+      // Request fault leaves endpoint awake: next call hits a again
+      const head = await source.latestLedger();
+      expect(head.latest).toBe(50);
+      expect(calls.map((c) => c.url)).toEqual([a, a]);
+    } else {
+      // Endpoint fault rests a and fails over to b immediately
+      const head = await source.latestLedger();
+      expect(head.latest).toBe(50);
+      expect(calls.map((c) => c.url)).toEqual([a, b]);
+      // Once getHealth cache expires, subsequent call continues using b
+      clock.value += 2_001;
+      await source.latestLedger();
+      expect(calls.map((c) => c.url)).toEqual([a, b, b]);
+    }
   });
 
   it("rests an endpoint on 401/403 with a distinct message", async () => {
