@@ -123,9 +123,11 @@ pnpm --silent concord org-delete "Example Customer Ltd"
 pnpm --silent concord org-delete 0123456789abcdef
 ```
 
-The argument is an id or an exact name; a name that matches two workspaces is refused. It asks
-for no confirmation and prints `deleted NAME (ID)` when done. **It cannot be undone.** Take a
-backup first:
+The argument is an id or an exact name; a name that matches two workspaces is refused. It prints
+the assets, events, registers, runs and sign-offs it would remove and deletes nothing until
+`--yes` is given (or the prompt is answered `yes` on a terminal); without it the command exits
+`1` unchanged, and `--dry-run` prints only the counts. When done it prints `deleted NAME (ID)`.
+**It cannot be undone.** Take a backup first:
 
 ```sh
 pnpm --silent concord backup /srv/backups/before-delete-$(date -u +%F)

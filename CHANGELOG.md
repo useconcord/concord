@@ -34,6 +34,12 @@ A `docs`-only or internal refactoring commit does not need an entry. When in dou
 
 Everything to date; Concord's history begins 2026-10 with the commits below.
 
+### Added
+
+- `concord reconcile-all` reconciles every asset that has a register in one command, continuing
+  past an asset that fails and summarising each result; `--fail-on-breaks` sets the exit code
+  from the summary (#560).
+
 ### Fixed
 
 - Register imports reject as-of times more than five minutes in the future (#100).

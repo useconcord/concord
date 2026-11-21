@@ -51,6 +51,7 @@ error. Positional arguments and options may appear in any order.
 | `--decimals <0-18>` | `watch` | Decimals of a contract token that does not state them. Classic assets always have 7. |
 | `--as-of <ISO>` | `holdings`, `register` | Point in time. Required by `register`. |
 | `--register <id>` | `reconcile` | Reconcile this register import instead of the latest. |
+| `--fail-on-breaks` | `reconcile-all` | Exit `1` when any asset has open breaks. |
 | `--record <ISO>` | `action` | Record time: holdings at this instant are the entitlement basis. Required. |
 | `--rate <decimal>` | `action ... dividend` | Pay-asset units per whole unit held. Required for a dividend. |
 | `--pay-asset <asset>` | `action ... dividend` | Watched asset the dividend is paid in, on the same network. Defaults to the asset itself. |
@@ -78,7 +79,7 @@ A workspace is named by `--org` (its id, or its exact name) or `CONCORD_ORG`. A 
 two workspaces is refused: use the id (`Auth.findOrg`, `services/api/src/auth.ts`).
 
 - **Need a workspace:** `watch`, `unwatch`, `rebuild`, `assets`, `holdings`, `register`,
-  `journal`, `instructions`, `reconcile`, `action`, `actions`, `controls`, `export`.
+  `journal`, `instructions`, `reconcile`, `reconcile-all`, `action`, `actions`, `controls`, `export`.
 - **`sync`:** with an `ASSET`, needs a workspace. With no `ASSET` it syncs every asset in the
   named workspace, or every workspace when none is named (and then also advances any corporate
   action whose record time the indexed chain has passed).
@@ -116,7 +117,11 @@ On success it prints
 ### `unwatch ASSET`
 
 Stops watching and **deletes the asset and its books** (registers, journal, instructions,
-reconciliation runs, corporate actions, sign-offs). There is no confirmation prompt.
+reconciliation runs, corporate actions, sign-offs). It first prints how many assets, events,
+registers, runs and sign-offs would go (`Concord.deletionCounts`), and deletes nothing until
+`--yes` is given, or the prompt is answered `yes` on a terminal. Without `--yes` on a
+non-interactive stdin it exits `1` and changes nothing. `--dry-run` prints only the counts and
+exits `0`.
 
 ### `rebuild ASSET`
 
@@ -188,6 +193,19 @@ object: `status` is `clean` or `breaks`, with `summary`, `lines`, `movement` and
 
 A reconciliation that finds breaks still exits `0`. See [Exit codes](#exit-codes).
 
+### `reconcile-all [--network mainnet|testnet] [--fail-on-breaks]`
+
+Runs `reconcile` for every watched asset that has a register imported, one after another, and
+collects the results. An asset whose reconciliation throws is recorded and the rest still run;
+an asset with no register is skipped. `--network` limits the run to one network.
+
+Human output is a table of asset, status, open breaks and error, then one line counting the
+assets, the reconciliations with open breaks and the failures. With `--json`, the array of
+`{asset, status, openBreaks, error}` rows (`null` where a field does not apply).
+
+It exits `1` if any asset failed, or when `--fail-on-breaks` is given and any reconciliation has
+open breaks; otherwise `0`, so a daily run can treat breaks as a finding rather than a crash.
+
 ### `action ASSET <dividend|split|redemption> --record ISO ...`
 
 Records a corporate action and reconciles it.
@@ -250,7 +268,9 @@ one day and works once. It fails with `no account for EMAIL` if there is no such
 
 Deletes a workspace, named by id or exact name: its row in `control.db` (and with it its
 memberships and invitations), its database file under `orgs/`, and any account left with no
-workspace. There is no confirmation prompt.
+workspace. It first prints the assets, events, registers, runs and sign-offs it would remove,
+and deletes nothing until `--yes` is given, or the prompt is answered `yes` on a terminal;
+otherwise it exits `1` unchanged. `--dry-run` prints only the counts and exits `0`.
 
 ### `backup DIR`
 
@@ -268,19 +288,24 @@ Runs the API and dashboard, the same as `pnpm start` does for the built output.
 | Command | `--json` |
 |---|---|
 | `holdings`, `reconcile`, `action`, `controls` | Whole result as JSON instead of tables. |
+| `reconcile-all` | The summary array instead of the table and count line. |
 | `register` | The reconciliation becomes JSON, but the import summary lines come first as text. |
 | `sync`, `journal`, `instructions` | Always JSON; the flag changes nothing. |
 | `export` | Always JSON unless `--csv`; the flag changes nothing. |
 | `orgs`, `assets`, `actions` | Always a table. |
-| `watch`, `unwatch`, `rebuild`, `signup-code`, `reset-link`, `org-delete`, `backup` | Always text. |
+| `unwatch`, `org-delete` | The deletion counts as JSON, before the confirmation decision. |
+| `watch`, `rebuild`, `signup-code`, `reset-link`, `backup` | Always text. |
 
 ## Exit codes
 
 There are two. `0` is success; `1` is any error, with the message on standard error. Errors
 include a missing argument or option, an unknown command (the usage text follows the message), a
-workspace or asset that does not exist, a CSV that cannot be read at all, and a Stellar RPC
+workspace or asset that does not exist, a CSV that cannot be read at all, a destructive command
+(`unwatch`, `org-delete`) run without `--yes` on a non-interactive stdin, and a Stellar RPC
 failure that stops the command. A command that finds reconciliation breaks still exits `0`, so a
 script that cares has to read the result (`status` in the `--json` output of `reconcile`).
+`reconcile-all` also exits `1` when any asset failed, or with `--fail-on-breaks` when any asset
+has open breaks.
 
 ## Daily reconciliation from cron
 

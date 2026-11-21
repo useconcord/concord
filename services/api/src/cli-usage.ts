@@ -10,7 +10,8 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   watch <CODE:ISSUER | CONTRACT>   start indexing an asset
         [--network mainnet|testnet] [--name N] [--ignore A,B]
         [--from LEDGER] [--no-baseline] [--decimals D]
-  unwatch ASSET                    stop watching; deletes the asset and its books
+  unwatch ASSET [--yes] [--dry-run]
+                                   stop watching; deletes the asset and its books
   rebuild ASSET                    re-index from fresh opening balances; books stay
   assets                           list watched assets
   sync [ASSET]                     pull new events (every workspace when no --org)
@@ -19,6 +20,8 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   journal ASSET FILE               import the register's transaction journal
   instructions ASSET FILE          import control instructions
   reconcile ASSET [--register ID]  re-run a reconciliation
+  reconcile-all [--network N] [--fail-on-breaks]
+                                   reconcile every asset that has a register, one by one
   action ASSET dividend --record ISO --rate R [--pay-asset A] [--payer G...] [--until ISO]
   action ASSET split|redemption --record ISO --ratio NUM:DEN [--until ISO]
         [--label TEXT] [--exclude A,B]
@@ -32,9 +35,13 @@ Operator commands.
   purge-expired                    remove expired identity records
   signup-code [--note TEXT]        a code that lets one new workspace be created (CONCORD_SIGNUP=code)
   reset-link EMAIL                 a one-day link for setting a new password
-  org-delete ORG                   delete a workspace and everything in it
+  org-delete ORG [--yes] [--dry-run]
+                                   delete a workspace and everything in it
   backup DIR                       copy every database to DIR while the server runs
   serve                            run the API and dashboard
 
 ASSET is a code or a contract id. Add --json to most commands for machine-readable output,
-or --help (-h) to see this text. Settings come from the environment; see .env.example.`;
+or --help (-h) to see this text. Settings come from the environment; see .env.example.
+
+unwatch and org-delete print what they would remove and delete nothing until --yes is given
+(or the prompt is answered on a terminal); --dry-run prints the counts and stops.`;
