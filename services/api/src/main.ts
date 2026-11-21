@@ -216,12 +216,13 @@ export function startServer(config: Config = loadConfig()): void {
   process.on("SIGINT", () => stop("SIGINT"));
 }
 
-function isEntry(): boolean {
+export function isEntry(argv1: string | undefined, metaUrl: string): boolean {
+  if (!argv1) return false;
   try {
-    return import.meta.url === pathToFileURL(realpathSync(process.argv[1] ?? "")).href;
+    return metaUrl === pathToFileURL(realpathSync(argv1)).href;
   } catch {
     return false;
   }
 }
 
-if (isEntry()) startServer();
+if (isEntry(process.argv[1], import.meta.url)) startServer();
