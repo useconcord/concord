@@ -1055,6 +1055,41 @@ describe("chain endpoints", () => {
     expect(err.message).toContain("h1.example: unexpected response");
     expect(err.message).toContain("h2.example: unexpected response");
   });
+
+  it("retries a timed-out request once on the same endpoint with backoff, then fails over to the next endpoint", async () => {
+    const a = "https://a.example/secret-key";
+    const b = "https://b.example";
+    const timeout = () => {
+      throw new DOMException("t", "TimeoutError");
+    };
+    const { calls, clock, deps } = scripted({
+      [a]: [timeout, timeout],
+      [b]: [health],
+    });
+    const sleeps: number[] = [];
+    const trackedDeps = {
+      ...deps,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        await deps.sleep(ms);
+      },
+    };
+    const before = clock.value;
+    const source = new StellarSource(network([a, b]), trackedDeps);
+    expect(await source.latestLedger()).toMatchObject({ latest: 50, oldest: 10 });
+    expect(calls.map((c) => c.url)).toEqual([a, a, b]);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]!).toBeGreaterThanOrEqual(250);
+    expect(sleeps[0]!).toBeLessThanOrEqual(500);
+    expect(clock.value - before).toBeCloseTo(sleeps[0]!, 6);
+
+    const single = scripted({ [a]: [timeout, timeout] });
+    const allFail = new StellarSource(network([a]), single.deps);
+    const err = await allFail.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe("Stellar RPC (mainnet) is unavailable (a.example: timed out)");
+    expect((err as Error).message).not.toContain("secret-key");
+  });
 });
 
 describe("what ships", () => {
