@@ -22,7 +22,7 @@ sleeps (after about fifteen idle minutes), and it can take a minute to wake. Do 
 in it. [`docs/deploy/render.md`](./docs/deploy/render.md) covers rebuilding the practice workspace.
 
 What it does, what it flags, why now and who it is for: [`docs/overview.md`](./docs/overview.md).
-What it deliberately does not do: [`docs/limits.md`](./docs/limits.md).
+What it deliberately does not do: [`docs/limits.md`](./docs/limits.md); measured scale limits up to 1M events: [`docs/capacity.md`](./docs/capacity.md).
 
 ## Run it
 
@@ -125,6 +125,7 @@ Architecture decisions: [`docs/adr/`](./docs/adr/README.md).
 - [`docs/overview.md`](./docs/overview.md): what it does, what it flags, why now, who buys it.
 - [`docs/limits.md`](./docs/limits.md): the deliberate limits; [`docs/ROADMAP.md`](./docs/ROADMAP.md)
   says which are next to fall.
+- **Scale**: [`docs/capacity.md`](./docs/capacity.md) documents measured limits up to 1,000,000 events (~1.2s replay time, ~640 MB RSS, ~322 MB SQLite footprint per million events), with reproducible benchmark script.
 - [`docs/prior-art.md`](./docs/prior-art.md): the prior-art check against the brief's first kill
   criterion (someone already ships this for Stellar): dated sources, kill criteria, re-check schedule.
 - [`docs/demo-testnet.md`](./docs/demo-testnet.md): `pnpm demo:testnet` issues a practice asset on
