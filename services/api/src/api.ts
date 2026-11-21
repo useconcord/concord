@@ -340,7 +340,16 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     const name = `concord-${fileSafe(asset.code)}`;
     const stamp = new Date().toISOString().slice(0, 10);
     if (section) {
-      const csv = ws.exportCsv(asset.id, section, period(c));
+      const actionIdParam = c.req.query("id");
+      const opts: { from?: string; to?: string; id?: number } = period(c);
+      if (actionIdParam !== undefined) {
+        const parsedId = Number(actionIdParam);
+        if (!Number.isSafeInteger(parsedId) || parsedId < 1) {
+          throw new Invalid("id must be a positive integer");
+        }
+        opts.id = parsedId;
+      }
+      const csv = ws.exportCsv(asset.id, section, opts);
       c.header("content-type", "text/csv; charset=utf-8");
       c.header("content-disposition", `attachment; filename="${name}-${fileSafe(section)}-${stamp}.csv"`);
       return c.body(csv);
