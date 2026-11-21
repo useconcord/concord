@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { nativeToScVal } from "@stellar/stellar-sdk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
@@ -404,6 +404,112 @@ describe("Concord", () => {
     expect(run5.breaks.find((b) => b.address === h1)).toMatchObject({ status: "open", noteStale: true });
   });
 
+  it("lists reconciliations from stored columns without parsing their result bodies", async () => {
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    const run = await concord.reconcile("FUND", reg.registerId);
+
+    const parse = vi.spyOn(JSON, "parse");
+    const listed = concord.runs("FUND");
+    const bodies = parse.mock.calls.map(([text]) => String(text)).filter((text) => text.includes('"registerSha256"'));
+    parse.mockRestore();
+
+    // The list's shape is exactly what run() reports, but no run body went through JSON.parse.
+    expect(bodies).toEqual([]);
+    expect(listed).toEqual([
+      {
+        id: run.id,
+        asOf: run.asOf,
+        createdAt: run.createdAt,
+        status: run.status,
+        chainBehind: run.chainBehind,
+        summary: run.summary,
+        openBreaks: run.openBreaks,
+      },
+    ]);
+
+    // The open count is a stored column, so a sign-off has to move it rather than leave it stale.
+    const brk = run.breaks[0]!;
+    expect(run.openBreaks).toBeGreaterThan(0);
+    concord.setNote(
+      "FUND",
+      "recon",
+      brk.key,
+      { fingerprint: brk.fingerprint, status: "acknowledged", note: "T+1 timing" },
+      { id: "u1", label: "ops" },
+    );
+    expect(concord.runs("FUND")[0]!.openBreaks).toBe(run.openBreaks - 1);
+    // Reopening puts it back.
+    concord.setNote("FUND", "recon", brk.key, { fingerprint: brk.fingerprint, status: "open", note: "wrong" });
+    expect(concord.runs("FUND")[0]!.openBreaks).toBe(run.openBreaks);
+  });
+
+  it("lists 200 runs of a thousand-holder register without reading the bodies", () => {
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    const summary = { chainSupply: "150", registerTotal: "150", breakCount: 0, lines: 1000 };
+    const body = JSON.stringify({
+      registerId: reg.registerId,
+      registerSha256: "sha",
+      asOf: at(40),
+      chainLedger: 100,
+      chainSyncedAt: at(100),
+      chainBehind: false,
+      warnings: [],
+      status: "clean",
+      summary,
+      lines: Array.from({ length: 1000 }, (_, i) => ({
+        address: `G${String(i).padStart(55, "0")}`,
+        holderIds: [`h${i}`],
+        chainUnits: "100",
+        registerUnits: "100",
+        difference: "0",
+        chainStatus: "active",
+        registerStatus: "active",
+        matched: true,
+      })),
+      movement: null,
+      breaks: [],
+    });
+    concord.db.tx(() => {
+      for (let i = 0; i < 200; i++) {
+        concord.db.insert(
+          `INSERT INTO runs (asset_id, register_id, as_of, created_at, summary, status, chain_behind, open_breaks, result)
+           VALUES (?, ?, ?, ?, ?, 'clean', 0, 0, ?)`,
+          assetId,
+          reg.registerId,
+          at(40),
+          at(40 + i),
+          JSON.stringify(summary),
+          body,
+        );
+      }
+    });
+
+    const started = performance.now();
+    const listed = concord.runs("FUND");
+    const listedMs = performance.now() - started;
+
+    // What the list used to do: parse and annotate every body.
+    const legacyStarted = performance.now();
+    const expected = concord.db
+      .all<{ id: number }>("SELECT id FROM runs WHERE asset_id = ? ORDER BY id DESC LIMIT 200", assetId)
+      .map(({ id }) => concord.run(id))
+      .map((r) => ({
+        id: r.id,
+        asOf: r.asOf,
+        createdAt: r.createdAt,
+        status: r.status,
+        chainBehind: r.chainBehind,
+        summary: r.summary,
+        openBreaks: r.openBreaks,
+      }));
+    const legacyMs = performance.now() - legacyStarted;
+
+    expect(listed).toEqual(expected);
+    expect(listed).toHaveLength(200);
+    // Each body is ~250 KB, so the old path parsed tens of MB per request; the columns parse none.
+    expect(listedMs).toBeLessThan(legacyMs / 5);
+  });
+
   it("warns when the register is ahead of the indexed chain", async () => {
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(500) });
     const run = await concord.reconcile("FUND", reg.registerId);
@@ -636,6 +742,70 @@ describe("Concord", () => {
     expect(concord.exportCsv("FUND", "breaks")).toContain("UNINSTRUCTED_CONTROL");
   });
 
+  it("reports coverage on every reconciliation and action result", async () => {
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\n`,
+    );
+    const reg = concord.importRegister("FUND", {
+      csv: `holder_id,account,units,status\nA,${h1},90,active\nB,${h2},50,active\n`,
+      asOf: at(5),
+    });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    const syncedAt = concord.asset("FUND").syncedAt!;
+    // A start ledger the caller named: history is trusted from the first indexed event.
+    expect(run.coverage).toEqual({ from: at(2), to: syncedAt, mode: "ledger", complete: true });
+    expect(concord.run(run.id).coverage).toEqual(run.coverage);
+
+    // A register ahead of the chain: complete is false.
+    const aheadReg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(500) });
+    const aheadRun = await concord.reconcile("FUND", aheadReg.registerId);
+    expect(aheadRun.coverage).toEqual({ from: at(2), to: syncedAt, mode: "ledger", complete: false });
+    expect(aheadRun.warnings).toContainEqual(expect.stringContaining("Chain is indexed to"));
+
+    // A register before history start: complete is false.
+    const earlyReg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(1) });
+    expect((await concord.reconcile("FUND", earlyReg.registerId)).coverage.complete).toBe(false);
+
+    // An action inside the indexed range is complete.
+    const split = await concord.createAction("FUND", { type: "split", recordTime: at(35), num: "2", den: "1" });
+    expect(split.result!.coverage).toEqual({ from: at(2), to: syncedAt, mode: "ledger", complete: true });
+
+    // An action whose record time is before history start is not.
+    const early = await concord.createAction("FUND", { type: "split", recordTime: at(1), num: "2", den: "1" });
+    expect(early.result!.coverage).toEqual({ from: at(2), to: syncedAt, mode: "ledger", complete: false });
+
+    // Both travel in the audit pack.
+    const pack = concord.auditExport("FUND");
+    expect(pack.reconciliations.every((r) => typeof r.coverage.complete === "boolean")).toBe(true);
+    expect(pack.corporateActions.find((a) => a.id === split.id)!.result!.coverage.complete).toBe(true);
+  });
+
+  it("reports baseline coverage from the first event after the opening balances", async () => {
+    const other = key();
+    chain.latest = 200;
+    chain.baselineResult = {
+      ledger: 150,
+      openings: new Map([[h1, { amount: u(70), authorized: true, asOfLedger: 150 }]]),
+    };
+    const asset = await concord.watchAsset({ network: "testnet", asset: `BASE:${other}` });
+    chain.push(asset.id, "transfer", 151, { from: h1, to: h2, amount: u(5) });
+    await concord.sync("BASE");
+    const syncedAt = concord.asset("BASE").syncedAt!;
+
+    const reg = concord.importRegister("BASE", { csv: `holder_id,account,units\nA,${h1},65\nB,${h2},5\n`, asOf: at(160) });
+    expect((await concord.reconcile("BASE", reg.registerId)).coverage).toEqual({
+      from: at(151),
+      to: syncedAt,
+      mode: "baseline",
+      complete: true,
+    });
+    const earlyReg = concord.importRegister("BASE", { csv: `holder_id,account,units\nA,${h1},70\n`, asOf: at(100) });
+    expect((await concord.reconcile("BASE", earlyReg.registerId)).coverage.complete).toBe(false);
+    const action = await concord.createAction("BASE", { type: "split", recordTime: at(100), num: "2", den: "1" });
+    expect(action.result!.coverage).toMatchObject({ mode: "baseline", complete: false });
+  });
+
   it("keeps the audit pack inside the published schema", async () => {
     await concord.sync("FUND");
     concord.importJournal(
@@ -762,6 +932,10 @@ describe("Concord", () => {
         "corporateActions[].result.breaks[].severity",
         "corporateActions[].result.breaks[].status",
         "corporateActions[].result.breaks[].type",
+        "corporateActions[].result.coverage.complete",
+        "corporateActions[].result.coverage.from",
+        "corporateActions[].result.coverage.mode",
+        "corporateActions[].result.coverage.to",
         "corporateActions[].result.flowAsset.code",
         "corporateActions[].result.flowAsset.id",
         "corporateActions[].result.lines[]",
@@ -838,6 +1012,10 @@ describe("Concord", () => {
         "reconciliations[].chainBehind",
         "reconciliations[].chainLedger",
         "reconciliations[].chainSyncedAt",
+        "reconciliations[].coverage.complete",
+        "reconciliations[].coverage.from",
+        "reconciliations[].coverage.mode",
+        "reconciliations[].coverage.to",
         "reconciliations[].createdAt",
         "reconciliations[].id",
         "reconciliations[].lines[]",
@@ -1006,6 +1184,87 @@ describe("Concord", () => {
     expect(await concord.reconcileDue()).toBe(1);
     await concord.syncAll();
     expect(await concord.reconcileDue()).toBe(0);
+  });
+
+  it("voids a wrongly entered action and keeps it in the audit trail", async () => {
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(5),
+      ratePerUnit: "10",
+    });
+    // A typo in the rate shows as real breaks until the action is voided.
+    expect(action.state).toBe("breaks");
+    expect(action.openBreaks).toBeGreaterThan(0);
+    expect(action.voidedAt).toBeNull();
+    expect(concord.assetSummary(concord.asset("FUND")).openBreaks.actions).toBe(action.openBreaks);
+
+    // The reason is mandatory, an unknown id is a 404, and a void cannot be re-entered.
+    await expect(concord.voidAction(action.id, "   ")).rejects.toThrow(/reason is required/);
+    await expect(concord.voidAction(999, "typo in the rate")).rejects.toThrow(/not found/);
+    expect(concord.db.get("SELECT voided_at FROM actions WHERE id = ?", action.id)!.voided_at).toBeNull();
+
+    const voided = await concord.voidAction(action.id, "  typo in the rate ", { id: "u1", label: "ops" });
+    expect(voided).toMatchObject({ state: "voided", openBreaks: 0, voidedBy: "ops", voidReason: "typo in the rate" });
+    expect(voided.voidedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(concord.db.get("SELECT voided_by, void_reason FROM actions WHERE id = ?", action.id)).toMatchObject({
+      voided_by: "ops",
+      void_reason: "typo in the rate",
+    });
+    // Its breaks stay on the record, but the action no longer counts as open anywhere.
+    expect(voided.result!.breaks.length).toBeGreaterThan(0);
+    expect(concord.assetSummary(concord.asset("FUND")).openBreaks.actions).toBe(0);
+    await expect(concord.voidAction(action.id, "again")).rejects.toThrow(/already voided/);
+
+    // Never reconciled again, whether asked directly or by the scheduler after a sync.
+    const before = concord.action(action.id);
+    const rerun = await concord.reconcileAction(action.id);
+    expect(rerun).toMatchObject({ state: "voided", reconciledAt: before.reconciledAt, openBreaks: 0 });
+    chain.latest = 400;
+    chain.push(assetId, "transfer", 300, { from: h1, to: h2, amount: u(1) });
+    await concord.syncAll();
+    expect(await concord.reconcileDue()).toBe(0);
+    expect(concord.action(action.id).reconciledAt).toBe(before.reconciledAt);
+
+    // It still appears in the audit pack, with who voided it and why.
+    const pack = concord.auditExport("FUND");
+    expect(pack.corporateActions.find((a) => a.id === action.id)).toMatchObject({
+      id: action.id,
+      openBreaks: 0,
+      params: { voided: { by: "ops", reason: "typo in the rate" } },
+    });
+    expect(validateAuditPack(pack), JSON.stringify(validateAuditPack.errors, null, 2)).toBe(true);
+
+    // A voided action still reaches the breaks export, but contributes no rows.
+    const breaksCsv = concord.exportCsv("FUND", "breaks");
+    expect(breaksCsv).toContain("UNINSTRUCTED_CONTROL");
+    for (const line of breaksCsv.split("\n")) {
+      if (line.includes(`dividend ${action.id}`)) expect(line).toBe("source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor");
+    }
+
+    // The same void can also be requested over HTTP, by the workspace owner.
+    const h = harness();
+    const client = await new h.Client(h.app).signUp("ops@example.test", "Ops");
+    const created = await client.call("/api/assets/FUND/actions", {
+      body: { type: "split", recordTime: at(10), num: "2", den: "1" },
+    });
+    const actionId = (await created.json()).id;
+    expect((await created.json()).state).toBe("scheduled");
+    await expect(
+      client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "entered in error" } }),
+    ).resolves.toMatchObject({ state: "voided", openBreaks: 0, voidedBy: "Test User <ops@example.test>", voidReason: "entered in error" });
+    expect(await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "again" } })).rejects.toMatchObject({ status: 400 });
+    expect(await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "  " } })).rejects.toMatchObject({ status: 400 });
+    await expect(client.call(`/api/actions/99999/void`, { method: "POST", body: { reason: "x" } })).rejects.toMatchObject({ status: 404 });
+    expect((await client.json<{ state: string; openBreaks: number }>(`/api/actions/${actionId}`)).state).toBe("voided");
+    expect((await client.json<{ openBreaks: { actions: number } }>("/api/overview")).assets[0]!.openBreaks.actions).toBe(0);
+
+    // The same action over CSV: still in the trail, but no open rows.
+    const csv = await client.call(`/api/assets/FUND/export?section=breaks&to=${encodeURIComponent(at(50))}`);
+    expect(csv.headers.get("content-type")).toContain("text/csv");
+    const text = await csv.text();
+    expect(text).toContain("UNINSTRUCTED_CONTROL");
+    const matches = text.split("\n").filter((line: string) => line.includes(`split ${actionId}`));
+    expect(matches).toEqual(["source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor"]);
   });
 
   it("refuses a code shared by two watched assets and a pay asset from another network", async () => {

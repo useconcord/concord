@@ -37,6 +37,8 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 ### Fixed
 
 - Register imports reject as-of times more than five minutes in the future (#100).
+- The CLI closes its databases on every path, including `--json` commands and failed ones, so
+  SQLite checkpoints and no longer leaves `-wal`/`-shm` files beside the data directory (#536).
 
 ### Added
 

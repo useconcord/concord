@@ -155,6 +155,35 @@ CREATE INDEX break_note_history_key ON break_note_history (asset_id, scope, key,
 INSERT INTO break_note_history (asset_id, scope, key, fingerprint, status, note, author, author_id, at)
   SELECT asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at FROM break_notes;
 `,
+  // v3: the runs list reads these columns instead of parsing every stored result body. The body
+  // keeps the lines and breaks; only the open-break count changes after insert (on a sign-off).
+  `
+ALTER TABLE runs ADD COLUMN summary TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'clean';
+ALTER TABLE runs ADD COLUMN chain_behind INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE runs ADD COLUMN open_breaks INTEGER NOT NULL DEFAULT 0;
+UPDATE runs SET
+  summary = COALESCE(json_extract(result, '$.summary'), '{}'),
+  status = COALESCE(json_extract(result, '$.status'), 'clean'),
+  chain_behind = COALESCE(json_extract(result, '$.chainBehind'), 0),
+  open_breaks = (
+    SELECT COUNT(*) FROM json_each(runs.result, '$.breaks') b
+    WHERE NOT EXISTS (
+      SELECT 1 FROM break_notes n
+      WHERE n.asset_id = runs.asset_id AND n.scope = 'recon'
+        AND n.key = json_extract(b.value, '$.key')
+        AND n.fingerprint = json_extract(b.value, '$.fingerprint')
+        AND n.status <> 'open'
+    )
+  );
+`,
+  // v4: an action entered in error is voided rather than deleted, so it keeps its place in the
+  // audit trail. The columns stay NULL until an action is voided.
+  `
+ALTER TABLE actions ADD COLUMN voided_at TEXT;
+ALTER TABLE actions ADD COLUMN voided_by TEXT;
+ALTER TABLE actions ADD COLUMN void_reason TEXT;
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */
