@@ -144,6 +144,44 @@ export function createServerApp(runtime: Runtime, config: Config): Hono {
   return app;
 }
 
+export interface IndexerHandle {
+  stop(): void;
+}
+
+export function startIndexer(
+  tenants: Pick<Tenants, "syncAll">,
+  intervalSec: number,
+): IndexerHandle {
+  let timer: NodeJS.Timeout | undefined;
+  if (intervalSec > 0) {
+    let busy = false;
+    const pass = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        for (const r of await tenants.syncAll()) {
+          const where = r.assetId ? `${r.orgId}/${r.assetId.slice(0, 8)}` : r.orgId;
+          if (r.error) console.error(`sync ${where}: ${r.error}`);
+          else if (r.added) console.log(`sync ${where}: +${r.added} events`);
+        }
+      } catch (err) {
+        // Nothing here may take the process down; the next pass tries again.
+        console.error("sync pass failed", err);
+      } finally {
+        busy = false;
+      }
+    };
+    void pass();
+    timer = setInterval(() => void pass(), intervalSec * 1000);
+    timer.unref();
+  }
+  return {
+    stop() {
+      if (timer) clearInterval(timer);
+    },
+  };
+}
+
 export function startServer(config: Config = loadConfig()): void {
   const runtime = openRuntime(config);
   const secure = config.publicUrl.startsWith("https://");
@@ -171,36 +209,14 @@ export function startServer(config: Config = loadConfig()): void {
   const purgeTimer = setInterval(purge, 60 * 60_000);
   purgeTimer.unref();
 
-  let timer: NodeJS.Timeout | undefined;
-  if (config.syncIntervalSec > 0) {
-    let busy = false;
-    const pass = async () => {
-      if (busy) return;
-      busy = true;
-      try {
-        for (const r of await runtime.tenants.syncAll()) {
-          const where = r.assetId ? `${r.orgId}/${r.assetId.slice(0, 8)}` : r.orgId;
-          if (r.error) console.error(`sync ${where}: ${r.error}`);
-          else if (r.added) console.log(`sync ${where}: +${r.added} events`);
-        }
-      } catch (err) {
-        // Nothing here may take the process down; the next pass tries again.
-        console.error("sync pass failed", err);
-      } finally {
-        busy = false;
-      }
-    };
-    void pass();
-    timer = setInterval(() => void pass(), config.syncIntervalSec * 1000);
-    timer.unref();
-  }
+  const indexer = startIndexer(runtime.tenants, config.syncIntervalSec);
 
   let stopping = false;
   const stop = (signal: string) => {
     if (stopping) return;
     stopping = true;
     console.log(`${signal}: shutting down`);
-    if (timer) clearInterval(timer);
+    indexer.stop();
     clearInterval(purgeTimer);
     server.close(() => {
       runtime.close();
