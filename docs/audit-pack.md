@@ -37,6 +37,7 @@ A pack covers the window `[from, to]`. Both bounds are inclusive.
 
 | Section                                  | Filtered by period?                                 | Field compared   |
 | :--------------------------------------- | :-------------------------------------------------- | :--------------- |
+| `registers`                        | Yes                                                 | `asOf` (and any register referenced by a run) |
 | `reconciliations`                        | Yes                                                 | the run's `asOf` |
 | `corporateActions`                       | Yes                                                 | `recordTime`     |
 | `controls.records`                       | Yes                                                 | `closedAt`       |
@@ -61,6 +62,7 @@ _Source: `services/api/src/concord.ts`, `auditExport` (`inPeriod = (t) => t >= f
 | `asset`            | The watched asset and its indexing state: `id`, `network`, `code`, `issuer`, `name`, `decimals`, `indexedFromLedger`, `baselineLedger`, `historyFrom`, `indexedToLedger`, `indexedTo`, `ignoredAddresses`. Unset values are `null` |
 | `period`           | `{ from, to }` as applied                                                                                                                                                                                                          |
 | `holdings`         | Ledger state as of `to`: `asOf`, `ledger`, `supply`, `holderCount`, `incomplete`, `holders`                                                                                                                                        |
+| `registers`        | Imported register files whose `asOf` is in the period (and any register referenced by a reconciliation run in the period): `id`, `asOf`, `source`, `sha256`, `positions`, `issues`, `importedBy`, `importedAt` |
 | `reconciliations`  | Reconciliation runs whose `asOf` is in the period, oldest first, each with its `breaks`                                                                                                                                            |
 | `corporateActions` | Corporate actions (`dividend`, `split` or `redemption`) whose `recordTime` is in the period, newest first                                                                                                                          |
 | `controls`         | The controls log: `asOf`, `summary`, `records`, `pending`, `breaks`, `openBreaks`. `records` is filtered by period and listed newest first                                                                                         |
@@ -69,7 +71,7 @@ _Source: `services/api/src/concord.ts`, `auditExport` (`inPeriod = (t) => t >= f
 
 ### The `sha256` digest
 
-The digest covers `asset`, `period`, `holdings`, `reconciliations`, `corporateActions`, `controls` and `events`, serialised with `JSON.stringify` in that key order. It does not cover `generatedAt`, `generator` or `sha256` itself. Two packs built from the same data and period have the same digest.
+The digest covers `asset`, `period`, `holdings`, `registers`, `reconciliations`, `corporateActions`, `controls`, `signoffHistory` and `events`, serialised with `JSON.stringify` in that key order. It does not cover `generatedAt`, `generator` or `sha256` itself. Two packs built from the same data and period have the same digest.
 
 _Source: `services/api/src/concord.ts`, `auditExport`, `holdings`, `controls`, `eventJson`._
 

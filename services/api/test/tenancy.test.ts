@@ -1,11 +1,12 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync as readFixture } from "node:fs";
-import { StrKey } from "@stellar/stellar-sdk";
+import { Asset, StrKey } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
 import { StellarSource } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
@@ -18,6 +19,19 @@ import { Client, FakeChain, MAINNET_PASSPHRASE, ORIGIN, PASSPHRASE, at, harness,
 
 /** Strings that exist only in workspace A. None may ever reach workspace B. */
 const MARKERS = ["ALPHA-HOLDER-7", "Northgate Secret Trust", "alpha sign-off note", "J-ALPHA", "I-ALPHA", "Alpha Capital"];
+
+/** SHA-256 of each shipped migration, in order. A changed entry means a shipped migration was edited. */
+const ORG_MIGRATION_DIGESTS = [
+  "1a4f90d62ead1ba8254ab3244d04be0ca9f46646df78cd12f1ece6db41bd2387",
+  "2002f2e1b269939a38de8da3768a85787f98ce207246cf15134423ffdce6db72",
+  "ece8f3334de957d19e76585727af4790c2f6ba78f60407ade9a67e1edb25cd55",
+];
+const CONTROL_MIGRATION_DIGESTS = ["ba25bc5419cfcc376d2e7ff027845b2da4b789d9c7e966424b70cdfbbb90a422"];
+
+/** Hash each migration as LF text so a CRLF checkout does not change the pinned values. */
+function migrationDigests(migrations: readonly string[]): string[] {
+  return migrations.map((sql) => createHash("sha256").update(sql.replace(/\r\n?/g, "\n")).digest("hex"));
+}
 
 interface Seeded {
   h: Harness;
@@ -203,12 +217,65 @@ describe("workspace isolation", () => {
     expect(JSON.stringify(packB)).not.toContain("ALPHA-HOLDER-7");
   });
 
-  it("opens only workspaces it knows, under ids it generated", () => {
-    const h = harness();
-    for (const bad of ["../x", "..%2Fx", "", "ZZZZZZZZZZZZZZZZ", "0123456789abcdef"]) {
-      expect(() => h.tenants.forOrg(bad), bad).toThrow(/no such workspace/);
+  it("opens only workspaces it knows, under ids it generated, returning one shared instance (#499)", () => {
+    const temp = mkdtempSync(join(tmpdir(), "concord-for-org-"));
+    const orgDir = join(temp, "orgs");
+    try {
+      const tenants = new Tenants(fileStore(temp), {}, () => true, () => []);
+      const valid = "0123456789abcdef";
+
+      // Regex-only rejection proven by known being true:
+      // uppercase hex, ../../etc, empty string, 15 and 17 characters all throw
+      const badIds = [
+        "../../etc",
+        "../x",
+        "..%2Fx",
+        "",
+        "0123456789ABCDEF",
+        "0123456789abcde",
+        "0123456789abcdef0",
+        undefined as unknown as string,
+      ];
+      for (const bad of badIds) {
+        expect(() => tenants.forOrg(bad), String(bad)).toThrow(/no such workspace/);
+      }
+
+      // Rejections created no file under tmp/orgs
+      expect(existsSync(orgDir) ? readdirSync(orgDir) : []).toEqual([]);
+
+      // Returns one shared instance per workspace
+      const a = tenants.forOrg(valid);
+      const b = tenants.forOrg(valid);
+      expect(a).toBe(b);
+
+      // When known returns false, even a structurally valid id throws
+      const unknownTenants = new Tenants(fileStore(temp), {}, () => false, () => []);
+      expect(() => unknownTenants.forOrg(valid)).toThrow(/no such workspace/);
+
+      // A store whose open throws propagates and is retried, not cached
+      let attempts = 0;
+      const retryStore = {
+        open: () => {
+          attempts++;
+          if (attempts === 1) throw new Error("transient open failure");
+          return new Db(":memory:", ORG_MIGRATIONS);
+        },
+        remove: () => {},
+      };
+      const retrying = new Tenants(retryStore, {}, () => true, () => []);
+      expect(() => retrying.forOrg(valid)).toThrow("transient open failure");
+      expect(attempts).toBe(1);
+
+      const recovered = retrying.forOrg(valid);
+      expect(recovered).toBeDefined();
+      expect(attempts).toBe(2);
+      expect(retrying.forOrg(valid)).toBe(recovered);
+      expect(attempts).toBe(2);
+      retrying.drop(valid);
+      tenants.drop(valid);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
     }
-    expect(() => h.tenants.forOrg(undefined as unknown as string)).toThrow(/no such workspace/);
   });
 
   it("refuses a database that belongs to another workspace", () => {
@@ -282,6 +349,72 @@ describe("workspace isolation", () => {
     // The sole member's account went with it, so the address is free again.
     expect((await new Client(s.h.app).call("/api/auth/signin", { body: { email: "ann@alpha.test", password: "correct horse battery" } })).status).toBe(401);
     expect((await s.b.call("/api/overview")).status).toBe(200);
+  });
+
+  it("isolates a failing workspace during syncAll, reports its error and advances due actions in healthy ones (#501)", async () => {
+    const chain = new FakeChain();
+    chain.latest = 50;
+    const org1 = "1111111111111111";
+    const org2 = "2222222222222222";
+    const org3 = "3333333333333333";
+    const orgIds = [org1, org2, org3];
+
+    const dbs = new Map<string, Db>();
+    const store = {
+      open: (id: string) => {
+        if (id === org2) throw new Error("disk full");
+        if (!dbs.has(id)) dbs.set(id, new Db(":memory:", ORG_MIGRATIONS));
+        return dbs.get(id)!;
+      },
+      remove: (id: string) => dbs.delete(id),
+    };
+
+    const tenants = new Tenants(store, { testnet: { passphrase: PASSPHRASE, chain } }, () => true, () => orgIds);
+
+    try {
+      const w1 = tenants.forOrg(org1);
+      const w3 = tenants.forOrg(org3);
+
+      const a1 = await w1.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
+      const a3 = await w3.watchAsset({ network: "testnet", asset: `BOND:${key()}`, fromLedger: 1 });
+
+      // Schedule a split in w1 beyond chain.latest (recordTime at ledger 250)
+      const action = await w1.createAction(a1.id, {
+        type: "split",
+        recordTime: at(250),
+        num: "1",
+        den: "1",
+      });
+
+      // Before chain advances, action is scheduled and has no snapshot
+      expect(action.state).toBe("scheduled");
+      expect(action.snapshot).toBeNull();
+
+      // First syncAll pass with chain.latest = 50
+      const results1 = await tenants.syncAll();
+      expect(results1).toEqual([
+        { orgId: org1, assetId: a1.id, added: 0 },
+        { orgId: org2, assetId: "", error: "disk full" },
+        { orgId: org3, assetId: a3.id, added: 0 },
+      ]);
+      expect(w1.action(action.id).state).toBe("scheduled");
+
+      // Advance chain to 300 so recordTime (at(250)) is reached
+      chain.latest = 300;
+      const results2 = await tenants.syncAll();
+      expect(results2).toEqual([
+        { orgId: org1, assetId: a1.id, added: 0 },
+        { orgId: org2, assetId: "", error: "disk full" },
+        { orgId: org3, assetId: a3.id, added: 0 },
+      ]);
+
+      // ReconcileDue ran during syncAll and advanced the scheduled action to clean
+      const advanced = w1.action(action.id);
+      expect(advanced.state).toBe("clean");
+      expect(advanced.snapshot).not.toBeNull();
+    } finally {
+      tenants.close();
+    }
   });
 });
 
@@ -658,6 +791,59 @@ describe("networks", () => {
     expect(() => loadConfig({ CONCORD_PUBLIC_URL: "not a url" })).toThrow(/must be a URL/);
   });
 
+  it.each([
+    {
+      name: "CONCORD_PUBLIC_URL beats RENDER_EXTERNAL_URL",
+      env: { CONCORD_PUBLIC_URL: "https://public.example", RENDER_EXTERNAL_URL: "https://render.example" },
+      expected: "https://public.example",
+    },
+    {
+      name: "RENDER_EXTERNAL_URL beats default http://host:port",
+      env: { RENDER_EXTERNAL_URL: "https://render.example" },
+      expected: "https://render.example",
+    },
+    {
+      name: "default http://host:port fallback",
+      env: { CONCORD_HOST: "127.0.0.1", CONCORD_PORT: "4400" },
+      expected: "http://127.0.0.1:4400",
+    },
+    {
+      name: "trailing slash is dropped",
+      env: { CONCORD_PUBLIC_URL: "https://x.example/" },
+      expected: "https://x.example",
+    },
+    {
+      name: "0.0.0.0 host maps to 127.0.0.1",
+      env: { CONCORD_HOST: "0.0.0.0", CONCORD_PORT: "4400" },
+      expected: "http://127.0.0.1:4400",
+    },
+    {
+      name: "IPv6 ::1 host brackets to [::1]",
+      env: { CONCORD_HOST: "::1", CONCORD_PORT: "4400" },
+      expected: "http://[::1]:4400",
+    },
+    {
+      // Sub-paths were previously stripped silently; current behavior rejects them explicitly
+      // to avoid cookies and OAuth redirect URI pointing to the wrong root origin.
+      name: "path is rejected (sub-path hosting not supported)",
+      env: { CONCORD_PUBLIC_URL: "https://x.example/app/" },
+      error: /sub-path hosting is not supported/,
+    },
+    {
+      // Current behavior accepts non-http schemes like ftp:// because any valid URL
+      // with pathname "/" is parsed by new URL() and its origin is preserved.
+      name: "ftp scheme is accepted",
+      env: { CONCORD_PUBLIC_URL: "ftp://x.example" },
+      expected: "ftp://x.example",
+    },
+  ])("derives publicUrl correctly: $name (#488)", ({ env, expected, error }) => {
+    if (error) {
+      expect(() => loadConfig(env)).toThrow(error);
+    } else {
+      expect(loadConfig(env).publicUrl).toBe(expected);
+    }
+  });
+
   it("serves both networks with public endpoints by default and names retired settings", () => {
     const config = loadConfig({});
     expect(config.defaultNetwork).toBe("mainnet");
@@ -731,6 +917,47 @@ describe("networks", () => {
       expect(() => loadConfig({ CONCORD_RPC_HEADERS: invalid }), invalid).toThrow(/CONCORD_RPC_HEADERS must be JSON/);
     }
   });
+
+  it.each([
+    {
+      description: "whitespace, empty items and trailing slashes",
+      input: " https://a.example/ , ,https://b.example//",
+      expected: ["https://a.example", "https://b.example"],
+    },
+    {
+      // dedupe follow-up: duplicates are currently kept as-is
+      description: "duplicates are preserved",
+      input: "https://a.example, https://a.example",
+      expected: ["https://a.example", "https://a.example"],
+    },
+    {
+      description: "non-http scheme throws",
+      input: "ftp://x",
+      error: "CONCORD_MAINNET_RPC_URLS holds something that is not a URL",
+    },
+    {
+      description: "non-URL string throws",
+      input: "not a url",
+      error: "CONCORD_MAINNET_RPC_URLS holds something that is not a URL",
+    },
+    {
+      // CON-0314: credentials in URL are rejected; configure Authorization via CONCORD_RPC_HEADERS
+      description: "credentials in URL throw",
+      input: "https://user:pw@a.example",
+      error: "CONCORD_MAINNET_RPC_URLS must not contain URL credentials; configure Authorization via CONCORD_RPC_HEADERS",
+    },
+    {
+      description: "blank input falls back to defaults",
+      input: "   ",
+      expected: loadConfig({}).networks.mainnet.rpc.map((e) => e.url),
+    },
+  ])("$description", ({ input, expected, error }) => {
+    if (error) {
+      expect(() => loadConfig({ CONCORD_MAINNET_RPC_URLS: input })).toThrow(error);
+    } else {
+      expect(loadConfig({ CONCORD_MAINNET_RPC_URLS: input }).networks.mainnet.rpc.map((e) => e.url)).toEqual(expected);
+    }
+  });
 });
 
 describe("chain endpoints", () => {
@@ -745,6 +972,7 @@ describe("chain endpoints", () => {
   function scripted(answers: Record<string, Array<() => Response | Promise<Response>>>) {
     const calls: Array<{ url: string; headers: Record<string, string> }> = [];
     const clock = { value: 1_000_000 };
+    const sleeps: number[] = [];
     const fetch = (async (url: unknown, init?: RequestInit) => {
       const u = String(url);
       calls.push({ url: u, headers: (init?.headers ?? {}) as Record<string, string> });
@@ -752,8 +980,15 @@ describe("chain endpoints", () => {
       if (!next) throw new TypeError("fetch failed");
       return next();
     }) as typeof globalThis.fetch;
-    const deps = { fetch, sleep: async (ms: number) => void (clock.value += ms), now: () => clock.value };
-    return { calls, clock, deps };
+    const deps = {
+      fetch,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        clock.value += ms;
+      },
+      now: () => clock.value,
+    };
+    return { calls, clock, deps, sleeps };
   }
 
   it("URL-encodes unusual asset and issuer values in search, describe and baseline", async () => {
@@ -800,6 +1035,33 @@ describe("chain endpoints", () => {
     clock.value += 1_000;
     await expect(source.latestLedger()).resolves.toMatchObject({ latest: 50 });
     expect(calls).toHaveLength(2);
+  });
+
+  it.each<{ name: string; header: (now: number) => string | undefined; seconds: number }>([
+    { name: "seconds '40' -> 40s", header: () => "40", seconds: 40 },
+    { name: "zero '0' -> 1s minimum floor", header: () => "0", seconds: 1 },
+    { name: "HTTP-date 20s ahead -> 20s", header: (now) => new Date(now + 20_000).toUTCString(), seconds: 20 },
+    { name: "garbage 'soon' -> 30s default", header: () => "soon", seconds: 30 },
+    { name: "absent header -> 30s default", header: () => undefined, seconds: 30 },
+    { name: "'999' above 900s MAX_REST_MS cap -> 900s", header: () => "999", seconds: 900 },
+  ])("handles 429 Retry-After ($name)", async ({ header, seconds }) => {
+    const url = "https://limited.example";
+    const { calls, clock, deps } = scripted({
+      [url]: [
+        () => {
+          const value = header(clock.value);
+          return new Response("slow down", {
+            status: 429,
+            ...(value !== undefined ? { headers: { "retry-after": value } } : {}),
+          });
+        },
+        health,
+      ],
+    });
+    const source = new StellarSource(network([url]), deps);
+    await expect(source.latestLedger()).rejects.toThrow(/rate limited/);
+    await expect(source.latestLedger()).rejects.toThrow(`not answering; trying again in ${seconds}s`);
+    expect(calls).toHaveLength(1);
   });
 
   it("moves to the next endpoint when one is rate limited, and rests the first", async () => {
@@ -899,22 +1161,41 @@ describe("chain endpoints", () => {
     await expect(source.describe({ id: contractId })).rejects.toThrow("Stellar RPC getLedgerEntries returned no result");
   });
 
-  it("does not rest an endpoint on request faults (400, 404, 422)", async () => {
+  it.each([
+    [400, "surfaces to caller", "surface"],
+    [404, "surfaces to caller", "surface"],
+    [422, "surfaces to caller", "surface"],
+    [401, "rests endpoint and fails over", "failover"],
+    [403, "rests endpoint and fails over", "failover"],
+    [429, "rests endpoint and fails over", "failover"],
+  ] as const)("classifies HTTP %i (%s)", async (status, _label, mode) => {
     const a = "https://a.example";
-    const { calls, deps } = scripted({
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
       [a]: [
-        () => new Response("bad request", { status: 400 }),
+        () => new Response("status response", { status, headers: status === 429 ? { "retry-after": "60" } : {} }),
         health,
       ],
+      [b]: [health, health],
     });
-    const source = new StellarSource(network([a, "https://b.example"]), deps);
-    await expect(source.latestLedger()).rejects.toThrow(/HTTP 400/);
-    expect(calls).toHaveLength(1);
-    // Endpoint `a` was not rested: the subsequent call hits `a` immediately rather than falling back or waiting.
-    const head = await source.latestLedger();
-    expect(head.latest).toBe(50);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]!.url).toBe(a);
+    const source = new StellarSource(network([a, b]), deps);
+    if (mode === "surface") {
+      await expect(source.latestLedger()).rejects.toThrow(`HTTP ${status}`);
+      expect(calls.map((c) => c.url)).toEqual([a]);
+      // Request fault leaves endpoint awake: next call hits a again
+      const head = await source.latestLedger();
+      expect(head.latest).toBe(50);
+      expect(calls.map((c) => c.url)).toEqual([a, a]);
+    } else {
+      // Endpoint fault rests a and fails over to b immediately
+      const head = await source.latestLedger();
+      expect(head.latest).toBe(50);
+      expect(calls.map((c) => c.url)).toEqual([a, b]);
+      // Once getHealth cache expires, subsequent call continues using b
+      clock.value += 2_001;
+      await source.latestLedger();
+      expect(calls.map((c) => c.url)).toEqual([a, b, b]);
+    }
   });
 
   it("rests an endpoint on 401/403 with a distinct message", async () => {
@@ -973,6 +1254,129 @@ describe("chain endpoints", () => {
     await expect(new StellarSource(network(["https://rpc.example"]), lagging.deps).baseline("FUND", issuer, 7)).rejects.toThrow(/back in time/);
   });
 
+  it.each([
+    {
+      scenario: "503, 503, 200 on page 2",
+      page1Pages: 1,
+      page2Responses: [
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => "ok" as const,
+      ],
+      expectedPage1Calls: 1,
+      expectedPage2Calls: 3,
+      expectedSleepRanges: [
+        [500, 750],
+        [1000, 1250],
+      ],
+      expectedError: undefined,
+    },
+    {
+      scenario: "503 x3 on one Horizon",
+      page1Pages: 2,
+      page2Responses: [
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => "ok" as const,
+      ],
+      expectedPage1Calls: 2,
+      expectedPage2Calls: 4,
+      expectedSleepRanges: [
+        [500, 750],
+        [1000, 1250],
+        [250, 500],
+      ],
+      expectedError: undefined,
+    },
+    {
+      scenario: "429 on page 2",
+      page1Pages: 1,
+      page2Responses: [
+        () => new Response("slow down", { status: 429 }),
+      ],
+      expectedPage1Calls: 1,
+      expectedPage2Calls: 1,
+      expectedSleepRanges: [],
+      expectedError: /rate limited/,
+    },
+  ])(
+    "baseline() retries a failing page up to three times without restarting from page one ($scenario)",
+    async ({
+      page1Pages,
+      page2Responses,
+      expectedPage1Calls,
+      expectedPage2Calls,
+      expectedSleepRanges,
+      expectedError,
+    }) => {
+      const issuer = key();
+      const [h1, h2] = [key(), key()];
+      const line = (balance: string) => ({
+        asset_code: "FUND",
+        asset_issuer: issuer,
+        balance,
+        is_authorized: true,
+      });
+      const record = (id: string, balance: string) => ({ account_id: id, balances: [line(balance)] });
+      const many = Array.from({ length: 199 }, () => record(key(), "1.0000000"));
+      const first = `https://horizon.example/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`;
+      const second = "https://horizon.example/accounts?cursor=abc&limit=200";
+
+      const page1Response = () =>
+        new Response(
+          JSON.stringify({
+            _links: { next: { href: second } },
+            _embedded: { records: [record(h1, "70.0000000"), ...many] },
+          }),
+          { headers: { "latest-ledger": "150" } },
+        );
+      const page2Ok = () =>
+        new Response(
+          JSON.stringify({
+            _links: {},
+            _embedded: { records: [record(h2, "30.5000000")] },
+          }),
+          { headers: { "latest-ledger": "152" } },
+        );
+
+      const p2Answers = page2Responses.map((fn) => {
+        const res = fn();
+        return res === "ok" ? page2Ok : () => res;
+      });
+
+      const p1Answers = Array.from({ length: page1Pages }, () => page1Response);
+
+      const { calls, deps, sleeps } = scripted({
+        [first]: p1Answers,
+        [second]: p2Answers,
+      });
+
+      const source = new StellarSource(network(["https://rpc.example"]), deps);
+      const run = () => source.baseline("FUND", issuer, 7);
+
+      if (expectedError) {
+        await expect(run()).rejects.toThrow(expectedError);
+      } else {
+        const res = await run();
+        expect(res.ledger).toBe(150);
+        expect(res.openings.size).toBe(201);
+      }
+
+      // URL call counts asserted per row
+      expect(calls.filter((c) => c.url === first)).toHaveLength(expectedPage1Calls);
+      expect(calls.filter((c) => c.url === second)).toHaveLength(expectedPage2Calls);
+
+      // Sleep ranges asserted
+      expect(sleeps).toHaveLength(expectedSleepRanges.length);
+      for (let i = 0; i < expectedSleepRanges.length; i++) {
+        const [min, max] = expectedSleepRanges[i]!;
+        expect(sleeps[i]).toBeGreaterThanOrEqual(min);
+        expect(sleeps[i]).toBeLessThanOrEqual(max);
+      }
+    },
+  );
+
   it("finds classic assets by code, most widely held first", async () => {
     const [i1, i2] = [key(), key()];
     const asset = (issuer: string, authorized: number, flags: boolean) => ({
@@ -994,6 +1398,45 @@ describe("chain endpoints", () => {
     ]);
     expect(found[0]!.asset).toBe(`BENJI:${i2}`);
     expect(found[0]!.contractId).toMatch(/^C[A-Z2-7]{55}$/);
+  });
+
+  it("prefers Horizon contract_id in search(), derives it when absent, keeps tie order, and returns [] on empty records", async () => {
+    const [i1, i2, i3] = [key(), key(), key()];
+    const record = (issuer: string, authorized: number, contract_id?: string) => ({
+      asset_code: "BENJI",
+      asset_issuer: issuer,
+      ...(contract_id ? { contract_id } : {}),
+      accounts: { authorized, authorized_to_maintain_liabilities: 0, unauthorized: 0 },
+      balances: { authorized: "10.0000000" },
+      flags: { auth_required: false, auth_revocable: false, auth_clawback_enabled: false },
+    });
+    const url = "https://horizon.example/assets?asset_code=BENJI&limit=200";
+    const { deps } = scripted({
+      [url]: [
+        () =>
+          new Response(
+            JSON.stringify({
+              _embedded: {
+                records: [
+                  record(i1, 50, "CVERBATIM"),
+                  record(i2, 50),
+                  record(i3, 100),
+                ],
+              },
+            }),
+          ),
+        () => new Response(JSON.stringify({ _embedded: { records: [] } })),
+      ],
+    });
+    const source = new StellarSource(network(["https://rpc.example"]), deps);
+    const found = await source.search("BENJI");
+    expect(found.map((f) => [f.issuer, f.contractId, f.trustlines])).toEqual([
+      [i3, new Asset("BENJI", i3).contractId(MAINNET_PASSPHRASE), 100],
+      [i1, "CVERBATIM", 50],
+      [i2, new Asset("BENJI", i2).contractId(MAINNET_PASSPHRASE), 50],
+    ]);
+
+    expect(await source.search("BENJI")).toEqual([]);
   });
 
   it("fails over to the next Horizon endpoint when _embedded.records is omitted, and reports ChainError naming hosts if all fail", async () => {
@@ -1054,6 +1497,47 @@ describe("chain endpoints", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain("h1.example: unexpected response");
     expect(err.message).toContain("h2.example: unexpected response");
+  });
+
+  it("stops retrying and fails immediately when budget is exceeded on the first attempt", async () => {
+    const a = "https://a.example";
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
+      [a]: [
+        () => {
+          clock.value += 95_000;
+          return new Response("", { status: 503 });
+        },
+      ],
+      [b]: [health],
+    });
+    const source = new StellarSource(network([a, b]), deps);
+    const err = await source.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("a.example: HTTP 503");
+    expect(calls.map((c) => c.url)).toEqual([a]);
+  });
+
+  it("retries and falls over to the next endpoint when within budget", async () => {
+    const a = "https://a.example";
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
+      [a]: [
+        () => {
+          clock.value += 10_000;
+          return new Response("", { status: 503 });
+        },
+        () => {
+          clock.value += 10_000;
+          return new Response("", { status: 503 });
+        },
+      ],
+      [b]: [health],
+    });
+    const source = new StellarSource(network([a, b]), deps);
+    const head = await source.latestLedger();
+    expect(head.latest).toBe(50);
+    expect(calls.map((c) => c.url)).toEqual([a, a, b]);
   });
 });
 
@@ -1383,6 +1867,48 @@ describe("what ships", () => {
     expect(cfgAny.publicUrl).toBe("http://127.0.0.1:4400");
   });
 
+  it("loadConfig(process.env) loads .env with real environment variables taking precedence (#489)", () => {
+    const origEnv = { ...process.env };
+    const origLoadEnvFile = process.loadEnvFile;
+    const tempDir = mkdtempSync(join(tmpdir(), "concord-env-test-"));
+    const tempEnvFile = join(tempDir, ".env");
+    writeFileSync(tempEnvFile, "CONCORD_PORT=5000\nCONCORD_SYNC_INTERVAL=7\n", "utf8");
+
+    try {
+      // Preset process.env.CONCORD_PORT=6000 to test precedence
+      process.env.CONCORD_PORT = "6000";
+      delete process.env.CONCORD_SYNC_INTERVAL;
+
+      // Spy process.loadEnvFile to redirect to the temp .env file
+      vi.spyOn(process, "loadEnvFile").mockImplementation(() => {
+        origLoadEnvFile.call(process, tempEnvFile);
+      });
+
+      const config = loadConfig(process.env);
+      // Environment variable (6000) beats the file (5000)
+      expect(config.port).toBe(6000);
+      // The file fills gaps (7)
+      expect(config.syncIntervalSec).toBe(7);
+
+      // Now test with the spy throwing ENOENT: expect defaults and no error
+      vi.spyOn(process, "loadEnvFile").mockImplementation(() => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      });
+      delete process.env.CONCORD_PORT;
+      delete process.env.CONCORD_SYNC_INTERVAL;
+      const defaultConfig = loadConfig(process.env);
+      expect(defaultConfig.port).toBe(4400);
+      expect(defaultConfig.syncIntervalSec).toBe(30);
+    } finally {
+      vi.restoreAllMocks();
+      for (const key of Object.keys(process.env)) {
+        if (!(key in origEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, origEnv);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("serves static files with correct MIME types for Vite assets and falls back to octet-stream", async () => {
     const dir = mkdtempSync(join(tmpdir(), "concord-mime-"));
     const dataDir = join(dir, "data");
@@ -1430,6 +1956,28 @@ describe("what ships", () => {
       runtime.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("migrations", () => {
+  it("keeps shipped migrations append-only by pinning their digests", () => {
+    const check = (name: string, migrations: readonly string[], pinned: readonly string[]) => {
+      expect(
+        migrationDigests(migrations),
+        `${name} are append-only. Add a new migration and pin its digest instead of editing a shipped one.`,
+      ).toEqual(pinned);
+    };
+    check("ORG_MIGRATIONS", ORG_MIGRATIONS, ORG_MIGRATION_DIGESTS);
+    check("CONTROL_MIGRATIONS", CONTROL_MIGRATIONS, CONTROL_MIGRATION_DIGESTS);
+  });
+
+  it("rejects an edited shipped migration and an unpinned appended one", () => {
+    const edited = [...ORG_MIGRATIONS];
+    edited[0] = `${edited[0]} `;
+    expect(migrationDigests(edited)).not.toEqual(ORG_MIGRATION_DIGESTS);
+
+    const appended = [...CONTROL_MIGRATIONS, "CREATE TABLE later (id INTEGER);"];
+    expect(migrationDigests(appended)).not.toEqual(CONTROL_MIGRATION_DIGESTS);
   });
 });
 

@@ -22,7 +22,7 @@ sleeps (after about fifteen idle minutes), and it can take a minute to wake. Do 
 in it. [`docs/deploy/render.md`](./docs/deploy/render.md) covers rebuilding the practice workspace.
 
 What it does, what it flags, why now and who it is for: [`docs/overview.md`](./docs/overview.md).
-What it deliberately does not do: [`docs/limits.md`](./docs/limits.md).
+What it deliberately does not do: [`docs/limits.md`](./docs/limits.md); opening balances and per-holder cutoffs: [`docs/baselines.md`](./docs/baselines.md).
 
 ## Run it
 
@@ -112,7 +112,7 @@ TLS: [nginx and Certbot](./docs/deploy/nginx.md), [Caddy](./docs/deploy/caddy.md
 [Docker Compose](./docs/deploy/docker-compose.md) (copy `.env.example` to `.env` at the repository
 root, then `docker compose -f deploy/docker-compose.yml up -d --build`), [Fly.io](./docs/deploy/fly.md) (with the [single-machine template](./deploy/fly.toml)),
 [systemd](./docs/deploy/systemd.md). Running it: [monitoring](./docs/monitoring.md),
-[versioning](./docs/versioning.md), [upgrading and rolling back](./docs/upgrading.md).
+[backup and restore](./docs/backup-restore.md), [versioning](./docs/versioning.md), [upgrading and rolling back](./docs/upgrading.md).
 
 ## Layout and more documentation
 
@@ -125,6 +125,7 @@ Architecture decisions: [`docs/adr/`](./docs/adr/README.md).
 - [`docs/overview.md`](./docs/overview.md): what it does, what it flags, why now, who buys it.
 - [`docs/limits.md`](./docs/limits.md): the deliberate limits; [`docs/ROADMAP.md`](./docs/ROADMAP.md)
   says which are next to fall.
+- [`docs/baselines.md`](./docs/baselines.md): opening balances (baselines), Horizon paging, per-holder cutoffs, and blind spots.
 - [`docs/prior-art.md`](./docs/prior-art.md): the prior-art check against the brief's first kill
   criterion (someone already ships this for Stellar): dated sources, kill criteria, re-check schedule.
 - [`docs/demo-testnet.md`](./docs/demo-testnet.md): `pnpm demo:testnet` issues a practice asset on

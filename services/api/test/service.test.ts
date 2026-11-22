@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
-import { nativeToScVal } from "@stellar/stellar-sdk";
+import { StrKey, nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
+import { ChainError, StellarSource, cursorLedger, decodeEvent, type AssetCandidate } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
 import { Db } from "../src/db.js";
@@ -213,6 +213,23 @@ describe("Concord", () => {
     chain.push(assetId, "clawback", 30, { from: h2, amount: u(5) });
   });
 
+  async function expectPagedSync(count: number, calls: number) {
+    const code = `PAGE${count}`;
+    const asset = await concord.watchAsset({ network: "testnet", asset: `${code}:${issuer}`, fromLedger: 1 });
+    const pushed = Array.from({ length: count }, () =>
+      chain.push(asset.id, "mint", 40, { to: h3, amount: 1n }).id,
+    );
+
+    chain.calls = 0;
+    expect(await concord.sync(code)).toEqual({ added: count });
+    expect(chain.calls).toBe(calls);
+    const stored = concord.db
+      .all<{ id: string }>("SELECT id FROM events WHERE asset_id = ? ORDER BY id", asset.id)
+      .map((row) => row.id);
+    expect(stored).toEqual(pushed);
+    expect(await concord.sync(code)).toEqual({ added: 0 });
+  }
+
   it("indexes in pages and is idempotent", async () => {
     for (let i = 0; i < 2500; i++) chain.push(assetId, "mint", 40, { to: h3, amount: 1n });
     expect(await concord.sync("FUND")).toEqual({ added: 2507 });
@@ -222,6 +239,16 @@ describe("Concord", () => {
     expect(h.supply).toBe("1144.00025");
     expect(h.holders.find((x) => x.address === h2)).toMatchObject({ units: "55", status: "frozen" });
     expect(concord.asset("FUND").syncedLedger).toBe(100);
+  });
+
+  it("pages across a boundary that splits several events of the same ledger without losing or duplicating any", async () => {
+    await expectPagedSync(999, 1);
+    await expectPagedSync(1000, 2);
+  });
+
+  it("keeps paging when a ledger fills more than one full page", async () => {
+    await expectPagedSync(1001, 2);
+    await expectPagedSync(2000, 3);
   });
 
   it("rejects reconciliation when no register has been imported", async () => {
@@ -459,6 +486,32 @@ describe("Concord", () => {
       [h1, "66"],
       [h2, "29"],
     ]);
+  });
+
+  it("refuses opening balances for a contract token before any row is written, and lets a classic asset opt out", async () => {
+    const contractId = StrKey.encodeContract(Buffer.alloc(32, 9));
+    const watch = { network: "testnet" as const, asset: contractId, baseline: true, decimals: 7 };
+    const assetRows = () => concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM assets")!.n;
+    const before = assetRows();
+
+    // Deferred as well as blocking: a deferred watch never rolls back, so a row written ahead of
+    // the refusal would still be there afterwards.
+    for (const options of [{}, { defer: true }]) {
+      const refused = await concord.watchAsset(watch, options).catch((err: unknown) => err);
+      expect(refused).toBeInstanceOf(Invalid);
+      expect((refused as Error).message).toBe("opening balances are only available for classic assets");
+      expect(concord.db.get("SELECT id FROM assets WHERE id = ?", contractId)).toBeUndefined();
+      expect(assetRows()).toBe(before);
+    }
+    // It is the request for opening balances that is refused, not the token.
+    expect(await concord.watchAsset({ ...watch, baseline: false })).toMatchObject({ id: contractId, startMode: "window" });
+
+    // The suite sets no baselineResult, so an opt-out that still asked for opening balances would
+    // fail with "no baseline" instead of landing in window mode.
+    const classic = await concord.watchAsset({ network: "testnet", asset: `NB:${issuer}`, baseline: false });
+    expect(classic).toMatchObject({ startMode: "window", state: "ready", startLedger: 21 });
+    expect(classic.baselineLedger).toBeUndefined();
+    expect(concord.db.get("SELECT 1 FROM openings WHERE asset_id = ?", classic.id)).toBeUndefined();
   });
 
   it("does not flag an instruction from before a baseline asset's indexed history as never executed", async () => {
@@ -875,6 +928,15 @@ describe("Concord", () => {
         "reconciliations[].summary.supplyDifference",
         "reconciliations[].summary.unmappedUnits",
         "reconciliations[].warnings[]",
+        "registers[]",
+        "registers[].asOf",
+        "registers[].id",
+        "registers[].importedAt",
+        "registers[].importedBy",
+        "registers[].issues[]",
+        "registers[].positions",
+        "registers[].sha256",
+        "registers[].source",
         "sha256",
         "signoffHistory[]",
         "signoffHistory[].at",
@@ -886,6 +948,58 @@ describe("Concord", () => {
         "signoffHistory[].status",
       ]
     `);
+  });
+
+  it("includes register provenance in the audit pack covering every reconciled register", async () => {
+    await concord.sync("FUND");
+    const reg1 = concord.importRegister(
+      "FUND",
+      {
+        csv: `holder_id,account,units,status\nA,${h1},100,active\n`,
+        asOf: at(2),
+      },
+      { id: "u1", label: "alice <alice@example.test>" },
+    );
+    const reg2 = concord.importRegister(
+      "FUND",
+      {
+        csv: `holder_id,account,units,status\nA,${h1},90,active\n`,
+        asOf: at(5),
+      },
+      { id: "u2", label: "bob <bob@example.test>" },
+    );
+
+    const run = await concord.reconcile("FUND", reg2.registerId);
+    expect(run.registerId).toBe(reg2.registerId);
+
+    const pack = concord.auditExport("FUND");
+    expect(pack.registers.length).toBeGreaterThanOrEqual(2);
+
+    // Every registerId in reconciliations appears in registers
+    const registerIdsInRecon = pack.reconciliations.map((r) => r.registerId);
+    const registerIds = pack.registers.map((r) => r.id);
+    for (const rid of registerIdsInRecon) {
+      expect(registerIds).toContain(rid);
+    }
+
+    // Provenance details are present
+    const r2 = pack.registers.find((r) => r.id === reg2.registerId)!;
+    expect(r2).toBeDefined();
+    expect(r2.asOf).toBe(at(5));
+    expect(r2.source).toBe("upload");
+    expect(r2.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(r2.positions).toBe(1);
+    expect(r2.issues).toEqual([]);
+    expect(r2.importedBy).toBe("bob <bob@example.test>");
+    expect(r2.importedAt).toBeDefined();
+
+    // Digest covers registers: modifying a register breaks the digest
+    const originalDigest = pack.sha256;
+    const tampered = { ...pack, registers: [{ ...r2, source: "tampered" }] };
+    const { generatedAt: _g, generator: _gen, sha256: _s, ...content } = tampered;
+    const { createHash } = await import("node:crypto");
+    const tamperedDigest = createHash("sha256").update(JSON.stringify(content)).digest("hex");
+    expect(tamperedDigest).not.toBe(originalDigest);
   });
 
   it("holds the indexed-to mark still when a pass dies part-way", async () => {
@@ -927,6 +1041,42 @@ describe("Concord", () => {
     expect(concord.asset("FUND").syncError).toMatch(/Rebuild this asset/);
   });
 
+  it("rejects watching an asset outside known when known is set (#509)", async () => {
+    chain.known = new Set();
+    const badIssuer = key();
+    await expect(
+      concord.watchAsset({ network: "testnet", asset: `FUND:${badIssuer}`, fromLedger: 1 }),
+    ).rejects.toThrow("testnet has no asset FUND from that issuer");
+    chain.known = undefined;
+  });
+
+  it("lookup returns candidates for a code from search (#509)", async () => {
+    const candidate: AssetCandidate = {
+      asset: `CAND:${key()}`,
+      code: "CAND",
+      issuer: key(),
+      contractId: "C123",
+      trustlines: 10,
+      authorizedUnits: "100",
+      authRequired: false,
+      authRevocable: false,
+      clawbackEnabled: false,
+    };
+    chain.candidates = [candidate];
+    expect(await concord.lookup("testnet", "CAND")).toEqual([candidate]);
+    expect(await concord.lookup("testnet", "NONE")).toEqual([]);
+    chain.candidates = [];
+  });
+
+  it("advances chain past retention yielding the rebuild gap error (#509)", async () => {
+    const issuer = key();
+    const watched = await concord.watchAsset({ network: "testnet", asset: `ADV:${issuer}`, fromLedger: 1 });
+    await concord.sync(watched.id);
+    chain.advance(100, { retain: 50 });
+    await expect(concord.sync(watched.id)).rejects.toThrow(/longer than the network keeps events/);
+    expect(concord.asset(watched.id).syncError).toMatch(/Rebuild this asset/);
+  });
+
   it("stops watching and takes every dependent row with it", async () => {
     const csv = `holder_id,account,units\nA,${h1},90\n`;
     const reg = concord.importRegister("FUND", { csv, asOf: at(40) });
@@ -957,6 +1107,41 @@ describe("Concord", () => {
     expect(concord.holdings("FUND").holderCount).toBe(0);
   });
 
+  it("prevents sync from racing an in-flight unwatchAsset and throws NotFound", async () => {
+    let releaseGate: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+
+    let syncStarted: () => void;
+    const whenSyncStarted = new Promise<void>((resolve) => {
+      syncStarted = resolve;
+    });
+
+    chain.onGetEvents = () => {
+      syncStarted();
+    };
+    chain.gate = gate;
+
+    // Start a sync pass that pauses inside getEvents
+    const syncPromise = concord.sync("FUND");
+    await whenSyncStarted;
+
+    // Start unwatching FUND while sync is in flight
+    const unwatchPromise = concord.unwatchAsset("FUND");
+
+    // Concurrently calling sync for the asset being removed throws NotFound
+    expect(() => concord.sync("FUND")).toThrow(NotFound);
+
+    // Release the gate so the in-flight sync pass finishes
+    releaseGate!();
+    await syncPromise;
+    await unwatchPromise;
+
+    // Asset is deleted
+    expect(() => concord.asset("FUND")).toThrow(NotFound);
+  });
+
   it("rebuilds from fresh opening balances and keeps the books", async () => {
     await concord.sync("FUND");
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
@@ -966,6 +1151,124 @@ describe("Concord", () => {
     expect(rebuilt).toMatchObject({ startMode: "baseline", baselineLedger: 250, startLedger: 251, state: "ready" });
     expect(concord.holdings("FUND").holders).toEqual([expect.objectContaining({ address: h1, units: "42" })]);
     expect(concord.registers("FUND").map((r) => r.id)).toEqual([reg.registerId]);
+  });
+
+  /** How an asset's history begins, as stored. */
+  const startColumns = (id: string) => ({
+    ...concord.db.get("SELECT start_mode, start_ledger, baseline_ledger, state FROM assets WHERE id = ?", id),
+  });
+
+  it("rebuild moves an asset watched from a named ledger over to opening balances", async () => {
+    expect(startColumns(assetId)).toEqual({ start_mode: "ledger", start_ledger: 1, baseline_ledger: null, state: "ready" });
+    chain.latest = 300;
+    chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
+    await concord.rebuild("FUND");
+    expect(startColumns(assetId)).toEqual({
+      start_mode: "baseline",
+      start_ledger: 251,
+      baseline_ledger: 250,
+      state: "ready",
+    });
+  });
+
+  it("rebuild gives a contract token a fresh window, and never opening balances", async () => {
+    const contractId = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+    await concord.watchAsset({ network: "testnet", asset: contractId, decimals: 7, fromLedger: 5 });
+    expect(startColumns(contractId)).toEqual({ start_mode: "ledger", start_ledger: 5, baseline_ledger: null, state: "ready" });
+    // Opening balances are on offer, and are not for this asset: it has no issuer to ask about.
+    chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
+    chain.oldest = 100;
+    chain.latest = 500;
+    await concord.rebuild(contractId);
+    // Twenty ledgers in from the oldest the RPC holds, as when a window asset is first watched.
+    expect(startColumns(contractId)).toEqual({
+      start_mode: "window",
+      start_ledger: 120,
+      baseline_ledger: null,
+      state: "ready",
+    });
+    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM openings WHERE asset_id = ?", contractId)!.n).toBe(0);
+  });
+
+  it("a deferred rebuild clears the indexed history and its error at once, and keeps every book", async () => {
+    // FUND on opening balances taken at ledger 250, then a movement once the chain has moved on.
+    chain.latest = 300;
+    chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
+    await concord.rebuild("FUND");
+    chain.latest = 320;
+    chain.push(assetId, "transfer", 310, { from: h1, to: h2, amount: u(2) });
+    // Every kind of book against it (reconciling indexes the transfer), and a failure on record.
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(315) });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    concord.importJournal("FUND", `ref,date,type,from_account,to_account,units\nJ1,${at(310)},transfer,${h1},${h2},2\n`);
+    concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI1,freeze,${h2},,${at(312)}\n`);
+    await concord.createAction("FUND", { type: "split", recordTime: at(312), num: "2", den: "1" });
+    const brk = run.breaks[0]!;
+    concord.setNote("FUND", "recon", brk.key, { fingerprint: brk.fingerprint, status: "resolved", note: "x" });
+    concord.db.write("UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?", "connection reset", at(316), assetId);
+
+    const rows = (table: string) => concord.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`)!.n;
+    const books = ["registers", "register_positions", "journal", "instructions", "runs", "actions", "break_notes", "break_note_history"];
+    const bookRows = () => Object.fromEntries(books.map((table) => [table, rows(table)]));
+    const before = bookRows();
+    expect(Object.values(before).every((n) => n > 0), JSON.stringify(before)).toBe(true);
+    expect([rows("events"), rows("openings")]).toEqual([1, 1]);
+    expect(concord.asset("FUND")).toMatchObject({
+      cursor: expect.any(String),
+      syncError: "connection reset",
+      syncedLedger: 320,
+      baselineLedger: 250,
+    });
+
+    // A blocking rebuild re-reads the chain before it returns, so what it cleared is never seen.
+    // Hold the chain instead: the deferred pass cannot start, and the cleared row stays put.
+    chain.baselineResult = {
+      ledger: 318,
+      openings: new Map([
+        [h1, { amount: u(40), asOfLedger: 318 }],
+        [h2, { amount: u(2), asOfLedger: 318 }],
+      ]),
+    };
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const latestLedger = chain.latestLedger.bind(chain);
+    chain.latestLedger = async () => {
+      await held;
+      return latestLedger();
+    };
+
+    const cleared = await concord.rebuild("FUND", { defer: true });
+    expect(cleared).toMatchObject({ state: "indexing", startMode: "baseline" });
+    expect(cleared.cursor).toBeUndefined();
+    expect(cleared.syncError).toBeUndefined();
+    const row = concord.db.get(
+      `SELECT state, start_mode, start_ledger, baseline_ledger, history_from, cursor, synced_ledger, synced_at,
+         sync_error, sync_error_at FROM assets WHERE id = ?`,
+      assetId,
+    );
+    expect({ ...row }).toEqual({
+      state: "indexing",
+      start_mode: "baseline",
+      start_ledger: null,
+      baseline_ledger: null,
+      history_from: null,
+      cursor: null,
+      synced_ledger: null,
+      synced_at: null,
+      sync_error: null,
+      sync_error_at: null,
+    });
+    expect([rows("events"), rows("openings")]).toEqual([0, 0]);
+    expect(bookRows()).toEqual(before);
+
+    // Let the deferred pass go and wait for it: sync() hands back the pass already in flight.
+    release();
+    await concord.sync("FUND");
+    expect(startColumns(assetId)).toEqual({ start_mode: "baseline", start_ledger: 319, baseline_ledger: 318, state: "ready" });
+    expect(concord.asset("FUND")).toMatchObject({ syncedLedger: 320, cursor: expect.any(String) });
+    expect(concord.asset("FUND").syncError).toBeUndefined();
+    expect([rows("events"), rows("openings")]).toEqual([0, 2]);
+    expect(bookRows()).toEqual(before);
   });
 
   it("advances a scheduled action once the chain passes its record time", async () => {
@@ -1012,6 +1315,37 @@ describe("Concord", () => {
     await concord.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
     expect(() => concord.asset("FUND")).toThrow(/more than one/);
     expect(concord.asset(assetId).id).toBe(assetId);
+  });
+
+  it("looks an asset up by contract id or by code in any case, and names an ambiguous or unknown reference", async () => {
+    const thrown = (lookup: () => unknown): unknown => {
+      try {
+        lookup();
+      } catch (err) {
+        return err;
+      }
+      return undefined;
+    };
+
+    const fund = concord.asset(assetId);
+    expect(fund).toMatchObject({ id: assetId, code: "FUND", issuer });
+    expect(concord.asset("FUND")).toEqual(fund);
+    expect(concord.asset("fund")).toEqual(fund);
+
+    // A second FUND from another issuer makes the code ambiguous in any case, but neither id.
+    const other = await concord.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
+    expect(other.id).not.toBe(assetId);
+    for (const code of ["FUND", "fund"]) {
+      const ambiguous = thrown(() => concord.asset(code));
+      expect(ambiguous).toBeInstanceOf(Invalid);
+      expect((ambiguous as Error).message).toBe(`more than one watched asset is called ${code}; use its contract id`);
+    }
+    expect(concord.asset(assetId)).toEqual(fund);
+    expect(concord.asset(other.id)).toEqual(other);
+
+    const unknown = thrown(() => concord.asset("NOPE"));
+    expect(unknown).toBeInstanceOf(NotFound);
+    expect((unknown as Error).message).toBe("asset NOPE is not watched");
   });
 
   it("handles concurrent watchAsset calls gracefully without UNIQUE constraint failure", async () => {
@@ -1090,6 +1424,57 @@ describe("Concord", () => {
       }),
     ).rejects.toThrow(`exclude contains an invalid Stellar address: "${invalidAddr}"`);
   });
+
+  it("trims and caps a new asset name, keeps the old one for a blank, and dedupes and caps the ignore list", () => {
+    type Patch = { name?: string; ignore?: string[] };
+    const stored = () => concord.asset(assetId);
+    const refuses = (patch: Patch, message: string) => {
+      let thrown: unknown;
+      try {
+        concord.updateAsset(assetId, patch);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(Invalid);
+      expect((thrown as Error).message).toBe(message);
+    };
+    expect(stored()).toMatchObject({ name: "FUND", ignore: [treasury] });
+
+    // A name is trimmed, and a patch that names no ignore list leaves the stored one alone.
+    expect(concord.updateAsset(assetId, { name: "  New  " }).name).toBe("New");
+    expect(stored()).toMatchObject({ name: "New", ignore: [treasury] });
+
+    // A blank name keeps the old one.
+    for (const blank of ["", "   "]) {
+      concord.updateAsset(assetId, { name: blank });
+      expect(stored().name).toBe("New");
+    }
+
+    // 120 characters is the longest a name can be. 121 is refused and the stored name stays.
+    const longest = "n".repeat(120);
+    concord.updateAsset(assetId, { name: longest });
+    expect(stored().name).toBe(longest);
+    refuses({ name: "n".repeat(121) }, "name must be text of at most 120 characters");
+    expect(stored().name).toBe(longest);
+
+    // Duplicates and blanks are dropped, in the order first given, and the name is left alone.
+    concord.updateAsset(assetId, { ignore: [h1, h1, h2, ""] });
+    expect(stored()).toMatchObject({ name: longest, ignore: [h1, h2] });
+
+    // 500 entries is the longest list. One more, an entry over 80 characters and a bare string are
+    // each refused, and the stored list stays.
+    const most = Array.from({ length: 500 }, () => key());
+    concord.updateAsset(assetId, { ignore: most });
+    expect(stored().ignore).toEqual(most);
+    for (const bad of [[...most, key()], [h1, "G".repeat(81)], h1 as unknown as string[]]) {
+      refuses({ ignore: bad }, "ignore must be a list of addresses");
+      expect(stored().ignore).toEqual(most);
+    }
+    // At exactly 80 characters an entry is read as an address, and refused as a bad one instead.
+    refuses({ ignore: ["G".repeat(80)] }, `ignore contains an invalid Stellar address: "${"G".repeat(80)}"`);
+    expect(stored().ignore).toEqual(most);
+  });
+
   it("serves the same operations over HTTP, to a signed-in user", async () => {
     const h = harness();
     h.chain.baselineResult = { ledger: 50, openings: new Map() };
@@ -1150,6 +1535,108 @@ describe("Concord", () => {
     expect(await csv.text()).toContain(h1);
     const template = await client.call("/api/templates/register.csv");
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
+  });
+
+  it("imports journal in merge mode by default, updating and adding entries (#540)", () => {
+    // Initial import: J1, J2
+    const res1 = concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\n`,
+    );
+    expect(res1).toMatchObject({ entries: 2, added: 2, replaced: 0, removed: 0 });
+
+    // Second import in merge mode: J2 (updated units), J3 (new)
+    const res2 = concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ2,${at(4)},issue,,${h2},70\nJ3,${at(5)},issue,,${h1},20\n`,
+      { mode: "merge" },
+    );
+    expect(res2).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 0 });
+
+    const rows = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    expect(rows).toEqual([
+      { ref: "J1", units: "1000000000" },
+      { ref: "J2", units: "700000000" },
+      { ref: "J3", units: "200000000" },
+    ]);
+  });
+
+  it("imports journal in replace mode, atomically swapping entries and removing absent ones (#540)", () => {
+    // Seed initial rows: J1, J2, J3
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\nJ3,${at(5)},issue,,${h1},20\n`,
+    );
+
+    // Replace with: J2 (different units), J4 (new). J1 and J3 should be removed.
+    const res = concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ2,${at(4)},issue,,${h2},80\nJ4,${at(6)},issue,,${h2},30\n`,
+      { mode: "replace" },
+    );
+    expect(res).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 2 });
+
+    const rows = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    expect(rows).toEqual([
+      { ref: "J2", units: "800000000" },
+      { ref: "J4", units: "300000000" },
+    ]);
+  });
+
+  it("refuses replace when journal has parse errors unless allowPartial is set (#540)", () => {
+    // Seed initial rows: J2, J4
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ2,${at(4)},issue,,${h2},80\nJ4,${at(6)},issue,,${h2},30\n`,
+    );
+
+    const badCsv = `ref,date,type,from_account,to_account,units\nJ5,${at(7)},unknown_type,,${h1},10\nJ2,${at(4)},issue,,${h2},99\n`;
+
+    // Without allowPartial: throws and does NOT wipe existing rows
+    expect(() => concord.importJournal("FUND", badCsv, { mode: "replace" })).toThrow(/parse error/i);
+
+    const rowsAfterFail = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    expect(rowsAfterFail).toEqual([
+      { ref: "J2", units: "800000000" },
+      { ref: "J4", units: "300000000" },
+    ]);
+
+    // With allowPartial: true: imports valid rows (J2) and removes absent rows (J4), reporting issues
+    const resPartial = concord.importJournal("FUND", badCsv, { mode: "replace", allowPartial: true });
+    expect(resPartial.issues).toHaveLength(1);
+    expect(resPartial.added).toBe(0);
+    expect(resPartial.replaced).toBe(1);
+    expect(resPartial.removed).toBe(1);
+
+    const rowsAfterPartial = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    expect(rowsAfterPartial).toEqual([
+      { ref: "J2", units: "990000000" },
+    ]);
+  });
+
+  it("handles replace via API endpoint /assets/:id/journal (#540)", async () => {
+    const client = await new Client(harness().app).signUp("journal_ops@example.test", "JournalOps");
+    const asset = await client.json<{ id: string }>("/api/assets", {
+      body: { network: "testnet", asset: `REPLACE:${key()}`, fromLedger: 1 },
+    });
+    const id = asset.id;
+
+    // Initial import
+    const res1 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(`/api/assets/${id}/journal`, {
+      body: {
+        csv: `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},10\nJ2,${at(3)},issue,,${h2},20\n`,
+      },
+    });
+    expect(res1).toMatchObject({ entries: 2, added: 2, replaced: 0, removed: 0 });
+
+    // Replace via API
+    const res2 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(`/api/assets/${id}/journal`, {
+      body: {
+        csv: `ref,date,type,from_account,to_account,units\nJ2,${at(3)},issue,,${h2},25\nJ3,${at(4)},issue,,${h1},30\n`,
+        mode: "replace",
+      },
+    });
+    expect(res2).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 1 });
   });
 });
 

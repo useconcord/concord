@@ -281,9 +281,9 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json({ ok: true });
   });
   priv.post("/assets/:id/journal", async (c) => {
-    const input = await jsonBody<{ csv: string }>(c);
+    const input = await jsonBody<{ csv: string; mode?: "merge" | "replace"; allowPartial?: boolean }>(c);
     if (typeof input.csv !== "string") throw new Invalid("csv is required");
-    return c.json(c.var.ws.importJournal(id(c), input.csv), 201);
+    return c.json(c.var.ws.importJournal(id(c), input.csv, { mode: input.mode, allowPartial: input.allowPartial }), 201);
   });
   priv.post("/assets/:id/instructions", async (c) => {
     const input = await jsonBody<{ csv: string }>(c);

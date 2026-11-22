@@ -12,6 +12,7 @@
     "asset",
     "period",
     "holdings",
+    "registers",
     "reconciliations",
     "corporateActions",
     "controls",
@@ -25,6 +26,7 @@
     "asset": { "$ref": "#/definitions/asset" },
     "period": { "$ref": "#/definitions/period" },
     "holdings": { "$ref": "#/definitions/holdings" },
+    "registers": { "type": "array", "items": { "$ref": "#/definitions/register" } },
     "reconciliations": { "type": "array", "items": { "$ref": "#/definitions/reconciliation" } },
     "corporateActions": { "type": "array", "items": { "$ref": "#/definitions/corporateAction" } },
     "controls": { "$ref": "#/definitions/controls" },
@@ -32,6 +34,32 @@
     "events": { "type": "array", "items": { "$ref": "#/definitions/event" } }
   },
   "definitions": {
+    "register": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "asOf", "source", "sha256", "positions", "issues", "importedBy", "importedAt"],
+      "properties": {
+        "id": { "type": "integer" },
+        "asOf": { "$ref": "#/definitions/dateTime" },
+        "source": { "type": "string" },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "positions": { "type": "integer" },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["line", "message"],
+            "properties": {
+              "line": { "type": "integer" },
+              "message": { "type": "string" }
+            }
+          }
+        },
+        "importedBy": { "$ref": "#/definitions/nullableString" },
+        "importedAt": { "$ref": "#/definitions/dateTime" }
+      }
+    },
     "signoff": {
       "type": "object",
       "additionalProperties": false,

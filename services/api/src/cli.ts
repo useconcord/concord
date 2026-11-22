@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { backup } from "node:sqlite";
 import { parseArgs } from "node:util";
 import type { ActionInput, Actor, Concord, WatchInput } from "./concord.js";
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
       out: { type: "string" },
       note: { type: "string" },
       json: { type: "boolean" },
+      yes: { type: "boolean", short: "y" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -177,6 +179,47 @@ async function main(): Promise<void> {
         for (const issue of imported.issues) console.log(`  line ${issue.line}: ${issue.message}`);
       }
       printRun((imported.duplicate && concord.latestRunForRegister(imported.registerId)) || (await concord.reconcile(asset, imported.registerId, actor)));
+      break;
+    }
+    case "registers": {
+      const asset = need(a, "asset");
+      const list = workspace().registers(asset);
+      if (values.json) return out(list);
+      table(
+        list.map((r) => ({
+          id: r.id,
+          "as-of": r.asOf,
+          source: r.source,
+          positions: r.positions,
+          "rejected rows": r.issues.length,
+          importer: r.importedBy ?? "",
+        })),
+      );
+      break;
+    }
+    case "register-delete": {
+      const asset = need(a, "asset");
+      const registerId = Number(need(b, "register id"));
+      if (Number.isNaN(registerId)) throw new Error("register id must be a number");
+      if (!values.yes) {
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          const answer = await rl.question(`Delete register ${registerId} and all associated runs? [y/N] `);
+          if (!/^y(es)?$/i.test(answer.trim())) {
+            console.log("aborted");
+            break;
+          }
+        } finally {
+          rl.close();
+          process.stdin.pause();
+        }
+      }
+      const { runs } = workspace().deleteRegister(asset, registerId);
+      if (values.json) {
+        out({ deleted: registerId, runs });
+      } else {
+        console.log(`deleted register ${registerId} (${runs} reconciliation ${runs === 1 ? "run" : "runs"} removed)`);
+      }
       break;
     }
     case "journal":
