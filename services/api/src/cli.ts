@@ -7,6 +7,7 @@ import type { ActionInput, Actor, Concord, WatchInput } from "./concord.js";
 import { isNetworkName, loadConfig } from "./config.js";
 import { openRuntime, startServer } from "./main.js";
 import { USAGE } from "./cli-usage.js";
+export { USAGE } from "./cli-usage.js";
 
 function table(rows: Array<Record<string, unknown>>): void {
   if (rows.length === 0) return console.log("(none)");
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
       note: { type: "string" },
       json: { type: "boolean" },
       help: { type: "boolean", short: "h" },
+      "fail-on-breaks": { type: "boolean" },
     },
   });
   const [command, a, b] = positionals;
@@ -176,7 +178,11 @@ async function main(): Promise<void> {
         console.log(`register ${imported.registerId}: ${imported.positions} positions, ${imported.issues.length} rejected rows`);
         for (const issue of imported.issues) console.log(`  line ${issue.line}: ${issue.message}`);
       }
-      printRun((imported.duplicate && concord.latestRunForRegister(imported.registerId)) || (await concord.reconcile(asset, imported.registerId, actor)));
+      const run =
+        (imported.duplicate && concord.latestRunForRegister(imported.registerId)) ||
+        (await concord.reconcile(asset, imported.registerId, actor));
+      printRun(run);
+      if (values["fail-on-breaks"] && run.openBreaks > 0) process.exitCode = 2;
       break;
     }
     case "journal":
@@ -185,9 +191,12 @@ async function main(): Promise<void> {
     case "instructions":
       out(workspace().importInstructions(need(a, "asset"), readFileSync(need(b, "file"), "utf8")));
       break;
-    case "reconcile":
-      printRun(await workspace().reconcile(need(a, "asset"), values.register ? Number(values.register) : undefined, actor));
+    case "reconcile": {
+      const run = await workspace().reconcile(need(a, "asset"), values.register ? Number(values.register) : undefined, actor);
+      printRun(run);
+      if (values["fail-on-breaks"] && run.openBreaks > 0) process.exitCode = 2;
       break;
+    }
     case "action": {
       const type = need(b, "action type") as ActionInput["type"];
       const input: ActionInput = { type, recordTime: need(values.record, "--record"), exclude: list(values.exclude) };

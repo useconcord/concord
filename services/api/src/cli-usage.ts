@@ -16,9 +16,11 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   sync [ASSET]                     pull new events (every workspace when no --org)
   holdings ASSET [--as-of ISO]     on-chain holders
   register ASSET FILE --as-of ISO  import a register export and reconcile it
+        [--fail-on-breaks]
   journal ASSET FILE               import the register's transaction journal
   instructions ASSET FILE          import control instructions
   reconcile ASSET [--register ID]  re-run a reconciliation
+        [--fail-on-breaks]
   action ASSET dividend --record ISO --rate R [--pay-asset A] [--payer G...] [--until ISO]
   action ASSET split|redemption --record ISO --ratio NUM:DEN [--until ISO]
         [--label TEXT] [--exclude A,B]
@@ -37,4 +39,6 @@ Operator commands.
   serve                            run the API and dashboard
 
 ASSET is a code or a contract id. Add --json to most commands for machine-readable output,
-or --help (-h) to see this text. Settings come from the environment; see .env.example.`;
+or --help (-h) to see this text. Settings come from the environment; see .env.example.
+
+Exit codes: 0 success, 1 error, 2 open breaks (--fail-on-breaks).`;
