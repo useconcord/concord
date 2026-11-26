@@ -70,6 +70,21 @@ _Source: `services/api/src/concord.ts`, `auditExport` (`inPeriod = (t) => t >= f
 | `signoffHistory`   | Every sign-off change, oldest first: `scope`, `key`, `fingerprint`, `status`, `note`, `author`, `at`. A break acknowledged by one person and resolved by another shows both entries.  Not narrowed by the period                              |
 | `events`           | Indexed ledger events closed in the period, in ascending `id` order                                                                                                                                                                |
 
+### History coverage
+
+Every reconciliation in `reconciliations` and every corporate action `result` in `corporateActions` carries `coverage`, the instant range its figures can be trusted for:
+
+| Field      | Meaning                                                                                                                                                                                         |
+| :--------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `from`     | Start of the indexed history: `historyFrom` for `window` mode, otherwise the close time of the first indexed event. A `baseline` asset with no events yet uses the time it was watched. `null` when unknown |
+| `to`       | `indexedTo`, the close time of the last ledger read when the result was computed. `null` before the first sync                                                                                  |
+| `mode`     | How history starts: `baseline` (opening balances from Horizon), `ledger` (a start ledger the caller named) or `window` (the oldest ledger the RPC holds)                                        |
+| `complete` | `true` only when the run's `asOf`, or the action's `recordTime`, is within `[from, to]`. When `false`, activity outside the range is not reflected and the result also carries a warning      |
+
+A corporate action whose record time the chain has not reached yet has no `result`, and so no `coverage`, until its holdings are snapshotted. Results stored before coverage was added have none until they are recomputed.
+
+_Source: `services/api/src/concord.ts`, `coverage`._
+
 ### The `sha256` digest
 
 The digest is the SHA-256 of the pack serialised as RFC 8785 canonical JSON, leaving out `sha256`, `generatedAt`, `keyId` and `signature`. It covers `generator`, `asset`, `period`, `holdings`, `registers`, `reconciliations`, `corporateActions`, `controls`, `signoffHistory` and `events`. Canonical JSON sorts every object's keys by UTF-16 code units and fixes the number formatting, so key order in the file does not change the digest, while editing any value does. Two packs built from the same data and period have the same digest. Check a pack file with `concord verify-pack FILE` (add `--key PUBLIC.pem` to check its signature too), or the `verifyPack` helper.

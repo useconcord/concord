@@ -168,6 +168,13 @@ interface StoredBreak {
   difference?: string | null;
 }
 
+interface Coverage {
+  from: string | null;
+  to: string | null;
+  mode: "baseline" | "ledger" | "window";
+  complete: boolean;
+}
+
 interface RunResult {
   registerId: number;
   registerSha256: string;
@@ -182,6 +189,7 @@ interface RunResult {
   lines: Array<Record<string, unknown>>;
   movement: Record<string, unknown> | null;
   breaks: StoredBreak[];
+  coverage: Coverage;
 }
 
 interface ActionFlowResult {
@@ -202,6 +210,7 @@ interface ActionResult {
   lines: Array<Record<string, unknown>>;
   breaks: StoredBreak[];
   cashInLieu?: ActionFlowResult;
+  coverage: Coverage;
 }
 
 const now = () => new Date().toISOString();
@@ -1827,6 +1836,7 @@ export class Concord {
     for (const b of breaks) b.firstSeen = priorSeen.get(b.key) ?? asOf;
 
     const s = positions.summary;
+    const coverage = this.coverage(asset, asOf);
     const result: RunResult = {
       registerId: Number(reg.id),
       registerSha256: String(reg.sha256),
@@ -1861,6 +1871,7 @@ export class Concord {
       })),
       movement,
       breaks,
+      coverage,
     };
     const openBreaks = this.annotate(asset.id, "recon", breaks).filter((b) => b.status === "open").length;
     const id = this.db.insert(
@@ -2418,6 +2429,21 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     return first?.closed_at;
   }
 
+  /**
+   * The instant range the asset's indexed history can be trusted for, and whether `instant` is
+   * inside it. A baseline asset with no events yet is covered from when it was watched.
+   */
+  private coverage(asset: AssetRecord, instant: string): Coverage {
+    const from = this.historyStart(asset) ?? (asset.startMode === "baseline" ? asset.createdAt : null);
+    const to = asset.syncedAt ?? null;
+    return {
+      from,
+      to,
+      mode: asset.startMode,
+      complete: to !== null && instant <= to && (from === null || instant >= from),
+    };
+  }
+
   /** Freeze the record-date holdings once the indexed chain has passed the record time. */
   private snapshot(asset: AssetRecord, row: Row): HoldingsState | undefined {
     if (row.snapshot) {
@@ -2483,6 +2509,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         summary: { holders: 0, expectedTotal: "0", observedTotal: "0", difference: "0", breakCount: 0 },
         lines: [],
         breaks: [],
+        coverage: this.coverage(asset, recordTime),
       };
       this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
       return this.action(id);
@@ -2630,6 +2657,13 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     const allBreaks = cashFlowResult ? [...unitBreaks, ...cashFlowResult.breaks] : unitBreaks;
     const isClean = recon.breaks.length === 0 && (!cashFlowResult || cashFlowResult.breaks.length === 0);
 
+    const chainBehind = !asset.syncedAt || asset.syncedAt < recordTime;
+    const coverage = this.coverage(asset, recordTime);
+    if (chainBehind) {
+      warnings.push(
+        `Chain is indexed to ${asset.syncedAt ?? "nothing"}, before the action's record time; later activity is not reflected`,
+      );
+    }
     const result: ActionResult = {
       reconciledThrough: flowAsset.syncedAt ?? null,
       warnings,
@@ -2663,6 +2697,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       }),
       breaks: allBreaks,
       ...(cashFlowResult ? { cashInLieu: cashFlowResult } : {}),
+      coverage,
     };
     this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
     return this.action(id);

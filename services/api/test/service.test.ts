@@ -1582,6 +1582,70 @@ describe("Concord", () => {
     expect(verifyPack(tamperedDigest).digestValid).toBe(false);
   });
 
+  it("reports coverage on every reconciliation and action result", async () => {
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\n`,
+    );
+    const reg = concord.importRegister("FUND", {
+      csv: `holder_id,account,units,status\nA,${h1},90,active\nB,${h2},50,active\n`,
+      asOf: at(5),
+    });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    const syncedAt = concord.asset("FUND").syncedAt!;
+    // A start ledger the caller named: history is trusted from the first indexed event.
+    expect(run.coverage).toEqual({ from: at(2), to: syncedAt, mode: "ledger", complete: true });
+    expect(concord.run(run.id).coverage).toEqual(run.coverage);
+
+    // A register ahead of the chain: complete is false.
+    const aheadReg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(500) });
+    const aheadRun = await concord.reconcile("FUND", aheadReg.registerId);
+    expect(aheadRun.coverage).toEqual({ from: at(2), to: syncedAt, mode: "ledger", complete: false });
+    expect(aheadRun.warnings).toContainEqual(expect.stringContaining("Chain is indexed to"));
+
+    // A register before history start: complete is false.
+    const earlyReg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(1) });
+    expect((await concord.reconcile("FUND", earlyReg.registerId)).coverage.complete).toBe(false);
+
+    // An action inside the indexed range is complete.
+    const split = await concord.createAction("FUND", { type: "split", recordTime: at(35), num: "2", den: "1" });
+    expect(split.result!.coverage).toEqual({ from: at(2), to: syncedAt, mode: "ledger", complete: true });
+
+    // An action whose record time is before history start is not.
+    const early = await concord.createAction("FUND", { type: "split", recordTime: at(1), num: "2", den: "1" });
+    expect(early.result!.coverage).toEqual({ from: at(2), to: syncedAt, mode: "ledger", complete: false });
+
+    // Both travel in the audit pack.
+    const pack = concord.auditExport("FUND");
+    expect(pack.reconciliations.every((r) => typeof r.coverage.complete === "boolean")).toBe(true);
+    expect(pack.corporateActions.find((a) => a.id === split.id)!.result!.coverage.complete).toBe(true);
+  });
+
+  it("reports baseline coverage from the first event after the opening balances", async () => {
+    const other = key();
+    chain.latest = 200;
+    chain.baselineResult = {
+      ledger: 150,
+      openings: new Map([[h1, { amount: u(70), authorized: true, asOfLedger: 150 }]]),
+    };
+    const asset = await concord.watchAsset({ network: "testnet", asset: `BASE:${other}` });
+    chain.push(asset.id, "transfer", 151, { from: h1, to: h2, amount: u(5) });
+    await concord.sync("BASE");
+    const syncedAt = concord.asset("BASE").syncedAt!;
+
+    const reg = concord.importRegister("BASE", { csv: `holder_id,account,units\nA,${h1},65\nB,${h2},5\n`, asOf: at(160) });
+    expect((await concord.reconcile("BASE", reg.registerId)).coverage).toEqual({
+      from: at(151),
+      to: syncedAt,
+      mode: "baseline",
+      complete: true,
+    });
+    const earlyReg = concord.importRegister("BASE", { csv: `holder_id,account,units\nA,${h1},70\n`, asOf: at(100) });
+    expect((await concord.reconcile("BASE", earlyReg.registerId)).coverage.complete).toBe(false);
+    const action = await concord.createAction("BASE", { type: "split", recordTime: at(100), num: "2", den: "1" });
+    expect(action.result!.coverage).toMatchObject({ mode: "baseline", complete: false });
+  });
+
   it("keeps the audit pack inside the published schema", async () => {
     await concord.sync("FUND");
     concord.importJournal(
@@ -1713,6 +1777,10 @@ describe("Concord", () => {
         "corporateActions[].result.breaks[].severity",
         "corporateActions[].result.breaks[].status",
         "corporateActions[].result.breaks[].type",
+        "corporateActions[].result.coverage.complete",
+        "corporateActions[].result.coverage.from",
+        "corporateActions[].result.coverage.mode",
+        "corporateActions[].result.coverage.to",
         "corporateActions[].result.flowAsset.code",
         "corporateActions[].result.flowAsset.id",
         "corporateActions[].result.lines[]",
@@ -1794,6 +1862,10 @@ describe("Concord", () => {
         "reconciliations[].chainBehind",
         "reconciliations[].chainLedger",
         "reconciliations[].chainSyncedAt",
+        "reconciliations[].coverage.complete",
+        "reconciliations[].coverage.from",
+        "reconciliations[].coverage.mode",
+        "reconciliations[].coverage.to",
         "reconciliations[].createdAt",
         "reconciliations[].id",
         "reconciliations[].lines[]",
