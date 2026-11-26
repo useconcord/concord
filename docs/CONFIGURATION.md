@@ -27,26 +27,29 @@ value.
 | Variable | Default | Accepted values | Rejected when |
 |---|---|---|---|
 | `CONCORD_HOST` | `127.0.0.1` | An address to listen on, e.g. `0.0.0.0` for all interfaces | Not checked |
-| `CONCORD_PORT` | `PORT`, then `4400` | A whole number, 1 or more | Not a whole number, or below 1 |
+| `CONCORD_PORT` | `PORT`, then `4400` | A whole number, 1 to 65535 | Not a whole number, below 1, or above 65535 |
 | `PORT` | `4400` | As `CONCORD_PORT`. Read only when `CONCORD_PORT` is unset or empty | As `CONCORD_PORT` |
 | `CONCORD_PUBLIC_URL` | `RENDER_EXTERNAL_URL`, then `http://<host>:<port>` | An absolute URL with no path, query or fragment (a trailing `/` is fine) | Not a URL, or it carries a path, query or fragment |
 | `RENDER_EXTERNAL_URL` | Set by Render | As `CONCORD_PUBLIC_URL`. Read only when `CONCORD_PUBLIC_URL` is unset or empty | As `CONCORD_PUBLIC_URL` |
-| `CONCORD_TRUST_PROXY` | `0` | A whole number of proxy hops, 0 or more | Not a whole number, or below 0 |
+| `CONCORD_TRUST_PROXY` | `0` | A whole number of proxy hops, 0 to 10 | Not a whole number, below 0, or above 10 |
 | `CONCORD_WEB_DIR` | `<repo>/apps/web/dist` | A directory holding the built dashboard. A relative path is resolved against the repository root, not the working directory | Not checked |
 | `CONCORD_DATA_DIR` | `<repo>/data` | A directory on a local disk. A relative path is resolved against the repository root, not the working directory | Not checked |
-| `CONCORD_EPHEMERAL` | Off | `1` or `true` turns it on. Anything else, `TRUE` and `yes` included, leaves it off | Never |
+| `CONCORD_EPHEMERAL` | Off | `1`, `true`, `yes` or `on` turns it on; `0`, `false`, `no` or `off` turns it off (case-insensitive) | Anything else |
 | `CONCORD_SIGNUP` | `open` | `open` or `code` | Anything else, including an empty value |
-| `CONCORD_MAX_ASSETS` | `10` | A whole number, 1 or more | Not a whole number, or below 1 |
+| `CONCORD_MAX_ASSETS` | `10` | A whole number, 1 to 1000 | Not a whole number, below 1, or above 1000 |
 | `CONCORD_MAX_INVITES` | `100` | A whole number, 1 to 10000 | Not a whole number, or out of range |
-| `CONCORD_PASSWORD_COST` | `32768:8:3` | `N:r:p`: N a power of two from 16384 to 1048576, r from 8 to 32, p from 1 to 16 | N, r or p is missing or out of range |
+| `CONCORD_PASSWORD_COST` | `32768:8:3` | `N:r:p`: N a power of two from 16384 to 1048576, r from 8 to 32, p from 1 to 16 | N, r or p is missing or out of range, or the factors need more than 128 MiB of scrypt memory |
 | `CONCORD_GOOGLE_CLIENT_ID` | Unset (Google sign-in off) | An OAuth client id | Only one of the pair is set |
 | `CONCORD_GOOGLE_CLIENT_SECRET` | Unset (Google sign-in off) | That client's secret | Only one of the pair is set |
+| `CONCORD_GOOGLE_CLIENT_SECRET_FILE` | Unset | Path to a file holding the client secret (Docker or Kubernetes secret mount); one trailing newline is dropped | Set together with `CONCORD_GOOGLE_CLIENT_SECRET`, empty, or the file cannot be read |
 | `CONCORD_DEFAULT_NETWORK` | `mainnet` | `mainnet` or `testnet` | Anything else, including an empty value |
 | `CONCORD_MAINNET_RPC_URLS` | Three free public endpoints (below) | Comma-separated `http`/`https` URLs | Any entry is not an `http`/`https` URL |
 | `CONCORD_TESTNET_RPC_URLS` | `https://soroban-testnet.stellar.org` | As above | As above |
 | `CONCORD_MAINNET_HORIZON_URLS` | `https://horizon.stellar.org` | As above | As above |
 | `CONCORD_TESTNET_HORIZON_URLS` | `https://horizon-testnet.stellar.org` | As above | As above |
-| `CONCORD_RPC_HEADERS` | None | JSON: `{"<host>": {"<header>": "<value>"}}` | Not valid JSON |
+| `CONCORD_RPC_HEADERS` | None | JSON: `{"<host>": {"<header>": "<value>"}}` | Not valid JSON, or a host does not map to an object of string header values |
+| `CONCORD_RPC_HEADERS_FILE` | Unset | Path to a file holding the `CONCORD_RPC_HEADERS` JSON; one trailing newline is dropped | Set together with `CONCORD_RPC_HEADERS`, empty, the file cannot be read, or its contents fail the checks above |
+| `CONCORD_USER_AGENT_SUFFIX` | Unset (no suffix) | A contact string, at most 120 printable ASCII characters, e.g. an email address. Appended to the User-Agent on RPC and Horizon requests | Longer than 120 characters, or a character outside printable ASCII |
 | `CONCORD_SYNC_INTERVAL` | `30` | Seconds between indexer passes. `0` turns the indexer off | Not a whole number, or below 0 |
 | `CONCORD_ORG` | None | A workspace id, or a workspace's exact name | When a command needs a workspace and the value matches none, or matches more than one by name |
 
@@ -100,9 +103,8 @@ An empty value (`NAME=`) does not always mean unset:
   start-up warning. It changes nothing about storage. `render.yaml` sets it, because Render's
   free plan has no persistent disk.
 - **Relative paths.** A relative `CONCORD_DATA_DIR` or `CONCORD_WEB_DIR` is resolved against the
-  process's working directory, not the repository root. `pnpm start`, `pnpm dev` and
-  `pnpm concord` run in `services/api`, so `CONCORD_DATA_DIR=./data` there means
-  `services/api/data`. Use absolute paths. The defaults are already absolute.
+  repository root, not the working directory, so `CONCORD_DATA_DIR=./data` means `<repo>/data`
+  wherever the command runs from. The defaults are already absolute.
 
 ### Sign-up and accounts
 
@@ -133,8 +135,11 @@ An empty value (`NAME=`) does not always mean unset:
   `Retry-After` asks for, between 1 and 60 seconds.
 - **`CONCORD_RPC_HEADERS`.** Adds headers to every request sent to a host, for providers that
   take an API key by header. The key is the URL's host, including any port that is not the
-  default. The headers apply to RPC and Horizon endpoints alike, on both networks. Only the
-  outer JSON is checked; see the security notes.
+  default. The headers apply to RPC and Horizon endpoints alike, on both networks. The
+  structure is checked at start-up; see the security notes.
+- **`CONCORD_USER_AGENT_SUFFIX`.** Appended to the User-Agent on every RPC and Horizon request,
+  after the built-in identifier, so a provider can contact the operator. It is the same suffix
+  on both networks.
 - **`CONCORD_SYNC_INTERVAL`.** The seconds between background indexer passes. Only the server
   runs the indexer: it makes the first pass at start-up, and passes never overlap. `0` turns it
   off; `pnpm concord sync` still works.
@@ -196,7 +201,8 @@ This usually holds a provider's API key, so treat it as a secret:
 - **Check the host key.** It must equal the endpoint URL's host exactly, port included when the
   port is not the default. A key that matches nothing is silently unused, and the endpoint is
   called without it.
-- **Know what is checked.** Only the outer JSON is parsed at start-up; header names and values
-  are not checked.
+- **Know what is checked.** The JSON structure is checked at start-up: each host must map to an
+  object whose values are strings. The header names and values themselves are not validated
+  beyond that.
 - **What errors show.** When endpoints fail, Concord's error names each one by host and a short
   reason, such as `HTTP 401` (`chain.ts`). Neither the headers nor the URL path appear in it.

@@ -192,7 +192,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
   priv.post("/assets", async (c) => {
     const { ws, actor } = c.var;
     throttle(c, "watch", 20, 10 * 60_000);
-    if (ws.assets().length >= options.maxAssetsPerOrg) {
+    if (ws.quotaAssetCount() >= options.maxAssetsPerOrg) {
       throw new Invalid(`A workspace can watch ${options.maxAssetsPerOrg} assets. Stop watching one to add another.`);
     }
     const input = await jsonBody<{
@@ -202,6 +202,8 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
       ignore?: string[];
       decimals?: number;
       fromLedger?: number;
+      instructionWindowHours?: number;
+      movementWindowHours?: number;
     }>(c);
     if (!isNetworkName(input.network)) throw new Invalid("network must be mainnet or testnet");
     // Without fromLedger the service works out where to start. With one it replays from there, as
@@ -214,6 +216,8 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
         ...(input.ignore !== undefined ? { ignore: input.ignore } : {}),
         ...(input.decimals !== undefined ? { decimals: input.decimals } : {}),
         ...(input.fromLedger !== undefined ? { fromLedger: input.fromLedger } : {}),
+        ...(input.instructionWindowHours !== undefined ? { instructionWindowHours: input.instructionWindowHours } : {}),
+        ...(input.movementWindowHours !== undefined ? { movementWindowHours: input.movementWindowHours } : {}),
       },
       { defer: true, actor },
     );
@@ -221,7 +225,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
   });
   priv.get("/assets/:id", (c) => c.json(c.var.ws.assetSummary(c.var.ws.asset(id(c)))));
   priv.patch("/assets/:id", async (c) =>
-    c.json(c.var.ws.updateAsset(id(c), await jsonBody<{ name?: string; ignore?: string[] }>(c))),
+    c.json(c.var.ws.updateAsset(id(c), await jsonBody<{ name?: string; ignore?: string[]; instructionWindowHours?: number; movementWindowHours?: number }>(c))),
   );
   priv.delete("/assets/:id", async (c) => {
     owner(c);
@@ -281,14 +285,14 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json({ ok: true });
   });
   priv.post("/assets/:id/journal", async (c) => {
-    const input = await jsonBody<{ csv: string }>(c);
+    const input = await jsonBody<{ csv: string; mode?: "merge" | "replace"; allowPartial?: boolean }>(c);
     if (typeof input.csv !== "string") throw new Invalid("csv is required");
-    return c.json(c.var.ws.importJournal(id(c), input.csv), 201);
+    return c.json(c.var.ws.importJournal(id(c), input.csv, { mode: input.mode, allowPartial: input.allowPartial }), 201);
   });
   priv.post("/assets/:id/instructions", async (c) => {
-    const input = await jsonBody<{ csv: string }>(c);
+    const input = await jsonBody<{ csv: string; mode?: "merge" | "replace" }>(c);
     if (typeof input.csv !== "string") throw new Invalid("csv is required");
-    return c.json(c.var.ws.importInstructions(id(c), input.csv), 201);
+    return c.json(c.var.ws.importInstructions(id(c), input.csv, { ...(input.mode !== undefined ? { mode: input.mode } : {}) }), 201);
   });
 
   // ── reconciliation ────────────────────────────────────────────────────────
@@ -305,6 +309,10 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json(await c.var.ws.reconcile(id(c), input.registerId, c.var.actor), 201);
   });
   priv.get("/reconciliations/:id", (c) => c.json(c.var.ws.run(numeric(c, "id"))));
+  priv.get("/reconciliations/:id/report", (c) => {
+    c.header("content-type", "text/html; charset=utf-8");
+    return c.body(c.var.ws.runReport(numeric(c, "id")));
+  });
 
   priv.get("/assets/:id/actions", (c) => c.json(c.var.ws.actions(id(c))));
   priv.post("/assets/:id/actions", async (c) => {
@@ -340,7 +348,16 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     const name = `concord-${fileSafe(asset.code)}`;
     const stamp = new Date().toISOString().slice(0, 10);
     if (section) {
-      const csv = ws.exportCsv(asset.id, section, period(c));
+      const actionIdParam = c.req.query("id");
+      const opts: { from?: string; to?: string; id?: number } = period(c);
+      if (actionIdParam !== undefined) {
+        const parsedId = Number(actionIdParam);
+        if (!Number.isSafeInteger(parsedId) || parsedId < 1) {
+          throw new Invalid("id must be a positive integer");
+        }
+        opts.id = parsedId;
+      }
+      const csv = ws.exportCsv(asset.id, section, opts);
       c.header("content-type", "text/csv; charset=utf-8");
       c.header("content-disposition", `attachment; filename="${name}-${fileSafe(section)}-${stamp}.csv"`);
       return c.body(csv);

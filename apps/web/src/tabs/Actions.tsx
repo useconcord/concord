@@ -57,6 +57,18 @@ function NewAction({ asset, assets, onDone }: { asset: AssetSummary; assets: Ass
         });
       }}
     >
+      <p className="text-[13px]">
+        Recording a dividend, split or redemption? The{" "}
+        <a
+          href="https://github.com/useconcord/concord/blob/main/docs/corporate-actions-guide.md"
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-accent hover:underline"
+        >
+          corporate actions guide
+        </a>{" "}
+        explains each field with worked examples.
+      </p>
       <div className="grid gap-4 md:grid-cols-3">
         <Field label="Type">
           <select

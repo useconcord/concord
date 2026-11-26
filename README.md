@@ -22,7 +22,7 @@ sleeps (after about fifteen idle minutes), and it can take a minute to wake. Do 
 in it. [`docs/deploy/render.md`](./docs/deploy/render.md) covers rebuilding the practice workspace.
 
 What it does, what it flags, why now and who it is for: [`docs/overview.md`](./docs/overview.md).
-What it deliberately does not do: [`docs/limits.md`](./docs/limits.md).
+What it deliberately does not do: [`docs/limits.md`](./docs/limits.md); opening balances and per-holder cutoffs: [`docs/baselines.md`](./docs/baselines.md).
 
 ## Run it
 
@@ -43,8 +43,8 @@ side comes from the ledger, and the register side is the file you upload. The
 
 Configuration is by environment variable, or a `.env` file beside `package.json`; see
 [`.env.example`](./.env.example) and [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) for every
-variable. With nothing set, mainnet uses free public RPC endpoints, which suit light use; point
-`CONCORD_MAINNET_RPC_URLS` at a provider for anything more. Where the databases live and what is
+variable. Mainnet defaults to free public RPC endpoints for light use. For higher volumes,
+[configure a paid Stellar RPC provider](./docs/rpc-providers.md). Where the databases live and what is
 safe to delete: [`docs/data-directory.md`](./docs/data-directory.md). What personal data is
 stored and how to remove it: [`docs/privacy.md`](./docs/privacy.md).
 
@@ -112,7 +112,7 @@ TLS: [nginx and Certbot](./docs/deploy/nginx.md), [Caddy](./docs/deploy/caddy.md
 [Docker Compose](./docs/deploy/docker-compose.md) (copy `.env.example` to `.env` at the repository
 root, then `docker compose -f deploy/docker-compose.yml up -d --build`), [Fly.io](./docs/deploy/fly.md) (with the [single-machine template](./deploy/fly.toml)),
 [systemd](./docs/deploy/systemd.md). Running it: [monitoring](./docs/monitoring.md),
-[versioning](./docs/versioning.md), [upgrading and rolling back](./docs/upgrading.md).
+[backup and restore](./docs/backup-restore.md), [versioning](./docs/versioning.md), [upgrading and rolling back](./docs/upgrading.md).
 
 ## Layout and more documentation
 
@@ -123,8 +123,9 @@ Stellar concepts for finance and compliance readers: [`docs/glossary-stellar.md`
 Architecture decisions: [`docs/adr/`](./docs/adr/README.md).
 
 - [`docs/overview.md`](./docs/overview.md): what it does, what it flags, why now, who buys it.
-- [`docs/limits.md`](./docs/limits.md): the deliberate limits; [`docs/ROADMAP.md`](./docs/ROADMAP.md)
+- [`docs/limits.md`](./docs/limits.md): the deliberate limits (fractions of the smallest unit in splits drop unless cash in lieu is configured); [`docs/ROADMAP.md`](./docs/ROADMAP.md)
   says which are next to fall.
+- [`docs/baselines.md`](./docs/baselines.md): opening balances (baselines), Horizon paging, per-holder cutoffs, and blind spots.
 - [`docs/prior-art.md`](./docs/prior-art.md): the prior-art check against the brief's first kill
   criterion (someone already ships this for Stellar): dated sources, kill criteria, re-check schedule.
 - [`docs/demo-testnet.md`](./docs/demo-testnet.md): `pnpm demo:testnet` issues a practice asset on
