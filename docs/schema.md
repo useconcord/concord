@@ -188,6 +188,9 @@ One row per reconciliation. Index `runs_asset (asset_id, id)` and `runs_register
 | `register_id` | INTEGER | → `registers.id`. NOT NULL: a run always belongs to a register. |
 | `as_of` | TEXT | The register's as-of time. |
 | `created_by`, `created_at` | TEXT | |
+| `summary` | TEXT (JSON) | Copy of `result.summary` (migration 7), so the runs list never parses `result`. |
+| `status`, `chain_behind` | TEXT, INTEGER | Copies of `result.status` and `result.chainBehind` (migration 7). |
+| `open_breaks` | INTEGER | Breaks not signed off (migration 7). Rewritten for the asset whenever a reconciliation break is signed off or reopened. |
 | `result` | TEXT (JSON) | See below. |
 
 `result` holds the whole outcome, so a past run can be shown without recomputing it:
@@ -226,6 +229,7 @@ Corporate actions. Index `actions_asset (asset_id, record_time)`.
 | `result` | TEXT (JSON), null | Reconciliation of the action, below. |
 | `created_by`, `created_at` | TEXT | |
 | `reconciled_at` | TEXT, null | |
+| `voided_at`, `voided_by`, `void_reason` | TEXT | Set when an action entered in error is voided (migration 8). A voided action is never reconciled again and has no open breaks, but stays in the audit pack with the reason. |
 
 `params` always has `exclude` (array of addresses). A dividend adds `ratePerUnit` (decimal
 string, pay-asset units per whole unit held), `payAsset` (the id of a watched asset, which is
