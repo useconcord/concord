@@ -150,7 +150,7 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   break-history ASSET SCOPE KEY     sign-off history of one break, oldest first
   signoff ASSET --scope recon|controls|action:N --key KEY --status open|acknowledged|resolved
         [--note TEXT] [--run N]
-  verify-pack FILE [--key PEM]
+  verify-pack FILE [--key PEM]     check an audit pack's digest, and its signature with --key
 
 Operator commands.
 

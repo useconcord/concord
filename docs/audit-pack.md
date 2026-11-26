@@ -71,9 +71,9 @@ _Source: `services/api/src/concord.ts`, `auditExport` (`inPeriod = (t) => t >= f
 
 ### The `sha256` digest
 
-The digest covers `asset`, `period`, `holdings`, `registers`, `reconciliations`, `corporateActions`, `controls`, `signoffHistory` and `events`, serialised with `JSON.stringify` in that key order. It does not cover `generatedAt`, `generator` or `sha256` itself. Two packs built from the same data and period have the same digest.
+The digest is the SHA-256 of the pack serialised as RFC 8785 canonical JSON, leaving out `sha256`, `generatedAt`, `keyId` and `signature`. It covers `generator`, `asset`, `period`, `holdings`, `registers`, `reconciliations`, `corporateActions`, `controls`, `signoffHistory` and `events`. Canonical JSON sorts every object's keys by UTF-16 code units and fixes the number formatting, so key order in the file does not change the digest, while editing any value does. Two packs built from the same data and period have the same digest. Check a pack file with `concord verify-pack FILE` (add `--key PUBLIC.pem` to check its signature too), or the `verifyPack` helper.
 
-_Source: `services/api/src/concord.ts`, `auditExport`, `holdings`, `controls`, `eventJson`._
+_Source: `services/api/src/concord.ts`, `auditExport`, `canonicalJson`, `auditPackDigest`, `verifyPack`, `holdings`, `controls`, `eventJson`._
 
 ## CSV sections
 
