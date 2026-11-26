@@ -771,6 +771,27 @@ describe("Concord", () => {
     expect(assetRows()).toBe(before + 1);
   });
 
+  it("refuses an asset the network does not know, with classic and contract wording, and writes no row", async () => {
+    const unknownChain = new FakeChain();
+    // An empty known set makes describe() answer undefined for everything.
+    unknownChain.known = new Set();
+    const fresh = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain: unknownChain } });
+    const contractId = StrKey.encodeContract(Buffer.alloc(32, 7));
+
+    for (const options of [{}, { defer: true }]) {
+      const classic = await fresh.watchAsset({ network: "testnet", asset: `FUND:${issuer}` }, options).catch((err: unknown) => err);
+      expect(classic).toBeInstanceOf(Invalid);
+      expect((classic as Error).message).toBe("testnet has no asset FUND from that issuer");
+
+      const contract = await fresh
+        .watchAsset({ network: "testnet", asset: contractId, decimals: 7 }, options)
+        .catch((err: unknown) => err);
+      expect(contract).toBeInstanceOf(Invalid);
+      expect((contract as Error).message).toBe("testnet has no contract with that id");
+    }
+    expect(fresh.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM assets")!.n).toBe(0);
+  });
+
   it("rejects a register from another asset and an unknown register id", async () => {
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
     await concord.watchAsset({ network: "testnet", asset: `OTHER:${issuer}`, fromLedger: 1 });
