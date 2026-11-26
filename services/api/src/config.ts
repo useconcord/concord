@@ -51,6 +51,7 @@ export interface Config {
   /** Holds control.db and one database per workspace under orgs/. */
   dataDir: string;
   sqliteSynchronous: SqliteSynchronous;
+  checkOnOpen: boolean;
   host: string;
   port: number;
   /** Seconds between indexer passes. 0 disables the background indexer. */
@@ -83,7 +84,7 @@ const RETIRED: Record<string, string> = {
 
 /** Recognized runtime settings, including the CLI-only workspace selector. */
 const KNOWN_CONCORD_SETTINGS = [
-  "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
+  "CONCORD_CHECK_ON_OPEN", "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
   "CONCORD_GOOGLE_CLIENT_ID", "CONCORD_GOOGLE_CLIENT_SECRET", "CONCORD_GOOGLE_CLIENT_SECRET_FILE", "CONCORD_HOST",
   "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
   "CONCORD_MAX_ASSETS", "CONCORD_MAX_INVITES", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
@@ -294,6 +295,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
     defaultNetwork,
     dataDir: env.CONCORD_DATA_DIR ? resolve(ROOT, env.CONCORD_DATA_DIR) : resolve(ROOT, "data"),
     sqliteSynchronous,
+    checkOnOpen: flag(env, "CONCORD_CHECK_ON_OPEN"),
     host,
     port,
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),
