@@ -43,9 +43,51 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("opens the v3 workspace database with the actions_due index", () => {
+    upgraded("org-v3.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v3");
+    });
+  });
+
+  it("opens the v2 workspace database with default matching windows and keeps v4 custom windows", () => {
+    upgraded("org-v2.db", ORG_MIGRATIONS, (db) => {
+      const row = db.get<{ instruction_window_hours: number; movement_window_hours: number }>(
+        "SELECT instruction_window_hours, movement_window_hours FROM assets WHERE id = 'usd-mainnet'",
+      );
+      expect(row).toEqual({ instruction_window_hours: 72, movement_window_hours: 24 });
+    });
+    upgraded("org-v4.db", ORG_MIGRATIONS, (db) => {
+      const row = db.get<{ instruction_window_hours: number; movement_window_hours: number }>(
+        "SELECT instruction_window_hours, movement_window_hours FROM assets WHERE id = 'usd-mainnet'",
+      );
+      expect(row).toEqual({ instruction_window_hours: 48, movement_window_hours: 12 });
+    });
+  });
+
+  it("opens the v5 workspace database and reads the tolerance column", () => {
+    upgraded("org-v5.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v5");
+      expect(db.get<{ tolerance: string }>("SELECT tolerance FROM assets WHERE id = 'usd-mainnet'")?.tolerance).toBe("5");
+    });
+  });
+
   it("backfills sign-off history from the v1 notes when upgrading", () => {
     upgraded("org-v1.db", ORG_MIGRATIONS, (db) => {
       expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM break_note_history")?.n).toBe(0);
+    });
+  });
+
+  it("adds an empty holdings checkpoint table and the event ledger index to a v5 workspace database", () => {
+    upgraded("org-v5.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM holdings_checkpoints")?.n).toBe(0);
+      expect(db.get("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'events_asset_ledger'")).toBeDefined();
+    });
+  });
+
+  it("opens the v6 workspace database and keeps its holdings checkpoints", () => {
+    upgraded("org-v6.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v6");
+      expect(db.get<{ ledger: number }>("SELECT ledger FROM holdings_checkpoints WHERE asset_id = 'usd-mainnet'")?.ledger).toBe(100);
     });
   });
 
