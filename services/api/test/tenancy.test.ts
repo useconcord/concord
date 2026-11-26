@@ -33,6 +33,7 @@ const ORG_MIGRATION_DIGESTS = [
   "0182ab60eee2caac4eaf616ae083065f7e05b8e2d68980514545950eb56cd80f",
   "598b1578ce4051f043832d5b91d0df06043afb64e1c6a0fad190a2a733174155",
   "c4f44d594aab43a45f28af28cd2085455394f0eb77e0bea99bc19aa0456d8b0f",
+  "269164d28b84cd2d70564ca514e63c810698cb87363163119a5c9dabea296a6f",
 ];
 const CONTROL_MIGRATION_DIGESTS = ["ba25bc5419cfcc376d2e7ff027845b2da4b789d9c7e966424b70cdfbbb90a422"];
 
@@ -128,6 +129,7 @@ function probes(s: Seeded): Record<string, Probe> {
     "GET /api/assets/:id/actions": p("GET", `/api/assets/${id}/actions`),
     "POST /api/assets/:id/actions": p("POST", `/api/assets/${id}/actions`, { type: "split", recordTime: at(1), num: "2", den: "1" }),
     "GET /api/actions/:id": p("GET", `/api/actions/${s.actionId}`),
+    "DELETE /api/actions/:id": p("DELETE", `/api/actions/${s.actionId}`),
     "POST /api/actions/:id/reconcile": p("POST", `/api/actions/${s.actionId}/reconcile`),
     "POST /api/actions/:id/void": p("POST", `/api/actions/${s.actionId}/void`, { reason: "tenancy probe" }),
     "GET /api/assets/:id/controls": p("GET", `/api/assets/${id}/controls`),
@@ -191,6 +193,8 @@ describe("workspace isolation", () => {
     const members = await s.a.json<{ members: Array<{ email: string; role: string }> }>("/api/org/members");
     expect(members.members).toEqual([expect.objectContaining({ email: "ann@alpha.test", role: "owner" })]);
     expect((await s.a.json<{ name: string }>(`/api/assets/${s.assetId}`)).name).toBe("FUND");
+    // B's DELETE probe on A's action id must leave A's action in place.
+    expect((await s.a.call(`/api/actions/${s.actionId}`)).status).toBe(200);
   });
 
   it("turns away every workspace route without a session", async () => {

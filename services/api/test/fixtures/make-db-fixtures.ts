@@ -161,6 +161,13 @@ build(join(outDir, "org-v10.db"), ORG_MIGRATIONS.slice(0, 10), (db) => {
     VALUES (1, 'usd-mainnet', '2024-01-03', 'upload', 'abc', '[]', 'Alice <alice@example.org>', 'u1', '2024-01-03T00:00:00Z')`);
 });
 
+// v11: a dividend's pay asset that nobody watches is watched automatically as a hidden, flow-only asset
+build(join(outDir, "org-v11.db"), ORG_MIGRATIONS.slice(0, 11), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v11')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, flow_only, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', 1, '2024-01-01T00:00:00Z')`);
+});
+
 build(join(outDir, "control-v1.db"), CONTROL_MIGRATIONS.slice(0, 1), (db) => {
   db.exec(`INSERT INTO users (id, email, name, email_verified, created_at)
     VALUES ('u1', 'alice@example.org', 'Alice', 1, '2024-01-01T00:00:00Z')`);

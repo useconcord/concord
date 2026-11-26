@@ -87,6 +87,7 @@ One row per watched asset.
 | `ignore_addresses` | TEXT (JSON) | Array of address strings left out of reconciliation. Default `'[]'`. |
 | `created_by` | TEXT, null | Label of the actor who started watching (`cli:<user>` or a session's person). |
 | `created_at` | TEXT | |
+| `flow_only` | INTEGER | `1` for a dividend's pay asset that Concord watched on its own so the payments can be seen (migration 11). Hidden from the asset list; watching it explicitly makes it a normal asset. |
 
 ### `events`
 

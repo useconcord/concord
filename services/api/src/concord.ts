@@ -87,6 +87,7 @@ export interface AssetRecord {
   tolerance?: string;
   instructionWindowHours: number;
   movementWindowHours: number;
+  flowOnly?: boolean;
   createdAt: string;
 }
 
@@ -486,6 +487,7 @@ function toAsset(row: Row): AssetRecord {
   if (row.sync_error) asset.syncError = String(row.sync_error);
   if (row.sync_error_at) asset.syncErrorAt = String(row.sync_error_at);
   if (row.tolerance) asset.tolerance = String(row.tolerance);
+  if (row.flow_only) asset.flowOnly = true;
   return asset;
 }
 
@@ -719,11 +721,15 @@ export class Concord {
     return toAsset(byCode[0]);
   }
 
-  assets(network?: NetworkName): AssetRecord[] {
-    const rows = network
-      ? this.db.all("SELECT * FROM assets WHERE network = ? ORDER BY created_at", network)
-      : this.db.all("SELECT * FROM assets ORDER BY created_at");
-    return rows.map(toAsset);
+  assets(network?: NetworkName, options: { includeFlowOnly?: boolean } = {}): AssetRecord[] {
+    const where = options.includeFlowOnly ? [] : ["flow_only = 0"];
+    const params: string[] = [];
+    if (network) {
+      where.push("network = ?");
+      params.push(network);
+    }
+    const clause = where.length ? `WHERE ${where.join(" AND ")} ` : "";
+    return this.db.all(`SELECT * FROM assets ${clause}ORDER BY created_at`, ...params).map(toAsset);
   }
 
   /**
@@ -765,7 +771,7 @@ export class Concord {
    * Start watching an asset. With `defer`, the call returns once the asset is recorded and the
    * opening balances and first pass happen in the background; otherwise it waits for them.
    */
-  async watchAsset(input: WatchInput, options: { defer?: boolean; actor?: Actor } = {}): Promise<AssetRecord> {
+  async watchAsset(input: WatchInput, options: { defer?: boolean; actor?: Actor; flowOnly?: boolean } = {}): Promise<AssetRecord> {
     const { passphrase } = this.handle(input.network);
     const chain = this.requireChain(input.network);
     let resolved: ResolvedAsset;
@@ -774,7 +780,8 @@ export class Concord {
     } catch (err) {
       throw new Invalid((err as Error).message);
     }
-    if (this.removing.has(resolved.id) || this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
+    const alreadyEarly = this.db.get("SELECT id, flow_only FROM assets WHERE id = ?", resolved.id);
+    if (this.removing.has(resolved.id) || (alreadyEarly && (!alreadyEarly.flow_only || options.flowOnly))) {
       throw new Invalid(`${resolved.code} is already watched`);
     }
     const ignore = addresses(input.ignore, "ignore");
@@ -818,13 +825,27 @@ export class Concord {
 
     // The check above ran before the awaits on the chain; another request may have watched the
     // same asset since. Nothing awaits between this check and the insert.
-    if (this.removing.has(resolved.id) || this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
+    const removing = this.removing.has(resolved.id);
+    const existingAsset = this.db.get("SELECT id, flow_only FROM assets WHERE id = ?", resolved.id);
+    if (removing || existingAsset) {
+      if (!removing && existingAsset?.flow_only && !options.flowOnly) {
+        this.db.write(
+          "UPDATE assets SET flow_only = 0, name = ?, ignore_addresses = ?, instruction_window_hours = ?, movement_window_hours = ? WHERE id = ?",
+          name ?? resolved.code,
+          JSON.stringify(ignore),
+          instructionWindowHours,
+          movementWindowHours,
+          resolved.id,
+        );
+        this.touch(resolved.id);
+        return this.asset(resolved.id);
+      }
       throw new Invalid(`${resolved.code} is already watched`);
     }
     try {
       this.db.insert(
-        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, flow_only, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?, ?)`,
         resolved.id,
         input.network,
         resolved.code,
@@ -836,6 +857,7 @@ export class Concord {
         JSON.stringify(ignore),
         instructionWindowHours,
         movementWindowHours,
+        options.flowOnly ? 1 : 0,
         options.actor?.label ?? null,
         now(),
       );
@@ -956,6 +978,7 @@ export class Concord {
     } finally {
       this.removing.delete(asset.id);
     }
+    await this.pruneUnusedFlowOnlyAssets();
   }
 
   /**
@@ -1014,7 +1037,7 @@ export class Concord {
     const budget = this.syncAssetBudgetMs > 0 ? { budgetMs: this.syncAssetBudgetMs } : {};
     await Promise.all(
       this.networkNames().map(async (network) => {
-        const assets = this.assets(network);
+        const assets = this.assets(network, { includeFlowOnly: true });
         if (assets.length === 0) return;
         // One look at the chain's range serves every asset on the network.
         const head = await this.networks[network]?.chain?.latestLedger().catch(() => undefined);
@@ -2542,9 +2565,6 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         throw new Invalid("dividend needs ratePerUnit as a decimal");
       }
       params.ratePerUnit = input.ratePerUnit;
-      const pay = input.payAsset ? this.asset(String(input.payAsset)) : asset;
-      if (pay.network !== asset.network) throw new Invalid("the pay asset must be on the same network");
-      params.payAsset = pay.id;
       const payer = address(input.payer, "payer");
       if (payer) params.payer = payer;
       if (input.rounding !== undefined && input.rounding !== "floor" && input.rounding !== "half-up") {
@@ -2572,6 +2592,42 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         }
         params.withholdingOverrides = overrides;
       }
+
+      let pay: AssetRecord;
+      if (!input.payAsset) {
+        pay = asset;
+      } else {
+        const rawPay = String(input.payAsset).trim();
+        const byId = this.db.get("SELECT * FROM assets WHERE id = ?", rawPay);
+        if (byId) {
+          pay = toAsset(byId);
+        } else {
+          const byCode = this.db.all("SELECT * FROM assets WHERE code = ? COLLATE NOCASE LIMIT 2", rawPay);
+          if (byCode.length > 1) throw new Invalid(`more than one watched asset is called ${rawPay}; use its contract id`);
+          if (byCode[0]) {
+            pay = toAsset(byCode[0]);
+          } else {
+            let resolved: ResolvedAsset;
+            try {
+              resolved = resolveAsset(rawPay, this.handle(asset.network).passphrase);
+            } catch (err) {
+              throw new Invalid((err as Error).message);
+            }
+            const existing = this.db.get("SELECT * FROM assets WHERE id = ?", resolved.id);
+            if (existing) {
+              pay = toAsset(existing);
+            } else {
+              const head = await this.requireChain(asset.network).latestLedger();
+              pay = await this.watchAsset(
+                { network: asset.network, asset: rawPay, baseline: false, fromLedger: head.oldest },
+                { actor, flowOnly: true },
+              );
+            }
+          }
+        }
+        if (pay.network !== asset.network) throw new Invalid("the pay asset must be on the same network");
+      }
+      params.payAsset = pay.id;
     } else if (input.type === "split" || input.type === "redemption") {
       if (!input.num || !input.den || !/^\d+$/.test(input.num) || !/^\d+$/.test(input.den)) {
         throw new Invalid(`${input.type} needs whole-number num and den`);
@@ -2952,6 +3008,33 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     return this.db
       .all<{ id: number }>("SELECT id FROM actions WHERE asset_id = ? ORDER BY record_time DESC, id DESC", asset.id)
       .map(({ id }) => this.action(id));
+  }
+
+  /** Delete or void a corporate action and remove any flow-only pay asset no longer referenced. */
+  async deleteAction(id: number): Promise<void> {
+    const row = this.db.get<{ id: number; asset_id: string }>("SELECT id, asset_id FROM actions WHERE id = ?", id);
+    if (!row) throw new NotFound(`corporate action ${id} not found`);
+    this.db.tx(() => {
+      this.db.write("DELETE FROM break_notes WHERE asset_id = ? AND scope = ?", String(row.asset_id), `action:${id}`);
+      this.db.write("DELETE FROM actions WHERE id = ?", id);
+    });
+    await this.pruneUnusedFlowOnlyAssets();
+  }
+
+  private async pruneUnusedFlowOnlyAssets(): Promise<void> {
+    const referenced = new Set(
+      this.db
+        .all<{ params: string }>("SELECT params FROM actions WHERE type = 'dividend'")
+        .map((r) => (JSON.parse(r.params) as { payAsset?: string }).payAsset)
+        .filter((v): v is string => typeof v === "string"),
+    );
+    const hidden = this.db.all<{ id: string }>("SELECT id FROM assets WHERE flow_only = 1");
+    for (const h of hidden) {
+      if (!referenced.has(h.id)) {
+        this.db.write("DELETE FROM assets WHERE id = ?", String(h.id));
+        this.touch(String(h.id));
+      }
+    }
   }
 
   /**
