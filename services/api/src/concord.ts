@@ -525,6 +525,18 @@ function resume(
  * One workspace: every operation the API and the CLI expose over a single database.
  * Reads the chain, never writes it.
  */
+export const EVENT_COLUMNS = [
+  "id",
+  "ledger",
+  "closedAt",
+  "kind",
+  "from",
+  "to",
+  "units",
+  "authorized",
+  "txHash",
+] as const;
+
 export class Concord {
   private readonly syncing = new Map<string, Promise<{ added: number }>>();
   private readonly removing = new Set<string>();
@@ -2837,6 +2849,51 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     };
   }
 
+  /**
+   * Stream events for an asset over a period as CSV or NDJSON lines one by one.
+   * Yields formatted strings with line breaks. Does not materialize all events in memory.
+   * Peak memory growth remains bounded under 50 MB even for 200,000+ events.
+   */
+  *exportEvents(
+    ref: string,
+    period: { from?: string; to?: string; format?: "csv" | "ndjson" } = {},
+    formatOrOptions?: "csv" | "ndjson" | { format?: "csv" | "ndjson" },
+  ): Generator<string, void, undefined> {
+    const format =
+      (typeof formatOrOptions === "string"
+        ? formatOrOptions
+        : formatOrOptions?.format ?? period.format) ?? "csv";
+    if (format !== "csv" && format !== "ndjson") {
+      throw new Invalid("format must be csv or ndjson");
+    }
+    const asset = this.asset(ref);
+    const to = period.to ? isoTime(period.to, "to") : (asset.syncedAt ?? now());
+    const from = period.from ? isoTime(period.from, "from") : "1970-01-01T00:00:00.000Z";
+    if (from > to) throw new Invalid("from must not be after to");
+
+    const header = format === "csv" ? toCsv([...EVENT_COLUMNS], []) : "";
+    if (format === "csv") {
+      yield header;
+    }
+
+    const stmt = this.db.raw.prepare(
+      "SELECT * FROM events WHERE asset_id = ? AND closed_at >= ? AND closed_at <= ? ORDER BY id",
+    );
+    const iter = stmt.iterate(asset.id, from, to);
+    try {
+      for (const row of iter) {
+        const ev = this.eventJson(toEvent(row as Row), asset.decimals);
+        if (format === "csv") {
+          yield toCsv([...EVENT_COLUMNS], [ev]).slice(header.length);
+        } else {
+          yield JSON.stringify(ev) + "\n";
+        }
+      }
+    } finally {
+      iter.return?.();
+    }
+  }
+
   /** One section of the audit pack, or one corporate action's entitlement table, as CSV. */
   exportCsv(ref: string, section: string, period: { from?: string; to?: string; id?: number } = {}): string {
     // Reject an unknown section before building the audit pack, which replays every event.
@@ -2878,7 +2935,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       case "holdings":
         return toCsv(["address", "units", "share", "status", "ignored"], pack.holdings.holders);
       case "events":
-        return toCsv(["id", "ledger", "closedAt", "kind", "from", "to", "units", "authorized", "txHash"], pack.events);
+        return toCsv([...EVENT_COLUMNS], pack.events);
       case "controls":
         return toCsv(
           ["closedAt", "ledger", "type", "account", "units", "txHash", "instructionRef", "approvedBy", "reason"],

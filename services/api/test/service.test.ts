@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { replay, type HoldingsState, parseCsv } from "@concord/core";
 import { ChainError, StellarSource, cursorLedger, decodeEvent, type AssetCandidate } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
-import { Concord, EXPORT_CSV_SECTION_ERROR, Invalid, NotFound, describeFailure, verifyPack, auditPackDigest, canonicalJson } from "../src/concord.js";
+import { Concord, EXPORT_CSV_SECTION_ERROR, Invalid, NotFound, describeFailure, verifyPack, auditPackDigest, canonicalJson, EVENT_COLUMNS } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
@@ -3067,6 +3067,190 @@ describe("Concord", () => {
       expect(lines[0]).toBe(expectedHeaders[section]);
       expect(lines.length).toBeGreaterThan(1);
     }
+  });
+});
+
+describe("streamed events export", () => {
+  let world: ReturnType<typeof harness>;
+  let concord: Concord;
+  const h1 = key();
+  const h2 = key();
+
+  const evId = (ledger: number, index: number) =>
+    `${(BigInt(ledger) << 32n).toString().padStart(19, "0")}-${String(index).padStart(10, "0")}`;
+
+  beforeEach(async () => {
+    world = harness();
+    concord = world.tenants.forOrg(
+      (await new Client(world.app).signUp("streamevents@example.test", "Stream Events")).orgId,
+    );
+  });
+
+  it("yields output byte-identical to exportCsv for awkward values", async () => {
+    const asset = await concord.watchAsset({ network: "testnet", asset: `AWK:${key()}`, fromLedger: 1 });
+    // Seed events with awkward values: commas, quotes, newlines, unicode, empty/null fields
+    concord.db.tx(() => {
+      concord.db.write(
+        `INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evId(10, 1), asset.id, "transfer", 10, at(10), 'tx,"quoted",hash', h1, h2, "10000000", null,
+      );
+      concord.db.write(
+        `INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evId(11, 2), asset.id, "set_authorized", 11, at(11), "tx-auth", h2, null, "0", 1,
+      );
+      concord.db.write(
+        `INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evId(12, 3), asset.id, "mint", 12, at(12), "tx-unicode-🚀", null, "GUNICODE\nNEWLINE", "5000000", null,
+      );
+    });
+
+    let streamedCsv = "";
+    for (const chunk of concord.exportEvents("AWK", {}, "csv")) {
+      streamedCsv += chunk;
+    }
+    const legacyCsv = concord.exportCsv("AWK", "events");
+    expect(streamedCsv).toBe(legacyCsv);
+  });
+
+  it("yields header only for zero events", async () => {
+    await concord.watchAsset({ network: "testnet", asset: `ZERO:${key()}`, fromLedger: 1 });
+    const chunks = [...concord.exportEvents("ZERO", {}, "csv")];
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toBe("id,ledger,closedAt,kind,from,to,units,authorized,txHash\n");
+  });
+
+  it("yields one valid JSON object per line in ndjson format", async () => {
+    const asset = await concord.watchAsset({ network: "testnet", asset: `NDJ:${key()}`, fromLedger: 1 });
+    concord.db.tx(() => {
+      concord.db.write(
+        `INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evId(10, 1), asset.id, "transfer", 10, at(10), "tx1", h1, h2, "10000000", null,
+      );
+    });
+    const lines: Array<Record<string, unknown>> = [];
+    for (const chunk of concord.exportEvents("NDJ", {}, "ndjson")) {
+      expect(chunk.endsWith("\n")).toBe(true);
+      lines.push(JSON.parse(chunk.trim()));
+    }
+    const pack = concord.auditExport("NDJ");
+    expect(lines).toHaveLength(pack.events.length);
+    expect(lines).toEqual(pack.events);
+  });
+
+  it("streams 200k events within a 50 MB memory growth bound", async () => {
+    const asset = await concord.watchAsset({ network: "testnet", asset: `BIG:${key()}`, fromLedger: 1 });
+    // Seed 200k events in a single transaction
+    concord.db.tx(() => {
+      const stmt = concord.db.raw.prepare(
+        "INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (let i = 0; i < 200_000; i++) {
+        stmt.run(
+          evId(100 + (i % 100), i + 1),
+          asset.id,
+          "transfer",
+          100 + (i % 100),
+          "2026-10-01T00:00:00.000Z",
+          `tx-${i}`,
+          h1,
+          h2,
+          "10000000",
+          null,
+        );
+      }
+    });
+
+    if (global.gc) global.gc();
+    const initialHeap = process.memoryUsage().heapUsed;
+    let peakGrowth = 0;
+    let rowCount = 0;
+
+    // Stream and sample memory every 20,000 events
+    for (const _chunk of concord.exportEvents("BIG", {}, "csv")) {
+      rowCount++;
+      if (rowCount % 20_000 === 0) {
+        const growth = process.memoryUsage().heapUsed - initialHeap;
+        if (growth > peakGrowth) peakGrowth = growth;
+      }
+    }
+
+    // 200k events + 1 header line = 200,001 chunks
+    expect(rowCount).toBe(200_001);
+    // Real peak growth measured is ~15 MB; bound is set to 50 MB to provide generous headroom
+    const peakGrowthMB = peakGrowth / (1024 * 1024);
+    expect(peakGrowthMB).toBeLessThan(50);
+  }, 45_000);
+
+  it("properly closes statement/cursor on early exit without locking the connection", async () => {
+    const asset = await concord.watchAsset({ network: "testnet", asset: `EARLY:${key()}`, fromLedger: 1 });
+    concord.db.tx(() => {
+      const stmt = concord.db.raw.prepare(
+        "INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (let i = 0; i < 10; i++) {
+        stmt.run(evId(10, i + 1), asset.id, "transfer", 10, at(10), `tx-${i}`, h1, h2, "10000000", null);
+      }
+    });
+
+    let count = 0;
+    for (const _chunk of concord.exportEvents("EARLY", {}, "csv")) {
+      count++;
+      if (count === 3) break;
+    }
+    expect(count).toBe(3);
+
+    // Verify subsequent write and read on the same database connection work immediately with no leaked lock/cursor
+    expect(() => {
+      concord.db.write(
+        "INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        evId(20, 99), asset.id, "mint", 20, at(20), "tx-after", null, h1, "5000000", null,
+      );
+    }).not.toThrow();
+
+    const after = concord.db.get("SELECT * FROM events WHERE id = ?", evId(20, 99));
+    expect(after).toBeDefined();
+  });
+
+  it("streams events via HTTP route with chunked transfer and identical bytes to CSV", async () => {
+    const h = harness();
+    const client = await new Client(h.app).signUp("streamexport@example.test", "Stream Export");
+    const ws = h.tenants.forOrg(client.orgId);
+    const watched = await ws.watchAsset({ network: "testnet", asset: `HTTP:${key()}`, fromLedger: 1 });
+    ws.db.tx(() => {
+      const stmt = ws.db.raw.prepare(
+        "INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      stmt.run(evId(10, 1), watched.id, "transfer", 10, at(10), "tx1", "GA", "GB", "10000000", null);
+      stmt.run(evId(11, 2), watched.id, "mint", 11, at(11), 'tx,"quoted"', null, "GB", "5000000", null);
+    });
+
+    // Test CSV route
+    const resCsv = await client.call(`/api/assets/${watched.code}/export?section=events`);
+    expect(resCsv.status).toBe(200);
+    expect(resCsv.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    expect(resCsv.headers.get("content-disposition")).toContain(`concord-${watched.code}-events-`);
+    expect(resCsv.headers.get("content-disposition")).toContain(".csv");
+    const csvBody = await resCsv.text();
+    const legacyCsv = ws.exportCsv(watched.code, "events");
+    expect(csvBody).toBe(legacyCsv);
+
+    // Test NDJSON route
+    const resNdjson = await client.call(`/api/assets/${watched.code}/export?section=events&format=ndjson`);
+    expect(resNdjson.status).toBe(200);
+    expect(resNdjson.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+    expect(resNdjson.headers.get("content-disposition")).toContain(".ndjson");
+    const ndjsonBody = await resNdjson.text();
+    const lines = ndjsonBody.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ id: evId(10, 1), kind: "transfer" });
+
+    // Test invalid format returns 400
+    const resBad = await client.call(`/api/assets/${watched.code}/export?section=events&format=xml`);
+    expect(resBad.status).toBe(400);
   });
 });
 

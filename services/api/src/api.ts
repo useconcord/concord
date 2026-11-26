@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
+import { stream } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { templateCsv } from "@concord/core";
 import { Auth, Conflict, Forbidden, Rejected, Unauthorized, type SessionInfo } from "./auth.js";
@@ -355,6 +356,31 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     const section = c.req.query("section");
     const name = `concord-${fileSafe(asset.code)}`;
     const stamp = new Date().toISOString().slice(0, 10);
+    if (section === "events") {
+      const formatParam = c.req.query("format");
+      if (formatParam && formatParam !== "csv" && formatParam !== "ndjson") {
+        throw new Invalid("format must be csv or ndjson");
+      }
+      const format = formatParam === "ndjson" ? "ndjson" : "csv";
+      const ext = format === "ndjson" ? "ndjson" : "csv";
+      const mime = format === "ndjson" ? "application/x-ndjson; charset=utf-8" : "text/csv; charset=utf-8";
+      const p = period(c);
+      c.header("content-type", mime);
+      c.header("content-disposition", `attachment; filename="${name}-${fileSafe(section)}-${stamp}.${ext}"`);
+      return stream(
+        c,
+        async (s) => {
+          for (const chunk of ws.exportEvents(asset.id, p, format)) {
+            if (s.aborted) break;
+            await s.write(chunk);
+          }
+        },
+        async (err, s) => {
+          console.error(`Events export stream error for ${asset.id}:`, err);
+          s.abort();
+        },
+      );
+    }
     if (section) {
       const actionIdParam = c.req.query("id");
       const opts: { from?: string; to?: string; id?: number } = period(c);
