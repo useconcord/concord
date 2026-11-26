@@ -102,7 +102,8 @@ describe("the CLI closes its runtime", () => {
     () =>
       withDataDir((seeded) => {
         const { status, stdout, stderr } = cli(seeded, ["holdings", seeded.asset, "--json"]);
-        expect(stderr).toBe("");
+        // Some Node 24 releases still flag node:sqlite as experimental on stderr; nothing else may appear.
+        expect(stderr.split("\n").filter((line) => line.trim() && !/ExperimentalWarning|--trace-warnings/.test(line))).toEqual([]);
         expect(status).toBe(0);
         const holdings = JSON.parse(stdout) as { supply: string; holderCount: number; holders: unknown[] };
         expect(holdings.supply).toBe("0");

@@ -34,6 +34,12 @@ A `docs`-only or internal refactoring commit does not need an entry. When in dou
 
 Everything to date; Concord's history begins 2026-10 with the commits below.
 
+### Changed
+
+- `unwatch` and `org-delete` now require `--yes` (or a TTY prompt) before deleting anything
+  and support `--dry-run` to print the counts of events, registers, runs and notes that would
+  be removed; without `--yes` nothing is deleted and the command exits with code 1 (#558).
+
 ### Fixed
 
 - The CLI answers an unknown flag, or a flag missing its value, with one line that names the
