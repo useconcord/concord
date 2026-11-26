@@ -3659,3 +3659,101 @@ describe("RFC 8785 canonicalJson", () => {
     expect(canonicalJson([undefined, () => {}, Symbol("test"), 1])).toBe("[null,null,null,1]");
   });
 });
+
+describe("syncAll scheduling", () => {
+  function setup(options: ConstructorParameters<typeof Concord>[2]) {
+    const chain = new FakeChain();
+    const concord = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain } }, options);
+    const getEvents = chain.getEvents.bind(chain);
+    /** Asset ids in the order their event pages came back. */
+    const served: string[] = [];
+    const gates = new Map<string, Promise<void>>();
+    chain.getEvents = async (id, from, limit) => {
+      await gates.get(id);
+      const page = await getEvents(id, from, limit);
+      served.push(id);
+      return page;
+    };
+    const watch = async (code: string, mints = 1) => {
+      const asset = await concord.watchAsset({ network: "testnet", asset: `${code}:${key()}`, fromLedger: 1 });
+      for (let i = 0; i < mints; i++) chain.push(asset.id, "mint", 5, { to: key(), amount: u(1) });
+      return asset.id;
+    };
+    const gate = (id: string) => {
+      let release!: () => void;
+      gates.set(id, new Promise<void>((r) => (release = r)));
+      return release;
+    };
+    return { chain, concord, served, watch, gate };
+  }
+
+  it("does not let a slow asset delay the fast ones when several run at once", async () => {
+    const { concord, served, watch, gate } = setup({ syncConcurrency: 2 });
+    const slow = await watch("SLOW");
+    const fast = await watch("FAST");
+    const fast2 = await watch("FASTER");
+    const release = gate(slow);
+
+    const pass = concord.syncAll();
+    // Both fast assets finish while the slow one is still held at its gate.
+    await vi.waitFor(() => expect(served).toEqual([fast, fast2]));
+    expect(concord.holdings(fast).holderCount).toBe(1);
+    expect(concord.holdings(fast2).holderCount).toBe(1);
+    expect(concord.holdings(slow).holderCount).toBe(0);
+
+    release();
+    expect(await pass).toEqual({ [slow]: { added: 1 }, [fast]: { added: 1 }, [fast2]: { added: 1 } });
+    expect(served).toEqual([fast, fast2, slow]);
+  });
+
+  it("with a concurrency of one walks the assets in order, as before", async () => {
+    const { concord, served, watch, gate } = setup({ syncConcurrency: 1 });
+    const first = await watch("ONE");
+    const second = await watch("TWO");
+    const third = await watch("THREE");
+    const release = gate(first);
+
+    const pass = concord.syncAll();
+    await new Promise((r) => setTimeout(r, 30));
+    // Nothing after the held asset has started.
+    expect(served).toEqual([]);
+    release();
+    await pass;
+    expect(served).toEqual([first, second, third]);
+
+    // Without a gate the order is the same.
+    served.length = 0;
+    await concord.syncAll();
+    expect(served).toEqual([first, second, third]);
+  });
+
+  it("yields an asset whose backlog outlasts the time budget and carries on next pass", async () => {
+    let clock = 0;
+    const { chain, concord, watch } = setup({ syncAssetBudgetMs: 15, now: () => clock });
+    const big = await watch("BIG", 2100);
+    const small = await watch("SMALL");
+    const getEvents = chain.getEvents.bind(chain);
+    chain.getEvents = async (id, from, limit) => {
+      clock += 10;
+      return getEvents(id, from, limit);
+    };
+
+    // Pages of 1000: the second page passes the 15 ms budget, so the pass stops there.
+    expect(await concord.syncAll()).toEqual({ [big]: { added: 2000, more: true }, [small]: { added: 1 } });
+    expect(concord.holdings(big).holderCount).toBe(2000);
+    expect(await concord.syncAll()).toEqual({ [big]: { added: 100 }, [small]: { added: 0 } });
+    expect(concord.holdings(big).holderCount).toBe(2100);
+
+    // A direct sync is not bounded by the budget.
+    chain.latest = 200;
+    for (let i = 0; i < 1100; i++) chain.push(big, "mint", 150, { to: key(), amount: u(1) });
+    expect(await concord.sync(big)).toEqual({ added: 1100 });
+  }, 60_000);
+
+  it("rejects a bad concurrency or budget", () => {
+    const db = new Db(":memory:");
+    expect(() => new Concord(db, {}, { syncConcurrency: 0 })).toThrow("syncConcurrency must be a positive integer");
+    expect(() => new Concord(db, {}, { syncConcurrency: 1.5 })).toThrow("syncConcurrency must be a positive integer");
+    expect(() => new Concord(db, {}, { syncAssetBudgetMs: -1 })).toThrow("syncAssetBudgetMs must be zero or more");
+  });
+});

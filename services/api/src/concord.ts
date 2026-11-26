@@ -304,6 +304,23 @@ function holdingsPage(page: HoldingsPage): Required<Pick<HoldingsPage, "limit" |
   return { limit, offset, sort, ...(page.after !== undefined ? { after: page.after } : {}), ...(q ? { q } : {}) };
 }
 
+export interface ConcordOptions {
+  checkpointEvery?: number;
+  /** ed25519 private key (PEM, or a path to one) that signs audit packs. */
+  signingKey?: string;
+  /** Assets of one network that `syncAll` indexes at once. 1 walks them in order. */
+  syncConcurrency?: number;
+  /**
+   * How long one asset may page through events in a `syncAll` pass before it yields; the rest of
+   * its backlog waits for the next pass. 0 means no limit.
+   */
+  syncAssetBudgetMs?: number;
+  /** Milliseconds clock, for tests. */
+  now?: () => number;
+}
+
+export type SyncResult = { added: number; more?: true };
+
 const HTML_ESCAPES: Record<string, string> = {
   "&": "&amp;",
   "<": "&lt;",
@@ -572,16 +589,26 @@ export class Concord {
   private readonly stateMemo = new Map<string, HoldingsState>();
   private seenVersion: number;
   private readonly checkpointEvery: number;
+  private readonly syncConcurrency: number;
+  private readonly syncAssetBudgetMs: number;
+  private readonly clock: () => number;
 
   constructor(
     readonly db: Db,
     readonly networks: Networks,
-    readonly options: { checkpointEvery?: number; signingKey?: string } = {},
+    readonly options: ConcordOptions = {},
   ) {
     this.seenVersion = db.dataVersion();
     const every = options.checkpointEvery ?? CHECKPOINT_EVERY;
     if (!Number.isSafeInteger(every) || every < 1) throw new Error("checkpointEvery must be a positive integer");
     this.checkpointEvery = every;
+    const concurrency = options.syncConcurrency ?? 1;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error("syncConcurrency must be a positive integer");
+    this.syncConcurrency = concurrency;
+    const budget = options.syncAssetBudgetMs ?? 0;
+    if (!Number.isFinite(budget) || budget < 0) throw new Error("syncAssetBudgetMs must be zero or more");
+    this.syncAssetBudgetMs = budget;
+    this.clock = options.now ?? Date.now;
   }
 
   /** Forget cached holdings for an asset this instance just changed. */
@@ -879,42 +906,54 @@ export class Concord {
 
   // ── indexer ───────────────────────────────────────────────────────────────
 
-  /** Pull new events for one asset. Concurrent calls share one pass. */
-  sync(ref: string, head?: ChainHead): Promise<{ added: number }> {
+  /**
+   * Pull new events for one asset. Concurrent calls share one pass. With `budgetMs` the pass
+   * stops paging once that long has gone by, saves its position and reports `more`.
+   */
+  sync(ref: string, head?: ChainHead, options: { budgetMs?: number } = {}): Promise<SyncResult> {
     const asset = this.asset(ref);
     if (this.removing.has(asset.id)) throw new NotFound(`asset ${ref} is not watched`);
     const running = this.syncing.get(asset.id);
     if (running) return running;
-    const pass = this.runSync(asset, head).finally(() => this.syncing.delete(asset.id));
+    const deadline = options.budgetMs ? this.clock() + options.budgetMs : undefined;
+    const pass = this.runSync(asset, head, deadline).finally(() => this.syncing.delete(asset.id));
     this.syncing.set(asset.id, pass);
     return pass;
   }
 
   /**
    * One pass over every asset. Networks run side by side, so an outage on one cannot stall the
-   * other. Keyed by asset id.
+   * other. Within a network up to `syncConcurrency` assets index at once, taken in order, and
+   * each may page for at most `syncAssetBudgetMs` before yielding to the next pass; one asset
+   * with a long backlog therefore cannot hold the rest. Keyed by asset id.
    */
-  async syncAll(): Promise<Record<string, { added: number } | { error: string }>> {
-    const out: Record<string, { added: number } | { error: string }> = {};
+  async syncAll(): Promise<Record<string, SyncResult | { error: string }>> {
+    const out: Record<string, SyncResult | { error: string }> = {};
+    const budget = this.syncAssetBudgetMs > 0 ? { budgetMs: this.syncAssetBudgetMs } : {};
     await Promise.all(
       this.networkNames().map(async (network) => {
         const assets = this.assets(network);
         if (assets.length === 0) return;
         // One look at the chain's range serves every asset on the network.
         const head = await this.networks[network]?.chain?.latestLedger().catch(() => undefined);
-        for (const asset of assets) {
-          try {
-            out[asset.id] = await this.sync(asset.id, head);
-          } catch (err) {
-            out[asset.id] = { error: describeFailure(err) };
+        let next = 0;
+        const worker = async () => {
+          while (next < assets.length) {
+            const asset = assets[next++]!;
+            try {
+              out[asset.id] = await this.sync(asset.id, head, budget);
+            } catch (err) {
+              out[asset.id] = { error: describeFailure(err) };
+            }
           }
-        }
+        };
+        await Promise.all(Array.from({ length: Math.min(this.syncConcurrency, assets.length) }, worker));
       }),
     );
     return out;
   }
 
-  private async runSync(asset: AssetRecord, head?: ChainHead): Promise<{ added: number }> {
+  private async runSync(asset: AssetRecord, head?: ChainHead, deadline?: number): Promise<SyncResult> {
     try {
       const chain = this.requireChain(asset.network);
       head ??= await chain.latestLedger();
@@ -941,7 +980,7 @@ export class Concord {
           );
         }
       }
-      const out = await this.syncPass(ready, chain);
+      const out = await this.syncPass(ready, chain, deadline);
       if (this.removing.has(asset.id)) return { added: 0 };
       if (asset.syncError) {
         this.db.write("UPDATE assets SET sync_error = NULL, sync_error_at = NULL WHERE id = ?", asset.id);
@@ -959,7 +998,7 @@ export class Concord {
     }
   }
 
-  private async syncPass(asset: AssetRecord, chain: ChainSource): Promise<{ added: number }> {
+  private async syncPass(asset: AssetRecord, chain: ChainSource, deadline?: number): Promise<SyncResult> {
     if (asset.startLedger === undefined) throw new Invalid("this asset has no starting ledger yet");
     const limit = 1000;
     let from: { startLedger: number } | { cursor: string } = asset.cursor
@@ -1007,6 +1046,8 @@ export class Concord {
         this.touch(asset.id);
       }
       if (atTip || !cursor) break;
+      // Out of time: the cursor is saved, so the next pass carries on from here.
+      if (deadline !== undefined && this.clock() >= deadline) return { added, more: true };
       from = { cursor };
     }
     return { added };
