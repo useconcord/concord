@@ -46,13 +46,14 @@ erDiagram
     assets ||--o{ runs : "asset_id"
     assets ||--o{ actions : "asset_id"
     assets ||--o{ break_notes : "asset_id"
+    assets ||--o{ holdings_checkpoints : "asset_id"
     registers ||--o{ register_positions : "register_id"
     registers ||--o{ runs : "register_id"
 ```
 
 Every arrow is `ON DELETE CASCADE`. Deleting an asset therefore deletes its events, opening
 balances, registers (and through them their positions and runs), journal, instructions, corporate
-actions and break notes. Deleting a register deletes its positions *and the runs made from it*.
+actions, break notes and holdings checkpoints. Deleting a register deletes its positions *and the runs made from it*.
 `meta` stands alone.
 
 ### `meta`
@@ -89,7 +90,8 @@ One row per watched asset.
 
 ### `events`
 
-On-chain events (CAP-67) for an asset. Primary key `(asset_id, id)`.
+On-chain events (CAP-67) for an asset. Primary key `(asset_id, id)`; index `events_asset_ledger`
+on `(asset_id, ledger)` (migration 6) serves the replay from a holdings checkpoint.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -262,6 +264,27 @@ Append-only trail of every sign-off change (added in migration 2, which copies t
 existed). One row per `setNote` call: `id`, `asset_id`, `scope`, `key`, `fingerprint`, `status`,
 `note`, `author`, `author_id`, `at`. It is what the audit pack lists as `signoffHistory` and what
 `GET /api/assets/:id/notes/history?scope=&key=` returns, oldest first.
+
+### `holdings_checkpoints`
+
+Replayed holdings at a ledger boundary (added in migration 6), so a historical
+`holdings(asOf)`, a corporate-action snapshot or the dashboard's current holdings replays only the
+events after the nearest earlier checkpoint instead of the whole history. Primary key
+`(asset_id, ledger)`. Derived data: every row can be deleted at any time, and Concord writes them
+again on the next read (`Concord.state`, `services/api/src/concord.ts`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `asset_id` | TEXT | → `assets.id` |
+| `ledger` | INTEGER | Every event of the asset at or before this ledger is folded in; every later one is not. |
+| `closed_at` | TEXT | Latest close time among the folded events. Used only for as-of times at or after it. |
+| `state` | TEXT (JSON) | `balances` and `authorized` keyed by address (balances are smallest-unit integer strings), `ledger`, `eventCount`, and the malformed events skipped so far. |
+| `created_at` | TEXT | |
+
+A checkpoint is written after every 1,000 events not yet covered, never on the newest indexed
+ledger (more of its events may still arrive). An event indexed into a ledger at or before a
+checkpoint deletes that checkpoint and every later one; rebuilding an asset, or re-reading its
+opening balances, deletes all of its checkpoints.
 
 ## Control database (`control.db`)
 
