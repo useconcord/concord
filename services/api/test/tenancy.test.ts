@@ -1,23 +1,41 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync as readFixture } from "node:fs";
-import { StrKey } from "@stellar/stellar-sdk";
+import { Address, Asset, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
-import { StellarSource } from "../src/chain.js";
+import { runCli } from "../src/cli.js";
+import { StellarSource, ChainError } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
 import { loadConfig } from "../src/config.js";
 import { Db } from "../src/db.js";
-import { createServerApp } from "../src/main.js";
+import { createServerApp, openRuntime } from "../src/main.js";
 import { CONTROL_MIGRATIONS, ORG_MIGRATIONS } from "../src/schema.js";
-import { Tenants, fileStore, memoryStore } from "../src/tenants.js";
+import { Tenants, fileStore, memoryStore, type OrgStore } from "../src/tenants.js";
 import { Client, FakeChain, MAINNET_PASSPHRASE, ORIGIN, PASSPHRASE, at, harness, key, u, type Harness } from "./helpers.js";
 
 /** Strings that exist only in workspace A. None may ever reach workspace B. */
 const MARKERS = ["ALPHA-HOLDER-7", "Northgate Secret Trust", "alpha sign-off note", "J-ALPHA", "I-ALPHA", "Alpha Capital"];
+
+/** SHA-256 of each shipped migration, in order. A changed entry means a shipped migration was edited. */
+const ORG_MIGRATION_DIGESTS = [
+  "1a4f90d62ead1ba8254ab3244d04be0ca9f46646df78cd12f1ece6db41bd2387",
+  "2002f2e1b269939a38de8da3768a85787f98ce207246cf15134423ffdce6db72",
+  "ece8f3334de957d19e76585727af4790c2f6ba78f60407ade9a67e1edb25cd55",
+  "d440cffcfb710a703cdb8c0b02c4704aeaf366b2c254ffd5e7789e25898f6174",
+  "b7413e3d4eee55f419c70db885e1866b95c8c1a2b7d7f68eea4e44ecac93e611",
+  "a4ad7e98aa4e92355d44afc19bae0ab7a8ea76063398f5f4f56eadc7b7690073",
+];
+const CONTROL_MIGRATION_DIGESTS = ["ba25bc5419cfcc376d2e7ff027845b2da4b789d9c7e966424b70cdfbbb90a422"];
+
+/** Hash each migration as LF text so a CRLF checkout does not change the pinned values. */
+function migrationDigests(migrations: readonly string[]): string[] {
+  return migrations.map((sql) => createHash("sha256").update(sql.replace(/\r\n?/g, "\n")).digest("hex"));
+}
 
 interface Seeded {
   h: Harness;
@@ -96,6 +114,7 @@ function probes(s: Seeded): Record<string, Probe> {
     "GET /api/assets/:id/reconciliations": p("GET", `/api/assets/${id}/reconciliations`),
     "POST /api/assets/:id/reconciliations": p("POST", `/api/assets/${id}/reconciliations`, { registerId: s.registerId }),
     "GET /api/reconciliations/:id": p("GET", `/api/reconciliations/${s.runId}`),
+    "GET /api/reconciliations/:id/report": p("GET", `/api/reconciliations/${s.runId}/report`),
     "GET /api/assets/:id/actions": p("GET", `/api/assets/${id}/actions`),
     "POST /api/assets/:id/actions": p("POST", `/api/assets/${id}/actions`, { type: "split", recordTime: at(1), num: "2", den: "1" }),
     "GET /api/actions/:id": p("GET", `/api/actions/${s.actionId}`),
@@ -203,12 +222,65 @@ describe("workspace isolation", () => {
     expect(JSON.stringify(packB)).not.toContain("ALPHA-HOLDER-7");
   });
 
-  it("opens only workspaces it knows, under ids it generated", () => {
-    const h = harness();
-    for (const bad of ["../x", "..%2Fx", "", "ZZZZZZZZZZZZZZZZ", "0123456789abcdef"]) {
-      expect(() => h.tenants.forOrg(bad), bad).toThrow(/no such workspace/);
+  it("opens only workspaces it knows, under ids it generated, returning one shared instance (#499)", () => {
+    const temp = mkdtempSync(join(tmpdir(), "concord-for-org-"));
+    const orgDir = join(temp, "orgs");
+    try {
+      const tenants = new Tenants(fileStore(temp), {}, () => true, () => []);
+      const valid = "0123456789abcdef";
+
+      // Regex-only rejection proven by known being true:
+      // uppercase hex, ../../etc, empty string, 15 and 17 characters all throw
+      const badIds = [
+        "../../etc",
+        "../x",
+        "..%2Fx",
+        "",
+        "0123456789ABCDEF",
+        "0123456789abcde",
+        "0123456789abcdef0",
+        undefined as unknown as string,
+      ];
+      for (const bad of badIds) {
+        expect(() => tenants.forOrg(bad), String(bad)).toThrow(/no such workspace/);
+      }
+
+      // Rejections created no file under tmp/orgs
+      expect(existsSync(orgDir) ? readdirSync(orgDir) : []).toEqual([]);
+
+      // Returns one shared instance per workspace
+      const a = tenants.forOrg(valid);
+      const b = tenants.forOrg(valid);
+      expect(a).toBe(b);
+
+      // When known returns false, even a structurally valid id throws
+      const unknownTenants = new Tenants(fileStore(temp), {}, () => false, () => []);
+      expect(() => unknownTenants.forOrg(valid)).toThrow(/no such workspace/);
+
+      // A store whose open throws propagates and is retried, not cached
+      let attempts = 0;
+      const retryStore = {
+        open: () => {
+          attempts++;
+          if (attempts === 1) throw new Error("transient open failure");
+          return new Db(":memory:", ORG_MIGRATIONS);
+        },
+        remove: () => {},
+      };
+      const retrying = new Tenants(retryStore, {}, () => true, () => []);
+      expect(() => retrying.forOrg(valid)).toThrow("transient open failure");
+      expect(attempts).toBe(1);
+
+      const recovered = retrying.forOrg(valid);
+      expect(recovered).toBeDefined();
+      expect(attempts).toBe(2);
+      expect(retrying.forOrg(valid)).toBe(recovered);
+      expect(attempts).toBe(2);
+      retrying.drop(valid);
+      tenants.drop(valid);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
     }
-    expect(() => h.tenants.forOrg(undefined as unknown as string)).toThrow(/no such workspace/);
   });
 
   it("refuses a database that belongs to another workspace", () => {
@@ -270,6 +342,107 @@ describe("workspace isolation", () => {
     }
   });
 
+  describe("shutting down", () => {
+    const alpha = "aaaaaaaaaaaaaaaa";
+    const beta = "bbbbbbbbbbbbbbbb";
+
+    /** Workspaces over in-memory databases that record, in order, each id closed and each id removed. */
+    function recorded(): { tenants: Tenants; closed: string[]; removed: string[] } {
+      const closed: string[] = [];
+      const removed: string[] = [];
+      const store: OrgStore = {
+        open: (orgId) => {
+          const db = new Db(":memory:", ORG_MIGRATIONS);
+          const close = db.close.bind(db);
+          db.close = () => {
+            closed.push(orgId);
+            close();
+          };
+          return db;
+        },
+        remove: (orgId) => void removed.push(orgId),
+      };
+      return { tenants: new Tenants(store, {}, () => true, () => [alpha, beta]), closed, removed };
+    }
+
+    it("closes every open workspace once, and closing again does nothing", () => {
+      const { tenants, closed } = recorded();
+      const handles = [tenants.forOrg(alpha).db, tenants.forOrg(beta).db];
+
+      tenants.close();
+      expect([...closed].sort()).toEqual([alpha, beta]);
+      for (const db of handles) expect(() => db.get("SELECT 1")).toThrow(/not open/);
+
+      // Shutdown reaches close() from more than one path.
+      expect(() => tenants.close()).not.toThrow();
+      expect(closed).toHaveLength(2);
+    });
+
+    it("does not close a dropped workspace a second time", () => {
+      const { tenants, closed, removed } = recorded();
+      tenants.forOrg(alpha);
+      const kept = tenants.forOrg(beta).db;
+
+      tenants.drop(alpha);
+      expect(closed).toEqual([alpha]);
+      expect(removed).toEqual([alpha]);
+      // The neighbour is untouched by the drop.
+      expect(kept.get<{ value: string }>("SELECT value FROM meta WHERE key = 'org_id'")?.value).toBe(beta);
+
+      tenants.close();
+      expect(closed).toEqual([alpha, beta]);
+      // Nor does a drop after close() reach a handle that is already closed.
+      tenants.drop(beta);
+      expect(closed).toEqual([alpha, beta]);
+      expect(removed).toEqual([alpha, beta]);
+    });
+
+    it("opens a new instance for a workspace asked for after close()", () => {
+      const { tenants, closed } = recorded();
+      const before = tenants.forOrg(alpha);
+      expect(tenants.forOrg(alpha)).toBe(before);
+
+      tenants.close();
+      const after = tenants.forOrg(alpha);
+      expect(after).not.toBe(before);
+      expect(after.db).not.toBe(before.db);
+      // The handle from before stays closed; the new one is the workspace's own and is open.
+      expect(() => before.db.get("SELECT 1")).toThrow(/not open/);
+      expect(after.db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'org_id'")?.value).toBe(alpha);
+      expect(tenants.forOrg(alpha)).toBe(after);
+
+      tenants.close();
+      expect(closed).toEqual([alpha, alpha]);
+    });
+
+    it("closes the runtime twice without throwing, and frees its files", async () => {
+      const temp = mkdtempSync(join(tmpdir(), "concord-runtime-close-"));
+      try {
+        // The cheapest password cost the config accepts: the sign-up is only here to make a workspace.
+        const runtime = openRuntime(loadConfig({ CONCORD_DATA_DIR: temp, CONCORD_PASSWORD_COST: "16384:8:1" }));
+        const { orgId } = await runtime.auth.signUp({
+          email: "ann@alpha.test",
+          name: "Ann Alpha",
+          password: "correct horse battery",
+          orgName: "Alpha Capital",
+        });
+        const workspace = runtime.tenants.forOrg(orgId).db;
+        expect(existsSync(join(temp, "control.db"))).toBe(true);
+        expect(readdirSync(join(temp, "orgs"))).toContain(`${orgId}.db`);
+
+        runtime.close();
+        // The second close used to throw "database is not open" from the control database.
+        expect(() => runtime.close()).not.toThrow();
+        // Both are closed: the identity records, and the workspace opened through the runtime.
+        for (const db of [runtime.control, workspace]) expect(() => db.get("SELECT 1")).toThrow(/not open/);
+      } finally {
+        // On Windows this fails while a handle is still open, so it checks the close as well.
+        rmSync(temp, { recursive: true, force: true });
+      }
+      expect(existsSync(temp)).toBe(false);
+    });
+  });
+
   it("deletes a workspace without touching its neighbour", async () => {
     const s = await seed();
     await s.b.json("/api/assets", { body: { network: "testnet", asset: `KEEP:${key()}` } }).catch(() => undefined);
@@ -282,6 +455,72 @@ describe("workspace isolation", () => {
     // The sole member's account went with it, so the address is free again.
     expect((await new Client(s.h.app).call("/api/auth/signin", { body: { email: "ann@alpha.test", password: "correct horse battery" } })).status).toBe(401);
     expect((await s.b.call("/api/overview")).status).toBe(200);
+  });
+
+  it("isolates a failing workspace during syncAll, reports its error and advances due actions in healthy ones (#501)", async () => {
+    const chain = new FakeChain();
+    chain.latest = 50;
+    const org1 = "1111111111111111";
+    const org2 = "2222222222222222";
+    const org3 = "3333333333333333";
+    const orgIds = [org1, org2, org3];
+
+    const dbs = new Map<string, Db>();
+    const store = {
+      open: (id: string) => {
+        if (id === org2) throw new Error("disk full");
+        if (!dbs.has(id)) dbs.set(id, new Db(":memory:", ORG_MIGRATIONS));
+        return dbs.get(id)!;
+      },
+      remove: (id: string) => dbs.delete(id),
+    };
+
+    const tenants = new Tenants(store, { testnet: { passphrase: PASSPHRASE, chain } }, () => true, () => orgIds);
+
+    try {
+      const w1 = tenants.forOrg(org1);
+      const w3 = tenants.forOrg(org3);
+
+      const a1 = await w1.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
+      const a3 = await w3.watchAsset({ network: "testnet", asset: `BOND:${key()}`, fromLedger: 1 });
+
+      // Schedule a split in w1 beyond chain.latest (recordTime at ledger 250)
+      const action = await w1.createAction(a1.id, {
+        type: "split",
+        recordTime: at(250),
+        num: "1",
+        den: "1",
+      });
+
+      // Before chain advances, action is scheduled and has no snapshot
+      expect(action.state).toBe("scheduled");
+      expect(action.snapshot).toBeNull();
+
+      // First syncAll pass with chain.latest = 50
+      const results1 = await tenants.syncAll();
+      expect(results1).toEqual([
+        { orgId: org1, assetId: a1.id, added: 0 },
+        { orgId: org2, assetId: "", error: "disk full" },
+        { orgId: org3, assetId: a3.id, added: 0 },
+      ]);
+      expect(w1.action(action.id).state).toBe("scheduled");
+
+      // Advance chain to 300 so recordTime (at(250)) is reached
+      chain.latest = 300;
+      const results2 = await tenants.syncAll();
+      expect(results2).toEqual([
+        { orgId: org1, assetId: a1.id, added: 0 },
+        { orgId: org2, assetId: "", error: "disk full" },
+        { orgId: org3, assetId: a3.id, added: 0 },
+      ]);
+
+      // ReconcileDue ran during syncAll and advanced the scheduled action to clean
+      const advanced = w1.action(action.id);
+      expect(advanced.state).toBe("clean");
+      expect(advanced.snapshot).not.toBeNull();
+    } finally {
+      tenants.close();
+    }
   });
 });
 
@@ -473,6 +712,81 @@ describe("teams", () => {
     expect((await cat.call("/api/overview")).status).toBe(401);
     expect((await cat.call("/api/auth/signin", { body: { email: "cat@alpha.test", password: "correct horse battery" } })).status).toBe(401);
   });
+
+  it("lets the operator create a single-use 7-day invitation link via createInviteAs and CLI invite", async () => {
+    const h = harness();
+    const owner = await new Client(h.app).signUp("ann@alpha.test", "Alpha", "Ann");
+
+    // Default role is member and works once; expires after 7 days.
+    const memberInv = h.auth.createInviteAs(owner.orgId, "op-member@alpha.test");
+    expect(memberInv.role).toBe("member");
+    expect(h.auth.lookupInvite(memberInv.token)).toEqual({
+      org: "Alpha",
+      email: "op-member@alpha.test",
+      role: "member",
+      hasAccount: false,
+    });
+    const memberClient = new Client(h.app);
+    const joinedMember = await memberClient.json<{ org: { id: string }; role: string }>("/api/auth/invites/accept", {
+      body: { token: memberInv.token, name: "Member", password: "correct horse battery" },
+    });
+    expect(joinedMember).toMatchObject({ org: { id: owner.orgId }, role: "member" });
+    expect((await new Client(h.app).call("/api/auth/invites/accept", {
+      body: { token: memberInv.token, name: "Again", password: "correct horse battery" },
+    })).status).toBe(400);
+
+    // Expiry after 7 days.
+    const expiring = h.auth.createInviteAs(owner.orgId, "expiring@alpha.test");
+    h.now.value += 7 * 86_400_000 + 1;
+    expect(h.auth.lookupInvite(expiring.token)).toBeUndefined();
+
+    // CLI invite prints ${publicUrl}/#/invite/<token> with optional --role owner.
+    const dir = mkdtempSync(join(tmpdir(), "concord-cli-556-"));
+    try {
+      const rt = openRuntime(loadConfig({ CONCORD_DATA_DIR: dir, CONCORD_SIGNUP: "open" }));
+      let cliOrgId: string;
+      try {
+        const fastAuth = new Auth(rt.control, { signup: "open", cost: { N: 1024, r: 8, p: 1 } });
+        const signed = await fastAuth.signUp({
+          email: "seed@alpha.test",
+          name: "Seed",
+          orgName: "Operator Org",
+          password: "correct horse battery",
+        });
+        cliOrgId = signed.orgId;
+      } finally {
+        rt.close();
+      }
+
+      const lines: string[] = [];
+      const spy = vi.spyOn(console, "log").mockImplementation((msg?: unknown) => lines.push(String(msg ?? "")));
+      try {
+        await runCli(["invite", cliOrgId, "recovery-owner@alpha.test", "--role", "owner"], {
+          CONCORD_DATA_DIR: dir,
+          CONCORD_PUBLIC_URL: ORIGIN,
+        });
+      } finally {
+        spy.mockRestore();
+      }
+      const linkLine = lines.find((l) => l.startsWith(`${ORIGIN}/#/invite/`));
+      expect(linkLine).toBeTruthy();
+      const cliToken = linkLine!.split("/#/invite/")[1]!;
+
+      const verifyRt = openRuntime(loadConfig({ CONCORD_DATA_DIR: dir, CONCORD_SIGNUP: "open" }));
+      try {
+        expect(verifyRt.auth.lookupInvite(cliToken)).toEqual({
+          org: "Operator Org",
+          email: "recovery-owner@alpha.test",
+          role: "owner",
+          hasAccount: false,
+        });
+      } finally {
+        verifyRt.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
 });
 
 describe("Google sign-in", () => {
@@ -631,7 +945,7 @@ describe("networks", () => {
     testnet.failOnCall = 1;
     const results = await concord.syncAll();
     expect(results[onMain.id]).toEqual({ added: 1 });
-    expect(results[onTest.id]).toEqual({ error: "Indexing stopped on an unexpected error." });
+    expect(results[onTest.id]).toEqual({ error: "[internal] Indexing stopped on an unexpected error." });
     expect(concord.holdings(onMain.id).supply).toBe("7");
     expect(concord.asset(onTest.id).syncError).toBeTruthy();
     await concord.syncAll();
@@ -656,6 +970,59 @@ describe("networks", () => {
     expect(loadConfig({ CONCORD_PUBLIC_URL: "https://x.example/" }).publicUrl).toBe("https://x.example");
     expect(loadConfig({ CONCORD_PUBLIC_URL: "https://x.example" }).publicUrl).toBe("https://x.example");
     expect(() => loadConfig({ CONCORD_PUBLIC_URL: "not a url" })).toThrow(/must be a URL/);
+  });
+
+  it.each([
+    {
+      name: "CONCORD_PUBLIC_URL beats RENDER_EXTERNAL_URL",
+      env: { CONCORD_PUBLIC_URL: "https://public.example", RENDER_EXTERNAL_URL: "https://render.example" },
+      expected: "https://public.example",
+    },
+    {
+      name: "RENDER_EXTERNAL_URL beats default http://host:port",
+      env: { RENDER_EXTERNAL_URL: "https://render.example" },
+      expected: "https://render.example",
+    },
+    {
+      name: "default http://host:port fallback",
+      env: { CONCORD_HOST: "127.0.0.1", CONCORD_PORT: "4400" },
+      expected: "http://127.0.0.1:4400",
+    },
+    {
+      name: "trailing slash is dropped",
+      env: { CONCORD_PUBLIC_URL: "https://x.example/" },
+      expected: "https://x.example",
+    },
+    {
+      name: "0.0.0.0 host maps to 127.0.0.1",
+      env: { CONCORD_HOST: "0.0.0.0", CONCORD_PORT: "4400" },
+      expected: "http://127.0.0.1:4400",
+    },
+    {
+      name: "IPv6 ::1 host brackets to [::1]",
+      env: { CONCORD_HOST: "::1", CONCORD_PORT: "4400" },
+      expected: "http://[::1]:4400",
+    },
+    {
+      // Sub-paths were previously stripped silently; current behavior rejects them explicitly
+      // to avoid cookies and OAuth redirect URI pointing to the wrong root origin.
+      name: "path is rejected (sub-path hosting not supported)",
+      env: { CONCORD_PUBLIC_URL: "https://x.example/app/" },
+      error: /sub-path hosting is not supported/,
+    },
+    {
+      // Current behavior accepts non-http schemes like ftp:// because any valid URL
+      // with pathname "/" is parsed by new URL() and its origin is preserved.
+      name: "ftp scheme is accepted",
+      env: { CONCORD_PUBLIC_URL: "ftp://x.example" },
+      expected: "ftp://x.example",
+    },
+  ])("derives publicUrl correctly: $name (#488)", ({ env, expected, error }) => {
+    if (error) {
+      expect(() => loadConfig(env)).toThrow(error);
+    } else {
+      expect(loadConfig(env).publicUrl).toBe(expected);
+    }
   });
 
   it("serves both networks with public endpoints by default and names retired settings", () => {
@@ -733,6 +1100,70 @@ describe("networks", () => {
   });
 
   it.each([
+    {
+      description: "whitespace, empty items and trailing slashes",
+      input: " https://a.example/ , ,https://b.example//",
+      expected: ["https://a.example", "https://b.example"],
+    },
+    {
+      // dedupe follow-up: duplicates are currently kept as-is
+      description: "duplicates are preserved",
+      input: "https://a.example, https://a.example",
+      expected: ["https://a.example", "https://a.example"],
+    },
+    {
+      description: "non-http scheme throws",
+      input: "ftp://x",
+      error: "CONCORD_MAINNET_RPC_URLS holds something that is not a URL",
+    },
+    {
+      description: "non-URL string throws",
+      input: "not a url",
+      error: "CONCORD_MAINNET_RPC_URLS holds something that is not a URL",
+    },
+    {
+      // CON-0314: credentials in URL are rejected; configure Authorization via CONCORD_RPC_HEADERS
+      description: "credentials in URL throw",
+      input: "https://user:pw@a.example",
+      error: "CONCORD_MAINNET_RPC_URLS must not contain URL credentials; configure Authorization via CONCORD_RPC_HEADERS",
+    },
+    {
+      description: "blank input falls back to defaults",
+      input: "   ",
+      expected: loadConfig({}).networks.mainnet.rpc.map((e) => e.url),
+    },
+  ])("$description", ({ input, expected, error }) => {
+    if (error) {
+      expect(() => loadConfig({ CONCORD_MAINNET_RPC_URLS: input })).toThrow(error);
+    } else {
+      expect(loadConfig({ CONCORD_MAINNET_RPC_URLS: input }).networks.mainnet.rpc.map((e) => e.url)).toEqual(expected);
+    }
+  });
+
+  it.each([
+    ["PORT 0", { PORT: "0" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["PORT -1", { PORT: "-1" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["PORT 1.5", { PORT: "1.5" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["PORT abc", { PORT: "abc" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["PORT 70000 expecting PORT message after CON-0315", { PORT: "70000" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["sync interval 0 accepted", { CONCORD_SYNC_INTERVAL: "0" }, { value: { syncIntervalSec: 0 } }],
+    ["sync interval -1 rejected by name", { CONCORD_SYNC_INTERVAL: "-1" }, { error: "CONCORD_SYNC_INTERVAL must be a whole number of at least 0" }],
+    ["sync interval 0.5 rejected by name", { CONCORD_SYNC_INTERVAL: "0.5" }, { error: "CONCORD_SYNC_INTERVAL must be a whole number of at least 0" }],
+    ["CONCORD_PORT beats PORT", { CONCORD_PORT: "5500", PORT: "6600" }, { value: { port: 5500 } }],
+    ["bad CONCORD_PORT names itself", { CONCORD_PORT: "bad", PORT: "6600" }, { error: "CONCORD_PORT must be a whole number from 1 to 65535" }],
+    ["empty strings count as unset", { PORT: "", CONCORD_PORT: "", CONCORD_SYNC_INTERVAL: "", CONCORD_TRUST_PROXY: "", CONCORD_EPHEMERAL: "" }, { value: { port: 4400, syncIntervalSec: 30, trustProxyHops: 0, ephemeral: false } }],
+    ["ephemeral 1 is true", { CONCORD_EPHEMERAL: "1" }, { value: { ephemeral: true } }],
+    ["ephemeral true is true", { CONCORD_EPHEMERAL: "true" }, { value: { ephemeral: true } }],
+    ["ephemeral yes is true after CON-0317", { CONCORD_EPHEMERAL: "yes" }, { value: { ephemeral: true } }],
+  ])("parses integer and boolean settings: %s", (_name, env, outcome) => {
+    if ("error" in outcome) {
+      expect(() => loadConfig(env)).toThrow(outcome.error);
+    } else {
+      expect(loadConfig(env)).toMatchObject(outcome.value);
+    }
+  });
+
+  it.each([
     [
       "host matching a.example",
       JSON.stringify({ "a.example": { "x-api-key": "a" } }),
@@ -804,17 +1235,29 @@ describe("chain endpoints", () => {
   const health = () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { latestLedger: 50, oldestLedger: 10, oldestLedgerCloseTime: "1790000000" } }));
 
   function scripted(answers: Record<string, Array<() => Response | Promise<Response>>>) {
-    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const calls: Array<{ url: string; headers: Record<string, string>; body?: string }> = [];
     const clock = { value: 1_000_000 };
+    const sleeps: number[] = [];
     const fetch = (async (url: unknown, init?: RequestInit) => {
       const u = String(url);
-      calls.push({ url: u, headers: (init?.headers ?? {}) as Record<string, string> });
+      calls.push({
+        url: u,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        ...(typeof init?.body === "string" ? { body: init.body } : {}),
+      });
       const next = answers[u]?.shift();
       if (!next) throw new TypeError("fetch failed");
       return next();
     }) as typeof globalThis.fetch;
-    const deps = { fetch, sleep: async (ms: number) => void (clock.value += ms), now: () => clock.value };
-    return { calls, clock, deps };
+    const deps = {
+      fetch,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        clock.value += ms;
+      },
+      now: () => clock.value,
+    };
+    return { calls, clock, deps, sleeps };
   }
 
   it("URL-encodes unusual asset and issuer values in search, describe and baseline", async () => {
@@ -861,6 +1304,33 @@ describe("chain endpoints", () => {
     clock.value += 1_000;
     await expect(source.latestLedger()).resolves.toMatchObject({ latest: 50 });
     expect(calls).toHaveLength(2);
+  });
+
+  it.each<{ name: string; header: (now: number) => string | undefined; seconds: number }>([
+    { name: "seconds '40' -> 40s", header: () => "40", seconds: 40 },
+    { name: "zero '0' -> 1s minimum floor", header: () => "0", seconds: 1 },
+    { name: "HTTP-date 20s ahead -> 20s", header: (now) => new Date(now + 20_000).toUTCString(), seconds: 20 },
+    { name: "garbage 'soon' -> 30s default", header: () => "soon", seconds: 30 },
+    { name: "absent header -> 30s default", header: () => undefined, seconds: 30 },
+    { name: "'999' above 900s MAX_REST_MS cap -> 900s", header: () => "999", seconds: 900 },
+  ])("handles 429 Retry-After ($name)", async ({ header, seconds }) => {
+    const url = "https://limited.example";
+    const { calls, clock, deps } = scripted({
+      [url]: [
+        () => {
+          const value = header(clock.value);
+          return new Response("slow down", {
+            status: 429,
+            ...(value !== undefined ? { headers: { "retry-after": value } } : {}),
+          });
+        },
+        health,
+      ],
+    });
+    const source = new StellarSource(network([url]), deps);
+    await expect(source.latestLedger()).rejects.toThrow(/rate limited/);
+    await expect(source.latestLedger()).rejects.toThrow(`not answering; trying again in ${seconds}s`);
+    expect(calls).toHaveLength(1);
   });
 
   it("moves to the next endpoint when one is rate limited, and rests the first", async () => {
@@ -960,22 +1430,41 @@ describe("chain endpoints", () => {
     await expect(source.describe({ id: contractId })).rejects.toThrow("Stellar RPC getLedgerEntries returned no result");
   });
 
-  it("does not rest an endpoint on request faults (400, 404, 422)", async () => {
+  it.each([
+    [400, "surfaces to caller", "surface"],
+    [404, "surfaces to caller", "surface"],
+    [422, "surfaces to caller", "surface"],
+    [401, "rests endpoint and fails over", "failover"],
+    [403, "rests endpoint and fails over", "failover"],
+    [429, "rests endpoint and fails over", "failover"],
+  ] as const)("classifies HTTP %i (%s)", async (status, _label, mode) => {
     const a = "https://a.example";
-    const { calls, deps } = scripted({
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
       [a]: [
-        () => new Response("bad request", { status: 400 }),
+        () => new Response("status response", { status, headers: status === 429 ? { "retry-after": "60" } : {} }),
         health,
       ],
+      [b]: [health, health],
     });
-    const source = new StellarSource(network([a, "https://b.example"]), deps);
-    await expect(source.latestLedger()).rejects.toThrow(/HTTP 400/);
-    expect(calls).toHaveLength(1);
-    // Endpoint `a` was not rested: the subsequent call hits `a` immediately rather than falling back or waiting.
-    const head = await source.latestLedger();
-    expect(head.latest).toBe(50);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]!.url).toBe(a);
+    const source = new StellarSource(network([a, b]), deps);
+    if (mode === "surface") {
+      await expect(source.latestLedger()).rejects.toThrow(`HTTP ${status}`);
+      expect(calls.map((c) => c.url)).toEqual([a]);
+      // Request fault leaves endpoint awake: next call hits a again
+      const head = await source.latestLedger();
+      expect(head.latest).toBe(50);
+      expect(calls.map((c) => c.url)).toEqual([a, a]);
+    } else {
+      // Endpoint fault rests a and fails over to b immediately
+      const head = await source.latestLedger();
+      expect(head.latest).toBe(50);
+      expect(calls.map((c) => c.url)).toEqual([a, b]);
+      // Once getHealth cache expires, subsequent call continues using b
+      clock.value += 2_001;
+      await source.latestLedger();
+      expect(calls.map((c) => c.url)).toEqual([a, b, b]);
+    }
   });
 
   it("rests an endpoint on 401/403 with a distinct message", async () => {
@@ -1034,6 +1523,193 @@ describe("chain endpoints", () => {
     await expect(new StellarSource(network(["https://rpc.example"]), lagging.deps).baseline("FUND", issuer, 7)).rejects.toThrow(/back in time/);
   });
 
+  it.each([
+    {
+      scenario: "503, 503, 200 on page 2",
+      page1Pages: 1,
+      page2Responses: [
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => "ok" as const,
+      ],
+      expectedPage1Calls: 1,
+      expectedPage2Calls: 3,
+      expectedSleepRanges: [
+        [500, 750],
+        [1000, 1250],
+      ],
+      expectedError: undefined,
+    },
+    {
+      scenario: "503 x3 on one Horizon",
+      page1Pages: 2,
+      page2Responses: [
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => new Response("", { status: 503 }),
+        () => "ok" as const,
+      ],
+      expectedPage1Calls: 2,
+      expectedPage2Calls: 4,
+      expectedSleepRanges: [
+        [500, 750],
+        [1000, 1250],
+        [250, 500],
+      ],
+      expectedError: undefined,
+    },
+    {
+      scenario: "429 on page 2",
+      page1Pages: 1,
+      page2Responses: [
+        () => new Response("slow down", { status: 429 }),
+      ],
+      expectedPage1Calls: 1,
+      expectedPage2Calls: 1,
+      expectedSleepRanges: [],
+      expectedError: /rate limited/,
+    },
+  ])(
+    "baseline() retries a failing page up to three times without restarting from page one ($scenario)",
+    async ({
+      page1Pages,
+      page2Responses,
+      expectedPage1Calls,
+      expectedPage2Calls,
+      expectedSleepRanges,
+      expectedError,
+    }) => {
+      const issuer = key();
+      const [h1, h2] = [key(), key()];
+      const line = (balance: string) => ({
+        asset_code: "FUND",
+        asset_issuer: issuer,
+        balance,
+        is_authorized: true,
+      });
+      const record = (id: string, balance: string) => ({ account_id: id, balances: [line(balance)] });
+      const many = Array.from({ length: 199 }, () => record(key(), "1.0000000"));
+      const first = `https://horizon.example/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`;
+      const second = "https://horizon.example/accounts?cursor=abc&limit=200";
+
+      const page1Response = () =>
+        new Response(
+          JSON.stringify({
+            _links: { next: { href: second } },
+            _embedded: { records: [record(h1, "70.0000000"), ...many] },
+          }),
+          { headers: { "latest-ledger": "150" } },
+        );
+      const page2Ok = () =>
+        new Response(
+          JSON.stringify({
+            _links: {},
+            _embedded: { records: [record(h2, "30.5000000")] },
+          }),
+          { headers: { "latest-ledger": "152" } },
+        );
+
+      const p2Answers = page2Responses.map((fn) => {
+        const res = fn();
+        return res === "ok" ? page2Ok : () => res;
+      });
+
+      const p1Answers = Array.from({ length: page1Pages }, () => page1Response);
+
+      const { calls, deps, sleeps } = scripted({
+        [first]: p1Answers,
+        [second]: p2Answers,
+      });
+
+      const source = new StellarSource(network(["https://rpc.example"]), deps);
+      const run = () => source.baseline("FUND", issuer, 7);
+
+      if (expectedError) {
+        await expect(run()).rejects.toThrow(expectedError);
+      } else {
+        const res = await run();
+        expect(res.ledger).toBe(150);
+        expect(res.openings.size).toBe(201);
+      }
+
+      // URL call counts asserted per row
+      expect(calls.filter((c) => c.url === first)).toHaveLength(expectedPage1Calls);
+      expect(calls.filter((c) => c.url === second)).toHaveLength(expectedPage2Calls);
+
+      // Sleep ranges asserted
+      expect(sleeps).toHaveLength(expectedSleepRanges.length);
+      for (let i = 0; i < expectedSleepRanges.length; i++) {
+        const [min, max] = expectedSleepRanges[i]!;
+        expect(sleeps[i]).toBeGreaterThanOrEqual(min);
+        expect(sleeps[i]).toBeLessThanOrEqual(max);
+      }
+    },
+  );
+  it("baseline() handles an empty first page, fails over on invalid Latest-Ledger headers, and stops after 200 records with no next link", async () => {
+    const issuer = key();
+    const firstPath = `/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`;
+    const h1 = "https://h1.example";
+    const h2 = "https://h2.example";
+    const multiHorizonNet = {
+      name: "mainnet" as const,
+      passphrase: MAINNET_PASSPHRASE,
+      rpc: [{ url: "https://rpc.example" }],
+      horizon: [{ url: h1 }, { url: h2 }],
+    };
+    const record = (id: string, balance: string) => ({
+      account_id: id,
+      balances: [{ asset_code: "FUND", asset_issuer: issuer, balance, is_authorized: true }],
+    });
+
+    // 1. Empty first page returns an empty map at the page's ledger.
+    const empty = scripted({
+      [`https://horizon.example${firstPath}`]: [
+        () => new Response(JSON.stringify({ _links: {}, _embedded: { records: [] } }), { headers: { "latest-ledger": "77" } }),
+      ],
+    });
+    const emptyBaseline = await new StellarSource(network(["https://rpc.example"]), empty.deps).baseline("FUND", issuer, 7);
+    expect(emptyBaseline.ledger).toBe(77);
+    expect(emptyBaseline.openings.size).toBe(0);
+    expect(empty.calls.map((c) => c.url)).toEqual([`https://horizon.example${firstPath}`]);
+
+    // 2. Missing, '0', or 'abc' Latest-Ledger header fails over to the next Horizon endpoint.
+    for (const badHeaders of [{}, { "latest-ledger": "0" }, { "latest-ledger": "abc" }] as Array<Record<string, string>>) {
+      const failoverHolder = key();
+      const failover = scripted({
+        [`${h1}${firstPath}`]: [
+          () => new Response(JSON.stringify({ _links: {}, _embedded: { records: [] } }), { headers: badHeaders }),
+        ],
+        [`${h2}${firstPath}`]: [
+          () =>
+            new Response(
+              JSON.stringify({ _links: {}, _embedded: { records: [record(failoverHolder, "5.0000000")] } }),
+              { headers: { "latest-ledger": "88" } },
+            ),
+        ],
+      });
+      const res = await new StellarSource(multiHorizonNet, failover.deps).baseline("FUND", issuer, 7);
+      expect(res.ledger).toBe(88);
+      expect(res.openings.size).toBe(1);
+      expect(res.openings.get(failoverHolder)).toEqual({ amount: u(5), asOfLedger: 88, authorized: true });
+      expect(failover.calls.map((c) => c.url)).toEqual([`${h1}${firstPath}`, `${h2}${firstPath}`]);
+    }
+
+    // 3. Exactly 200 records with no _links.next stops after one request.
+    const twoHundred = Array.from({ length: 200 }, () => record(key(), "1.0000000"));
+    const singleFull = scripted({
+      [`https://horizon.example${firstPath}`]: [
+        () =>
+          new Response(JSON.stringify({ _links: {}, _embedded: { records: twoHundred } }), {
+            headers: { "latest-ledger": "99" },
+          }),
+      ],
+    });
+    const fullBaseline = await new StellarSource(network(["https://rpc.example"]), singleFull.deps).baseline("FUND", issuer, 7);
+    expect(fullBaseline.ledger).toBe(99);
+    expect(fullBaseline.openings.size).toBe(200);
+    expect(singleFull.calls.map((c) => c.url)).toEqual([`https://horizon.example${firstPath}`]);
+  });
+
   it("finds classic assets by code, most widely held first", async () => {
     const [i1, i2] = [key(), key()];
     const asset = (issuer: string, authorized: number, flags: boolean) => ({
@@ -1055,6 +1731,45 @@ describe("chain endpoints", () => {
     ]);
     expect(found[0]!.asset).toBe(`BENJI:${i2}`);
     expect(found[0]!.contractId).toMatch(/^C[A-Z2-7]{55}$/);
+  });
+
+  it("prefers Horizon contract_id in search(), derives it when absent, keeps tie order, and returns [] on empty records", async () => {
+    const [i1, i2, i3] = [key(), key(), key()];
+    const record = (issuer: string, authorized: number, contract_id?: string) => ({
+      asset_code: "BENJI",
+      asset_issuer: issuer,
+      ...(contract_id ? { contract_id } : {}),
+      accounts: { authorized, authorized_to_maintain_liabilities: 0, unauthorized: 0 },
+      balances: { authorized: "10.0000000" },
+      flags: { auth_required: false, auth_revocable: false, auth_clawback_enabled: false },
+    });
+    const url = "https://horizon.example/assets?asset_code=BENJI&limit=200";
+    const { deps } = scripted({
+      [url]: [
+        () =>
+          new Response(
+            JSON.stringify({
+              _embedded: {
+                records: [
+                  record(i1, 50, "CVERBATIM"),
+                  record(i2, 50),
+                  record(i3, 100),
+                ],
+              },
+            }),
+          ),
+        () => new Response(JSON.stringify({ _embedded: { records: [] } })),
+      ],
+    });
+    const source = new StellarSource(network(["https://rpc.example"]), deps);
+    const found = await source.search("BENJI");
+    expect(found.map((f) => [f.issuer, f.contractId, f.trustlines])).toEqual([
+      [i3, new Asset("BENJI", i3).contractId(MAINNET_PASSPHRASE), 100],
+      [i1, "CVERBATIM", 50],
+      [i2, new Asset("BENJI", i2).contractId(MAINNET_PASSPHRASE), 50],
+    ]);
+
+    expect(await source.search("BENJI")).toEqual([]);
   });
 
   it("fails over to the next Horizon endpoint when _embedded.records is omitted, and reports ChainError naming hosts if all fail", async () => {
@@ -1115,6 +1830,300 @@ describe("chain endpoints", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain("h1.example: unexpected response");
     expect(err.message).toContain("h2.example: unexpected response");
+  });
+
+  it("stops retrying and fails immediately when budget is exceeded on the first attempt", async () => {
+    const a = "https://a.example";
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
+      [a]: [
+        () => {
+          clock.value += 95_000;
+          return new Response("", { status: 503 });
+        },
+      ],
+      [b]: [health],
+    });
+    const source = new StellarSource(network([a, b]), deps);
+    const err = await source.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("a.example: HTTP 503");
+    expect(calls.map((c) => c.url)).toEqual([a]);
+  });
+
+  it("retries and falls over to the next endpoint when within budget", async () => {
+    const a = "https://a.example";
+    const b = "https://b.example";
+    const { calls, clock, deps } = scripted({
+      [a]: [
+        () => {
+          clock.value += 10_000;
+          return new Response("", { status: 503 });
+        },
+        () => {
+          clock.value += 10_000;
+          return new Response("", { status: 503 });
+        },
+      ],
+      [b]: [health],
+    });
+    const source = new StellarSource(network([a, b]), deps);
+    const head = await source.latestLedger();
+    expect(head.latest).toBe(50);
+    expect(calls.map((c) => c.url)).toEqual([a, a, b]);
+  });
+
+  it("retries a timed-out request once on the same endpoint with backoff, then fails over to the next endpoint", async () => {
+    const a = "https://a.example/secret-key";
+    const b = "https://b.example";
+    const timeout = () => {
+      throw new DOMException("t", "TimeoutError");
+    };
+    const { calls, clock, deps } = scripted({
+      [a]: [timeout, timeout],
+      [b]: [health],
+    });
+    const sleeps: number[] = [];
+    const trackedDeps = {
+      ...deps,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        await deps.sleep(ms);
+      },
+    };
+    const before = clock.value;
+    const source = new StellarSource(network([a, b]), trackedDeps);
+    expect(await source.latestLedger()).toMatchObject({ latest: 50, oldest: 10 });
+    expect(calls.map((c) => c.url)).toEqual([a, a, b]);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]!).toBeGreaterThanOrEqual(250);
+    expect(sleeps[0]!).toBeLessThanOrEqual(500);
+    expect(clock.value - before).toBeCloseTo(sleeps[0]!, 6);
+
+    const single = scripted({ [a]: [timeout, timeout] });
+    const allFail = new StellarSource(network([a]), single.deps);
+    const err = await allFail.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe("Stellar RPC (mainnet) is unavailable (a.example: timed out)");
+    expect((err as Error).message).not.toContain("secret-key");
+  });
+
+  it("getEvents maps cursor, latestLedger, latestLedgerCloseTime, missing events, and skips ignored events", async () => {
+    const rpc = "https://rpc.example";
+    const contractId = StrKey.encodeContract(Buffer.alloc(32, 7));
+    const [a, b] = [key(), key()];
+    const sym = (s: string) => nativeToScVal(s, { type: "symbol" }).toXDR("base64");
+    const addr = (s: string) => nativeToScVal(s, { type: "address" }).toXDR("base64");
+    const str = (s: string) => nativeToScVal(s).toXDR("base64");
+    const i128 = (n: bigint) => nativeToScVal(n, { type: "i128" }).toXDR("base64");
+    const rawEvent = (id: string, topic: string[], value: string) => ({
+      id,
+      ledger: 120,
+      ledgerClosedAt: "2026-09-21T14:13:20.000Z",
+      contractId,
+      txHash: `tx-${id}`,
+      topic,
+      value,
+    });
+
+    const eTransfer = rawEvent("001", [sym("transfer"), addr(a), addr(b), str(`FUND:${a}`)], i128(5n));
+    const eApprove = rawEvent("002", [sym("approve"), addr(a), addr(b), str(`FUND:${a}`)], i128(9n));
+    const eMint = rawEvent("003", [sym("mint"), addr(b), str(`FUND:${a}`)], i128(12n));
+
+    const { deps } = scripted({
+      [rpc]: [
+        () =>
+          new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                events: [eTransfer, eApprove, eMint],
+                cursor: "003",
+                latestLedger: 120,
+                latestLedgerCloseTime: "1790000000",
+              },
+            }),
+          ),
+        () =>
+          new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                events: [],
+                latestLedger: 121,
+                latestLedgerCloseTime: "0",
+              },
+            }),
+          ),
+        () =>
+          new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                latestLedger: 122,
+              },
+            }),
+          ),
+      ],
+    });
+    const source = new StellarSource(network([rpc]), deps);
+
+    // 1. Maps 2 tracked events (skipping approve), passes cursor, and converts latestLedgerCloseTime
+    const firstPage = await source.getEvents(contractId, { startLedger: 100 }, 10);
+    expect(firstPage).toEqual({
+      events: [
+        {
+          id: "001",
+          assetId: contractId,
+          kind: "transfer",
+          ledger: 120,
+          closedAt: "2026-09-21T14:13:20.000Z",
+          txHash: "tx-001",
+          amount: 5n,
+          from: a,
+          to: b,
+        },
+        {
+          id: "003",
+          assetId: contractId,
+          kind: "mint",
+          ledger: 120,
+          closedAt: "2026-09-21T14:13:20.000Z",
+          txHash: "tx-003",
+          amount: 12n,
+          to: b,
+        },
+      ],
+      cursor: "003",
+      latestLedger: 120,
+      latestLedgerClosedAt: "2026-09-21T14:13:20.000Z",
+      skipped: 0,
+    });
+
+    // 2. '0' close time and missing cursor omit both keys (strict key equality)
+    const zeroClosePage = await source.getEvents(contractId, { cursor: "003" }, 10);
+    expect(zeroClosePage).toEqual({
+      events: [],
+      latestLedger: 121,
+      skipped: 0,
+    });
+    expect("cursor" in zeroClosePage).toBe(false);
+    expect("latestLedgerClosedAt" in zeroClosePage).toBe(false);
+
+    // 3. Missing events array and missing latestLedgerCloseTime give [] and omit optional keys
+    const missingEventsPage = await source.getEvents(contractId, { startLedger: 122 }, 10);
+    expect(missingEventsPage).toEqual({
+      events: [],
+      latestLedger: 122,
+      skipped: 0,
+    });
+  });
+
+  it("describe() for a contract id reads the instance entry via getLedgerEntries and handles missing entries", async () => {
+    const rpc = "https://rpc.example";
+    const contractId = StrKey.encodeContract(Buffer.alloc(32, 9));
+    const expectedKey = xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract: Address.fromString(contractId).toScAddress(),
+        key: xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: xdr.ContractDataDurability.persistent,
+      }),
+    ).toXDR("base64");
+
+    const instanceEntry = xdr.LedgerEntryData.contractData(
+      new xdr.ContractDataEntry({
+        ext: xdr.ExtensionPoint.v0(),
+        contract: Address.fromString(contractId).toScAddress(),
+        key: xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: xdr.ContractDataDurability.persistent,
+        val: xdr.ScVal.scvContractInstance(
+          new xdr.ScContractInstance({
+            executable: xdr.ContractExecutable.contractExecutableStellarAsset(),
+            storage: [
+              new xdr.ScMapEntry({
+                key: nativeToScVal("METADATA", { type: "symbol" }),
+                val: nativeToScVal(
+                  { decimal: 7, name: "Franklin Benji", symbol: "BENJI" },
+                  { type: { decimal: ["symbol", "u32"], name: ["symbol", "string"], symbol: ["symbol", "string"] } },
+                ),
+              }),
+            ],
+          }),
+        ),
+      }),
+    ).toXDR("base64");
+
+    const { calls, deps } = scripted({
+      [rpc]: [
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { entries: [{ xdr: instanceEntry }] } })),
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })),
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { entries: null } })),
+        () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { entries: [] } })),
+      ],
+    });
+    const source = new StellarSource(network([rpc]), deps);
+
+    expect(await source.describe({ id: contractId, code: contractId })).toEqual({
+      decimals: 7,
+      code: "BENJI",
+      name: "Franklin Benji",
+    });
+    expect(await source.describe({ id: contractId, code: contractId })).toBeUndefined();
+    expect(await source.describe({ id: contractId, code: contractId })).toBeUndefined();
+    expect(await source.describe({ id: contractId, code: contractId })).toBeUndefined();
+
+    expect(calls).toHaveLength(4);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getLedgerEntries",
+      params: { keys: [expectedKey] },
+    });
+  });
+
+  it.each([
+    [
+      "string-typed latestLedger",
+      { latestLedger: "10", oldestLedger: 1 },
+      { error: "Stellar RPC getHealth did not report its ledger range" },
+    ],
+    [
+      "missing oldestLedger",
+      { latestLedger: 10 },
+      { error: "Stellar RPC getHealth did not report its ledger range" },
+    ],
+    [
+      "null result",
+      null,
+      { error: "Stellar RPC getHealth returned no result" },
+    ],
+    [
+      "oldestLedgerCloseTime 'abc'",
+      { latestLedger: 10, oldestLedger: 1, oldestLedgerCloseTime: "abc" },
+      { head: { latest: 10, oldest: 1 } },
+    ],
+    [
+      "oldestLedgerCloseTime '0'",
+      { latestLedger: 10, oldestLedger: 1, oldestLedgerCloseTime: "0" },
+      { head: { latest: 10, oldest: 1 } },
+    ],
+  ])("handles %s from getHealth", async (_name, result, expected) => {
+    const url = "https://rpc.example";
+    const { deps } = scripted({
+      [url]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }))],
+    });
+    const source = new StellarSource(network([url]), deps);
+    if ("error" in expected) {
+      const err = await source.latestLedger().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ChainError);
+      expect((err as ChainError).kind).toBe("rejected");
+      expect((err as ChainError).message).toBe(expected.error);
+    } else {
+      expect(await source.latestLedger()).toEqual(expected.head);
+    }
   });
 });
 
@@ -1444,6 +2453,48 @@ describe("what ships", () => {
     expect(cfgAny.publicUrl).toBe("http://127.0.0.1:4400");
   });
 
+  it("loadConfig(process.env) loads .env with real environment variables taking precedence (#489)", () => {
+    const origEnv = { ...process.env };
+    const origLoadEnvFile = process.loadEnvFile;
+    const tempDir = mkdtempSync(join(tmpdir(), "concord-env-test-"));
+    const tempEnvFile = join(tempDir, ".env");
+    writeFileSync(tempEnvFile, "CONCORD_PORT=5000\nCONCORD_SYNC_INTERVAL=7\n", "utf8");
+
+    try {
+      // Preset process.env.CONCORD_PORT=6000 to test precedence
+      process.env.CONCORD_PORT = "6000";
+      delete process.env.CONCORD_SYNC_INTERVAL;
+
+      // Spy process.loadEnvFile to redirect to the temp .env file
+      vi.spyOn(process, "loadEnvFile").mockImplementation(() => {
+        origLoadEnvFile.call(process, tempEnvFile);
+      });
+
+      const config = loadConfig(process.env);
+      // Environment variable (6000) beats the file (5000)
+      expect(config.port).toBe(6000);
+      // The file fills gaps (7)
+      expect(config.syncIntervalSec).toBe(7);
+
+      // Now test with the spy throwing ENOENT: expect defaults and no error
+      vi.spyOn(process, "loadEnvFile").mockImplementation(() => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      });
+      delete process.env.CONCORD_PORT;
+      delete process.env.CONCORD_SYNC_INTERVAL;
+      const defaultConfig = loadConfig(process.env);
+      expect(defaultConfig.port).toBe(4400);
+      expect(defaultConfig.syncIntervalSec).toBe(30);
+    } finally {
+      vi.restoreAllMocks();
+      for (const key of Object.keys(process.env)) {
+        if (!(key in origEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, origEnv);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("serves static files with correct MIME types for Vite assets and falls back to octet-stream", async () => {
     const dir = mkdtempSync(join(tmpdir(), "concord-mime-"));
     const dataDir = join(dir, "data");
@@ -1494,6 +2545,28 @@ describe("what ships", () => {
   });
 });
 
+describe("migrations", () => {
+  it("keeps shipped migrations append-only by pinning their digests", () => {
+    const check = (name: string, migrations: readonly string[], pinned: readonly string[]) => {
+      expect(
+        migrationDigests(migrations),
+        `${name} are append-only. Add a new migration and pin its digest instead of editing a shipped one.`,
+      ).toEqual(pinned);
+    };
+    check("ORG_MIGRATIONS", ORG_MIGRATIONS, ORG_MIGRATION_DIGESTS);
+    check("CONTROL_MIGRATIONS", CONTROL_MIGRATIONS, CONTROL_MIGRATION_DIGESTS);
+  });
+
+  it("rejects an edited shipped migration and an unpinned appended one", () => {
+    const edited = [...ORG_MIGRATIONS];
+    edited[0] = `${edited[0]} `;
+    expect(migrationDigests(edited)).not.toEqual(ORG_MIGRATION_DIGESTS);
+
+    const appended = [...CONTROL_MIGRATIONS, "CREATE TABLE later (id INTEGER);"];
+    expect(migrationDigests(appended)).not.toEqual(CONTROL_MIGRATION_DIGESTS);
+  });
+});
+
 describe("Db", () => {
   it("returns changed-row counts for UPDATE and DELETE, never a stale row id (#79)", () => {
     const db = new Db(":memory:", ["CREATE TABLE t (k TEXT PRIMARY KEY, v TEXT NOT NULL);"]);
@@ -1505,5 +2578,24 @@ describe("Db", () => {
     expect(db.write("DELETE FROM t WHERE k = 'a'")).toBe(0);
     expect(db.write("INSERT OR IGNORE INTO t (k, v) VALUES ('b', 'dup')")).toBe(0);
     expect("run" in db).toBe(false);
+  });
+});
+
+describe("configuration reference", () => {
+  it("lists every variable the server and CLI read (#514)", () => {
+    // Every CONCORD_* name in config.ts (the KNOWN list, the RETIRED map and the reads) and
+    // cli.ts, plus the two bare names loadConfig reads. The lookbehind keeps
+    // KNOWN_CONCORD_SETTINGS from contributing a spurious CONCORD_SETTINGS.
+    const sources = [
+      readFileSync(join(import.meta.dirname, "../src/config.ts"), "utf-8"),
+      readFileSync(join(import.meta.dirname, "../src/cli.ts"), "utf-8"),
+    ].join("\n");
+    const names = new Set(
+      [...sources.matchAll(/(?<![A-Z_])CONCORD_[A-Z_]+/g)].map((m) => m[0]),
+    );
+    for (const bare of ["PORT", "RENDER_EXTERNAL_URL"]) names.add(bare);
+    const doc = readFileSync(join(import.meta.dirname, "../../../docs/CONFIGURATION.md"), "utf-8");
+    const missing = [...names].filter((name) => !doc.includes(`\`${name}\``));
+    expect(missing, "variables read but not documented").toEqual([]);
   });
 });

