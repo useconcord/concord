@@ -32,6 +32,10 @@ export const CLI_OPTIONS = {
   role: { type: "string" },
   limit: { type: "string" },
   before: { type: "string" },
+  scope: { type: "string" },
+  status: { type: "string" },
+  key: { type: "string" },
+  run: { type: "string" },
   json: { type: "boolean" },
   "fail-on-breaks": { type: "boolean" },
   yes: { type: "boolean", short: "y" },
@@ -140,6 +144,8 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   actions ASSET                    corporate actions and their state
   controls ASSET                   freeze, authorisation and clawback log
   export ASSET [--from ISO] [--to ISO] [--csv SECTION] [--out FILE]
+  signoff ASSET --scope recon|controls|action:N --key KEY --status open|acknowledged|resolved
+        [--note TEXT] [--run N]
 
 Operator commands.
 
