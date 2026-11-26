@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
-import { Hono } from "hono";
+import { Hono, type Context, type Handler } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import { createApi } from "./api.js";
 import { Auth } from "./auth.js";
@@ -44,15 +44,20 @@ export interface Runtime {
 
 /** Identity records, the chain sources for both networks, and the workspaces over them. */
 export function openRuntime(config: Config): Runtime {
-  const control = new Db(join(config.dataDir, "control.db"), CONTROL_MIGRATIONS);
-  try { control.check(); } catch (err) { control.close(); throw err; }
+  const control = new Db(join(config.dataDir, "control.db"), CONTROL_MIGRATIONS, config.sqliteSynchronous);
+  try {
+    control.check();
+  } catch (err) {
+    control.close();
+    throw err;
+  }
   const auth = new Auth(control, { signup: config.signup, maxInvites: config.maxInvitesPerOrg, ...(config.passwordCost ? { cost: config.passwordCost } : {}) });
   const networks: Networks = {};
   for (const name of NETWORK_NAMES) {
     networks[name] = { passphrase: config.networks[name].passphrase, chain: new StellarSource(config.networks[name]) };
   }
   const tenants = new Tenants(
-    fileStore(config.dataDir, { checkOnOpen: config.checkOnOpen }),
+    fileStore(config.dataDir, { synchronous: config.sqliteSynchronous, checkOnOpen: config.checkOnOpen }),
     networks,
     (orgId) => auth.orgExists(orgId),
     () => auth.orgIds(),
@@ -67,6 +72,44 @@ export function openRuntime(config: Config): Runtime {
     },
   };
 }
+
+export function createStaticHandler(webDir: string): Handler {
+  return (c: Context) => {
+    if (!existsSync(webDir)) {
+      return c.text("Concord API is running. Build the dashboard with `pnpm build` to serve it here.");
+    }
+    let requested: string;
+    try {
+      requested = decodeURIComponent(c.req.path);
+    } catch {
+      return c.text("Bad request", 400);
+    }
+    // Refuse dotfile segments (e.g. /.hidden, /a/.git/config).
+    const segments = requested.split("/").filter(Boolean);
+    if (segments.some((s) => s.startsWith("."))) {
+      return c.text("Not found", 404);
+    }
+
+    const path = normalize(join(webDir, requested));
+    // The separator matters: without it a sibling directory sharing the prefix would count as inside.
+    const inside = path === webDir || path.startsWith(webDir + sep);
+    const found = inside && existsSync(path) && statSync(path).isFile();
+    // A build asset that is not there, or any missing file with an extension, is a 404; only extensionless routes fall back to the app shell.
+    const lastSegment = segments[segments.length - 1] ?? "";
+    const hasExtension = extname(lastSegment) !== "";
+    if (!found && (hasExtension || requested.startsWith("/assets/"))) return c.text("Not found", 404);
+    const file = found ? path : join(webDir, "index.html");
+    const assetsDir = normalize(join(webDir, "assets"));
+    const isAsset = found && (path === assetsDir || path.startsWith(assetsDir + sep));
+    return c.body(new Uint8Array(readFileSync(file)), 200, {
+      "content-type": MIME[extname(file)] ?? "application/octet-stream",
+      // Vite names build assets by content hash, so they never change under a given name.
+      "cache-control": isAsset ? "public, max-age=31536000, immutable" : "no-cache",
+    });
+  };
+}
+
+export { createStaticHandler as staticHandler };
 
 export function createServerApp(runtime: Runtime, config: Config): Hono {
   const secure = config.publicUrl.startsWith("https://");
@@ -108,41 +151,47 @@ export function createServerApp(runtime: Runtime, config: Config): Hono {
   );
 
   // The built dashboard, with index.html standing in for client-side routes.
-  app.get("*", (c) => {
-    if (!existsSync(config.webDir)) {
-      return c.text("Concord API is running. Build the dashboard with `pnpm build` to serve it here.");
-    }
-    let requested: string;
-    try {
-      requested = decodeURIComponent(c.req.path);
-    } catch {
-      return c.text("Bad request", 400);
-    }
-    // Refuse dotfile segments (e.g. /.hidden, /a/.git/config).
-    const segments = requested.split("/").filter(Boolean);
-    if (segments.some((s) => s.startsWith("."))) {
-      return c.text("Not found", 404);
-    }
-
-    const path = normalize(join(config.webDir, requested));
-    // The separator matters: without it a sibling directory sharing the prefix would count as inside.
-    const inside = path === config.webDir || path.startsWith(config.webDir + sep);
-    const found = inside && existsSync(path) && statSync(path).isFile();
-    // A build asset that is not there, or any missing file with an extension, is a 404; only extensionless routes fall back to the app shell.
-    const lastSegment = segments[segments.length - 1] ?? "";
-    const hasExtension = extname(lastSegment) !== "";
-    if (!found && (hasExtension || requested.startsWith("/assets/"))) return c.text("Not found", 404);
-    const file = found ? path : join(config.webDir, "index.html");
-    const assetsDir = normalize(join(config.webDir, "assets"));
-    const isAsset = found && (path === assetsDir || path.startsWith(assetsDir + sep));
-    return c.body(new Uint8Array(readFileSync(file)), 200, {
-      "content-type": MIME[extname(file)] ?? "application/octet-stream",
-      // Vite names build assets by content hash, so they never change under a given name.
-      "cache-control": isAsset ? "public, max-age=31536000, immutable" : "no-cache",
-    });
-  });
+  app.get("*", createStaticHandler(config.webDir));
 
   return app;
+}
+
+export interface IndexerHandle {
+  stop(): void;
+}
+
+export function startIndexer(
+  tenants: Pick<Tenants, "syncAll">,
+  intervalSec: number,
+): IndexerHandle {
+  let timer: NodeJS.Timeout | undefined;
+  if (intervalSec > 0) {
+    let busy = false;
+    const pass = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        for (const r of await tenants.syncAll()) {
+          const where = r.assetId ? `${r.orgId}/${r.assetId.slice(0, 8)}` : r.orgId;
+          if (r.error) console.error(`sync ${where}: ${r.error}`);
+          else if (r.added) console.log(`sync ${where}: +${r.added} events`);
+        }
+      } catch (err) {
+        // Nothing here may take the process down; the next pass tries again.
+        console.error("sync pass failed", err);
+      } finally {
+        busy = false;
+      }
+    };
+    void pass();
+    timer = setInterval(() => void pass(), intervalSec * 1000);
+    timer.unref();
+  }
+  return {
+    stop() {
+      if (timer) clearInterval(timer);
+    },
+  };
 }
 
 export function startServer(config: Config = loadConfig()): void {
@@ -172,36 +221,14 @@ export function startServer(config: Config = loadConfig()): void {
   const purgeTimer = setInterval(purge, 60 * 60_000);
   purgeTimer.unref();
 
-  let timer: NodeJS.Timeout | undefined;
-  if (config.syncIntervalSec > 0) {
-    let busy = false;
-    const pass = async () => {
-      if (busy) return;
-      busy = true;
-      try {
-        for (const r of await runtime.tenants.syncAll()) {
-          const where = r.assetId ? `${r.orgId}/${r.assetId.slice(0, 8)}` : r.orgId;
-          if (r.error) console.error(`sync ${where}: ${r.error}`);
-          else if (r.added) console.log(`sync ${where}: +${r.added} events`);
-        }
-      } catch (err) {
-        // Nothing here may take the process down; the next pass tries again.
-        console.error("sync pass failed", err);
-      } finally {
-        busy = false;
-      }
-    };
-    void pass();
-    timer = setInterval(() => void pass(), config.syncIntervalSec * 1000);
-    timer.unref();
-  }
+  const indexer = startIndexer(runtime.tenants, config.syncIntervalSec);
 
   let stopping = false;
   const stop = (signal: string) => {
     if (stopping) return;
     stopping = true;
     console.log(`${signal}: shutting down`);
-    if (timer) clearInterval(timer);
+    indexer.stop();
     clearInterval(purgeTimer);
     server.close(() => {
       runtime.close();
@@ -217,12 +244,13 @@ export function startServer(config: Config = loadConfig()): void {
   process.on("SIGINT", () => stop("SIGINT"));
 }
 
-function isEntry(): boolean {
+export function isEntry(argv1: string | undefined, metaUrl: string): boolean {
+  if (!argv1) return false;
   try {
-    return import.meta.url === pathToFileURL(realpathSync(process.argv[1] ?? "")).href;
+    return metaUrl === pathToFileURL(realpathSync(argv1)).href;
   } catch {
     return false;
   }
 }
 
-if (isEntry()) startServer();
+if (isEntry(process.argv[1], import.meta.url)) startServer();
