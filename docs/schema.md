@@ -188,6 +188,9 @@ One row per reconciliation. Index `runs_asset (asset_id, id)` and `runs_register
 | `register_id` | INTEGER | → `registers.id`. NOT NULL: a run always belongs to a register. |
 | `as_of` | TEXT | The register's as-of time. |
 | `created_by`, `created_at` | TEXT | |
+| `summary` | TEXT (JSON) | Copy of `result.summary` (migration 7), so the runs list never parses `result`. |
+| `status`, `chain_behind` | TEXT, INTEGER | Copies of `result.status` and `result.chainBehind` (migration 7). |
+| `open_breaks` | INTEGER | Breaks not signed off (migration 7). Rewritten for the asset whenever a reconciliation break is signed off or reopened. |
 | `result` | TEXT (JSON) | See below. |
 
 `result` holds the whole outcome, so a past run can be shown without recomputing it:
