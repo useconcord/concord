@@ -1457,6 +1457,13 @@ export class Concord {
       });
   }
 
+  /** Remove a single journal entry by its ref. */
+  deleteJournalEntry(ref: string, entryRef: string): void {
+    const asset = this.asset(ref);
+    const removed = this.db.write("DELETE FROM journal WHERE asset_id = ? AND ref = ?", asset.id, entryRef);
+    if (removed === 0) throw new NotFound(`no such journal entry ${entryRef} for this asset`);
+  }
+
   importInstructions(ref: string, csv: string, options: { mode?: "merge" | "replace" } = {}) {
     const mode = options.mode ?? "merge";
     if (mode !== "merge" && mode !== "replace") {
@@ -1540,6 +1547,13 @@ export class Concord {
         approvedBy: r.approved_by ? String(r.approved_by) : null,
         reason: r.reason ? String(r.reason) : null,
       }));
+  }
+
+  /** Remove a single instruction by its ref. */
+  deleteInstruction(ref: string, instructionRef: string): void {
+    const asset = this.asset(ref);
+    const removed = this.db.write("DELETE FROM instructions WHERE asset_id = ? AND ref = ?", asset.id, instructionRef);
+    if (removed === 0) throw new NotFound(`no such instruction ${instructionRef} for this asset`);
   }
 
   // ── reconciliation ────────────────────────────────────────────────────────
@@ -1958,6 +1972,22 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     for (const n of this.db.all("SELECT * FROM break_notes WHERE asset_id = ? AND scope = ?", assetId, scope)) {
       notes.set(String(n.key), n);
     }
+    const histories = new Map<string, Array<{ status: string; note: string; author: string | null; at: string }>>();
+    for (const h of this.db.all(
+      "SELECT key, status, note, author, at FROM break_note_history WHERE asset_id = ? AND scope = ? ORDER BY id ASC",
+      assetId,
+      scope,
+    )) {
+      const k = String(h.key);
+      const list = histories.get(k) ?? [];
+      list.push({
+        status: String(h.status),
+        note: String(h.note),
+        author: h.author ? String(h.author) : null,
+        at: String(h.at),
+      });
+      histories.set(k, list);
+    }
     return breaks.map((b) => {
       const n = notes.get(b.key);
       const current = n !== undefined && String(n.fingerprint) === b.fingerprint;
@@ -1969,6 +1999,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         noteAuthor: n?.author ? String(n.author) : null,
         noteAt: n ? String(n.updated_at) : null,
         noteStale: n !== undefined && !current,
+        history: histories.get(b.key) ?? [],
       };
     });
   }
@@ -2054,6 +2085,12 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         author: r.author ? String(r.author) : null,
         at: String(r.at),
       }));
+  }
+
+  /** Sign-off history for one break, oldest first: who, when, what status, and the note. */
+  breakHistory(ref: string, scope: string, key: string) {
+    if (!scope || !key) throw new Invalid("scope and key are required");
+    return this.noteHistory(ref, scope, key).map(({ status, note, author, at }) => ({ status, note, author, at }));
   }
 
   // ── corporate actions ─────────────────────────────────────────────────────
@@ -2824,8 +2861,12 @@ ul { margin: 6px 0 0; padding-left: 20px; }
             "status",
             "note",
             "noteAuthor",
+            "history",
           ],
-          rows,
+          rows.map((r) => ({
+            ...r,
+            history: Array.isArray(r.history) && r.history.length > 0 ? JSON.stringify(r.history) : "",
+          })),
         );
       }
       case "positions": {

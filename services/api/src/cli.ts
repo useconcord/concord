@@ -407,6 +407,16 @@ export async function runCli(
       );
       break;
     }
+    case "break-history": {
+      const concord = workspace();
+      const asset = need(a, "asset");
+      const scope = need(b ?? values.scope, "scope");
+      const key = need(positionals[3] ?? values.key, "break key");
+      const history = concord.breakHistory(asset, scope, key);
+      if (values.json) return out(history);
+      table(history);
+      break;
+    }
     case "export": {
       const concord = workspace();
       const asset = need(a, "asset");

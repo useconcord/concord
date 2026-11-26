@@ -215,7 +215,8 @@
         "note",
         "noteAuthor",
         "noteAt",
-        "noteStale"
+        "noteStale",
+        "history"
       ],
       "properties": {
         "scope": { "type": "string" },
@@ -240,7 +241,21 @@
         "note": { "$ref": "#/definitions/nullableString" },
         "noteAuthor": { "$ref": "#/definitions/nullableString" },
         "noteAt": { "$ref": "#/definitions/nullableDateTime" },
-        "noteStale": { "type": "boolean" }
+        "noteStale": { "type": "boolean" },
+        "history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "note", "author", "at"],
+            "properties": {
+              "status": { "enum": ["open", "acknowledged", "resolved"] },
+              "note": { "type": "string" },
+              "author": { "$ref": "#/definitions/nullableString" },
+              "at": { "$ref": "#/definitions/dateTime" }
+            }
+          }
+        }
       }
     },
     "reconciliation": {

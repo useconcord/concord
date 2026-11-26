@@ -147,6 +147,7 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   actions ASSET                    corporate actions and their state
   controls ASSET                   freeze, authorisation and clawback log
   export ASSET [--from ISO] [--to ISO] [--csv SECTION] [--out FILE]
+  break-history ASSET SCOPE KEY     sign-off history of one break, oldest first
   signoff ASSET --scope recon|controls|action:N --key KEY --status open|acknowledged|resolved
         [--note TEXT] [--run N]
   verify-pack FILE [--key PEM]
