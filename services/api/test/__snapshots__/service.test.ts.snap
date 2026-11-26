@@ -51,7 +51,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
   <section>
     <h2>Integrity</h2>
     <table class="facts">
-      <tr><th scope="row">Run result SHA-256</th><td><code>bfa5e54344d42eb0087d880f499187a2ff1538957acc06845f5fa877fd87aad5</code></td></tr>
+      <tr><th scope="row">Run result SHA-256</th><td><code>2d940e3d298c80285a38c359b6513f9ad175625aa3382652dcfd47a8e09ddfe5</code></td></tr>
       <tr><th scope="row">Register SHA-256</th><td><code>a0d620ad4f66a5124f9e659cd08636f036530b3dfbb68ebc74d3af375fd2f3c3</code></td></tr>
     </table>
   </section>

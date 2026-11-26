@@ -348,6 +348,7 @@
             }
           }
         },
+        "coverage": { "$ref": "#/definitions/coverage" },
         "movement": {
           "type": ["object", "null"],
           "additionalProperties": false,
@@ -378,6 +379,17 @@
         "breaks": { "type": "array", "items": { "$ref": "#/definitions/break" } },
         "openBreaks": { "type": "integer" },
         "tolerance": { "type": ["string", "null"] }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "mode", "complete"],
+      "properties": {
+        "from": { "$ref": "#/definitions/nullableDateTime" },
+        "to": { "$ref": "#/definitions/nullableDateTime" },
+        "mode": { "enum": ["baseline", "ledger", "window"] },
+        "complete": { "type": "boolean" }
       }
     },
     "corporateAction": {
@@ -478,7 +490,8 @@
                 }
               }
             },
-            "breaks": { "type": "array", "items": { "$ref": "#/definitions/break" } }
+            "breaks": { "type": "array", "items": { "$ref": "#/definitions/break" } },
+            "coverage": { "$ref": "#/definitions/coverage" }
           }
         },
         "openBreaks": { "type": "integer" }
