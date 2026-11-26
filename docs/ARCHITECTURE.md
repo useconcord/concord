@@ -44,7 +44,7 @@ the break moves.
 |---|---|
 | `chain.ts` | `ChainSource` interface and `StellarSource`. Pages RPC `getEvents`, decodes them with `decodeEvent`, fails over between endpoints, and reads Horizon for opening balances. Also `resolveAsset` (`CODE:ISSUER` or a `C...` contract id) |
 | `concord.ts` | The `Concord` class for one workspace: watch/unwatch/rebuild assets, `sync`, import books, `reconcile`, corporate actions, sign-off notes, controls, `auditExport` |
-| `tenants.ts` | Opens a workspace's `Concord` on demand. One SQLite file per workspace under `data/orgs/` |
+| `tenants.ts` | Opens a workspace's `Concord` on demand. One SQLite file per workspace under `data/orgs/` (see [`docs/tenancy.md`](./tenancy.md)) |
 | `db.ts`, `schema.ts` | Thin wrapper over `node:sqlite` (WAL mode) and the migration lists |
 | `auth.ts`, `auth-api.ts`, `security.ts` | Accounts, memberships, sessions, invitations, reset links, Google sign-in, scrypt password hashing, signed cookies, rate limiting |
 | `api.ts` | The Hono routes. Rejects cross-origin requests; every call carries the workspace in `x-concord-org` |
@@ -68,6 +68,9 @@ Two kinds of database, all under `CONCORD_DATA_DIR`:
 - `orgs/<id>.db`: one per workspace, so nothing a workspace stores can be reached through another.
   Schema is `ORG_MIGRATIONS`: watched assets, indexed events, uploaded registers, journals,
   instructions, reconciliation runs, corporate actions, notes.
+
+For the full tenancy architecture, 16-hex id validation, `meta.org_id` ownership checks, failure modes,
+and measured capacity limits, see [`docs/tenancy.md`](./tenancy.md).
 
 ### Workspace database layout (`orgs/<id>.db`)
 

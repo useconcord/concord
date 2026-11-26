@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
+import type { SqliteSynchronous } from "./db.js";
 
 export type NetworkName = "mainnet" | "testnet";
 export const NETWORK_NAMES: readonly NetworkName[] = ["mainnet", "testnet"];
@@ -49,6 +50,8 @@ export interface Config {
   defaultNetwork: NetworkName;
   /** Holds control.db and one database per workspace under orgs/. */
   dataDir: string;
+  sqliteSynchronous: SqliteSynchronous;
+  checkOnOpen: boolean;
   host: string;
   port: number;
   /** Seconds between indexer passes. 0 disables the background indexer. */
@@ -81,12 +84,12 @@ const RETIRED: Record<string, string> = {
 
 /** Recognized runtime settings, including the CLI-only workspace selector. */
 const KNOWN_CONCORD_SETTINGS = [
-  "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
+  "CONCORD_CHECK_ON_OPEN", "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
   "CONCORD_GOOGLE_CLIENT_ID", "CONCORD_GOOGLE_CLIENT_SECRET", "CONCORD_GOOGLE_CLIENT_SECRET_FILE", "CONCORD_HOST",
   "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
   "CONCORD_MAX_ASSETS", "CONCORD_MAX_INVITES", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
   "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS", "CONCORD_RPC_HEADERS_FILE",
-  "CONCORD_SIGNUP", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
+  "CONCORD_SIGNUP", "CONCORD_SQLITE_SYNCHRONOUS", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
   "CONCORD_TESTNET_RPC_URLS", "CONCORD_TRUST_PROXY", "CONCORD_USER_AGENT_SUFFIX", "CONCORD_WEB_DIR",
 ] as const;
 const KNOWN_SETTINGS = new Set<string>(KNOWN_CONCORD_SETTINGS);
@@ -282,10 +285,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
   }
   publicUrl = parsedPublicUrl.origin;
 
+  const sqliteSynchronous = env.CONCORD_SQLITE_SYNCHRONOUS ?? "normal";
+  if (sqliteSynchronous !== "normal" && sqliteSynchronous !== "full") {
+    throw new Error("CONCORD_SQLITE_SYNCHRONOUS must be normal or full");
+  }
+
   const config: Config = {
     networks: { mainnet: network("mainnet"), testnet: network("testnet") },
     defaultNetwork,
     dataDir: env.CONCORD_DATA_DIR ? resolve(ROOT, env.CONCORD_DATA_DIR) : resolve(ROOT, "data"),
+    sqliteSynchronous,
+    checkOnOpen: flag(env, "CONCORD_CHECK_ON_OPEN"),
     host,
     port,
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),

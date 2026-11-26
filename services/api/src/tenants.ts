@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { Concord, NotFound, type Networks } from "./concord.js";
-import { Db } from "./db.js";
+import { Db, type SqliteSynchronous } from "./db.js";
 import { ORG_MIGRATIONS } from "./schema.js";
 
 /** Where each workspace's database lives. */
@@ -10,10 +10,24 @@ export interface OrgStore {
   remove(orgId: string): void;
 }
 
-export function fileStore(dataDir: string): OrgStore {
+export function fileStore(
+  dataDir: string,
+  options: { synchronous?: SqliteSynchronous; checkOnOpen?: boolean } = {},
+): OrgStore {
   const path = (orgId: string) => join(dataDir, "orgs", `${orgId}.db`);
   return {
-    open: (orgId) => new Db(path(orgId), ORG_MIGRATIONS),
+    open: (orgId) => {
+      const db = new Db(path(orgId), ORG_MIGRATIONS, options.synchronous);
+      if (options.checkOnOpen) {
+        try {
+          db.check();
+        } catch (err) {
+          db.close();
+          throw err;
+        }
+      }
+      return db;
+    },
     remove: (orgId) => {
       for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path(orgId)}${suffix}`, { force: true });
     },
