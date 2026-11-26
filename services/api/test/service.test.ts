@@ -737,6 +737,117 @@ describe("Concord", () => {
     expect(ws.assets().map((a) => a.code)).toEqual(["AGE"]);
   });
 
+  it("keeps the overview's stored figures equal to a full recompute after every kind of change", async () => {
+    /** The overview as served, then as recomputed from scratch with the stored rows gone. */
+    const expectCurrent = (step: string) => {
+      const served = concord.overview();
+      concord.db.write("DELETE FROM asset_stats");
+      expect(served, `after ${step}`).toEqual(concord.overview());
+      return served.assets.find((a) => a.id === assetId)!;
+    };
+
+    await concord.sync("FUND");
+    expect(expectCurrent("first sync")).toMatchObject({ eventCount: 7, holderCount: 3, supply: "1144" });
+    // Served from the row the sync stored, not recomputed.
+    expect(concord.db.get("SELECT event_count FROM asset_stats WHERE asset_id = ?", assetId)).toEqual({
+      event_count: 7,
+    });
+
+    chain.advance(5);
+    await concord.sync("FUND");
+    expectCurrent("a sync that added nothing");
+
+    chain.push(assetId, "mint", 107, { to: h3, amount: u(4) });
+    chain.push(assetId, "set_authorized", 108, { from: h3, authorized: false });
+    chain.advance(5);
+    await concord.sync("FUND");
+    expect(expectCurrent("a sync with new events")).toMatchObject({ eventCount: 9, supply: "1148" });
+
+    // Issued 100 minutes before h2's freeze at ledger 20: inside the default matching window.
+    concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI1,freeze,${h2},,${at(-80)}\n`);
+    const controlsBefore = expectCurrent("an instructions import").openBreaks.controls;
+
+    // A one-hour window no longer pairs I1 with the freeze, so more controls break.
+    concord.updateAsset("FUND", { instructionWindowHours: 1 });
+    expect(expectCurrent("a narrower instruction window").openBreaks.controls).toBeGreaterThan(
+      controlsBefore,
+    );
+    concord.updateAsset("FUND", { instructionWindowHours: 72 });
+    expect(expectCurrent("the window restored").openBreaks.controls).toBe(controlsBefore);
+
+    const reg = concord.importRegister("FUND", {
+      csv: `holder_id,account,units\nA,${h1},90\nB,${h2},50\n`,
+      asOf: at(40),
+    });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    const reconciled = expectCurrent("a reconciliation");
+    expect(reconciled.lastRun).toMatchObject({ id: run.id, status: "breaks" });
+    expect(reconciled.openBreaks.reconciliation).toBe(run.breaks.length);
+
+    const recon = run.breaks[0]!;
+    concord.setNote("FUND", "recon", recon.key, { fingerprint: recon.fingerprint, status: "resolved", note: "ok" });
+    expect(expectCurrent("a reconciliation sign-off").openBreaks.reconciliation).toBe(run.breaks.length - 1);
+
+    const control = concord.controls("FUND").breaks[0]!;
+    concord.setNote("FUND", "controls", control.key, {
+      fingerprint: control.fingerprint,
+      status: "acknowledged",
+      note: "seen",
+    });
+    expect(expectCurrent("a controls sign-off").openBreaks.controls).toBe(controlsBefore - 1);
+
+    const action = await concord.createAction("FUND", { type: "dividend", recordTime: at(5), ratePerUnit: "0.1" });
+    const withAction = expectCurrent("a corporate action");
+    expect(withAction.openBreaks.actions).toBe(action.openBreaks);
+    expect(action.openBreaks).toBeGreaterThan(0);
+    const missing = action.result!.breaks[0]!;
+    concord.setNote("FUND", `action:${action.id}`, missing.key, {
+      fingerprint: missing.fingerprint,
+      status: "resolved",
+      note: "paid off-chain",
+    });
+    expect(expectCurrent("an action sign-off").openBreaks.actions).toBe(action.openBreaks - 1);
+
+    // A scheduled action that the indexer later reconciles on its own.
+    const later = await concord.createAction("FUND", { type: "split", recordTime: at(150), num: "2", den: "1" });
+    expect(later.state).toBe("scheduled");
+    chain.advance(100);
+    await concord.sync("FUND");
+    expect(await concord.reconcileDue()).toBeGreaterThan(0);
+    expectCurrent("an action reconciled after a sync");
+
+    concord.deleteRegister("FUND", reg.registerId);
+    expect(expectCurrent("a deleted register").lastRun).toBeNull();
+
+    await concord.rebuild("FUND", { defer: true }).catch(() => {});
+    expectCurrent("a deferred rebuild");
+    await concord.sync("FUND").catch(() => {});
+    expectCurrent("the sync after a rebuild");
+  });
+
+  it("serves a poll of the overview without reading events, runs, actions or the controls log", async () => {
+    for (let i = 0; i < 10_000; i++) chain.push(assetId, "mint", 40 + (i % 50), { to: h3, amount: 1n });
+    await concord.sync("FUND");
+    concord.overview();
+
+    const statements: string[] = [];
+    const { all, get } = { all: concord.db.all.bind(concord.db), get: concord.db.get.bind(concord.db) };
+    concord.db.all = ((sql: string, ...params: Parameters<Db["all"]>[1][]) => {
+      statements.push(sql);
+      return all(sql, ...params);
+    }) as Db["all"];
+    concord.db.get = ((sql: string, ...params: Parameters<Db["get"]>[1][]) => {
+      statements.push(sql);
+      return get(sql, ...params);
+    }) as Db["get"];
+    const fund = concord.overview().assets.find((a) => a.id === assetId)!;
+    expect(fund.eventCount).toBe(10_007);
+    expect(statements.length).toBeGreaterThan(0);
+    for (const sql of statements) {
+      expect(sql).not.toMatch(/\b(events|runs|actions|instructions|break_notes|openings)\b/);
+    }
+  });
+
   it("rounds holder shares half up to four decimals so two thirds and one third add to 100", async () => {
     const asset = await concord.watchAsset({ network: "testnet", asset: `THIRDS:${key()}`, fromLedger: 1 });
     chain.push(asset.id, "mint", 3, { to: h1, amount: u(2) });
@@ -4569,7 +4680,8 @@ describe("holdings checkpoints", () => {
     };
     chain.advance(1);
     await concord.sync(asset.id);
-    expect(checkpoints(concord, asset.id).every((l) => l < 50)).toBe(true);
+    // The sync drops every checkpoint from ledger 50 on; the overview figures it then refreshes
+    // write fresh ones that include the late event, so what matters is that every replay is exact.
     expectExact(chain, concord, asset.id, 300);
   });
 
@@ -4587,8 +4699,12 @@ describe("holdings checkpoints", () => {
       ledger: 200,
       openings: new Map([[holders[0]!, { amount: 500n, authorized: true, asOfLedger: 200 }]]),
     };
+    const before = checkpoints(concord, asset.id);
     await concord.rebuild(asset.id);
-    expect(checkpoints(concord, asset.id)).toEqual([]);
+    // The old checkpoints folded in the old opening balances; none may survive the rebuild (any
+    // present now were written afresh by the overview refresh, from the new baseline at 200).
+    expect(checkpoints(concord, asset.id).every((l) => l > 200)).toBe(true);
+    expect(checkpoints(concord, asset.id)).not.toEqual(before);
     expectExact(chain, concord, asset.id, 300);
     expect(checkpoints(concord, asset.id).length).toBeGreaterThan(0);
   });

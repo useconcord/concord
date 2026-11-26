@@ -248,6 +248,21 @@ CREATE VIEW action_changes AS SELECT * FROM action_history;
   `
 ALTER TABLE assets ADD COLUMN register_max_age_days INTEGER;
 `,
+  // v14: each asset's headline figures, so the polled overview reads one row; derived data, recomputed when missing
+  `
+CREATE TABLE asset_stats (
+  asset_id TEXT PRIMARY KEY REFERENCES assets (id) ON DELETE CASCADE,
+  supply TEXT NOT NULL,
+  holder_count INTEGER NOT NULL,
+  event_count INTEGER NOT NULL,
+  incomplete INTEGER NOT NULL,
+  last_run TEXT,
+  open_reconciliation INTEGER NOT NULL,
+  open_controls INTEGER NOT NULL,
+  open_actions INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */
