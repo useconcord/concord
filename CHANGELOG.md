@@ -49,6 +49,9 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 
 ### Added
 
+- A four-eyes rule for sign-off (#539): with `requireSecondSigner` on (`PATCH /api/org/settings`,
+  owners only; off by default), a break cannot be resolved by the person who acknowledged it or
+  who imported the register. Schema: `ORG_MIGRATIONS` entry 10 adds `registers.imported_by_id`.
 - Assign a break to a workspace member (`PUT /api/assets/:id/notes/assignee`) and list current
   breaks by owner (`GET /api/assets/:id/breaks?assignee=<id|none>`); the owner is in break payloads
   and the breaks CSV (#563). Schema: `ORG_MIGRATIONS` entry 9 adds `break_notes.assignee_id` and

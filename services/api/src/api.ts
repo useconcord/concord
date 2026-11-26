@@ -190,6 +190,13 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json({ ok: true });
   });
 
+  priv.get("/org/settings", (c) => c.json(c.var.ws.settings()));
+  priv.patch("/org/settings", async (c) => {
+    owner(c);
+    const input = await jsonBody<{ requireSecondSigner?: boolean }>(c);
+    return c.json(c.var.ws.updateSettings(input));
+  });
+
   // ── assets ────────────────────────────────────────────────────────────────
 
   priv.get("/overview", (c) => {
