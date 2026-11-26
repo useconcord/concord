@@ -3232,6 +3232,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       this.db.write("DELETE FROM break_notes WHERE asset_id = ? AND scope = ?", String(row.asset_id), `action:${id}`);
       this.db.write("DELETE FROM actions WHERE id = ?", id);
     });
+    this.refreshStats(String(row.asset_id));
     await this.pruneUnusedFlowOnlyAssets();
   }
 
@@ -3272,6 +3273,8 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       text,
       id,
     );
+    // A voided action's breaks stop counting as open in the stored overview figures.
+    this.refreshStats(String(row.asset_id));
     return this.action(id);
   }
 
