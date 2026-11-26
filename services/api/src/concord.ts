@@ -240,6 +240,22 @@ const SUMMARY_LABELS: Record<string, string> = {
   breakCount: "Breaks",
 };
 
+export const EXPORT_CSV_SECTIONS = [
+  "holdings",
+  "events",
+  "controls",
+  "breaks",
+  "action",
+  "positions",
+  "runs",
+  "actions",
+  "journal",
+  "instructions",
+] as const;
+export const EXPORT_CSV_SECTION_ERROR =
+  "section must be holdings, events, controls, breaks, action, positions, runs, actions, journal or instructions";
+export type ExportCsvSection = (typeof EXPORT_CSV_SECTIONS)[number];
+
 function isoTime(input: string, field: string): string {
   const t = Date.parse(input);
   if (Number.isNaN(t)) throw new Invalid(`${field} is not a valid date: "${input}"`);
@@ -2704,6 +2720,8 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   /** One section of the audit pack, or one corporate action's entitlement table, as CSV. */
   exportCsv(ref: string, section: string, period: { from?: string; to?: string; id?: number } = {}): string {
+    // Reject an unknown section before building the audit pack, which replays every event.
+    if (!(EXPORT_CSV_SECTIONS as readonly string[]).includes(section)) throw new Invalid(EXPORT_CSV_SECTION_ERROR);
     if (section === "action") {
       const asset = this.asset(ref);
       if (period.id === undefined || !Number.isSafeInteger(period.id) || period.id < 1) {
@@ -2905,7 +2923,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         return toCsv(["ref", "type", "account", "units", "issued_at", "approved_by", "reason"], rows);
       }
       default:
-        throw new Invalid("section must be holdings, events, controls, breaks, action, positions, runs, actions, journal or instructions");
+        throw new Invalid(EXPORT_CSV_SECTION_ERROR);
     }
   }
 }
