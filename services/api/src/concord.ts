@@ -331,6 +331,8 @@ export interface DeletionCounts {
 }
 
 export interface ConcordOptions {
+  /** Wall clock, in milliseconds. Tests inject one so register age is deterministic. */
+  now?: () => number;
   checkpointEvery?: number;
   /** ed25519 private key (PEM, or a path to one) that signs audit packs. */
   signingKey?: string;
@@ -663,8 +665,6 @@ export class Concord {
     readonly db: Db,
     readonly networks: Networks,
     readonly options: ConcordOptions = {},
-    /** Wall clock, in milliseconds. Tests inject one so register age is deterministic. */
-    private readonly options: { now?: () => number } = {},
   ) {
     this.seenVersion = db.dataVersion();
     const every = options.checkpointEvery ?? CHECKPOINT_EVERY;
@@ -2630,7 +2630,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   // ── corporate actions ─────────────────────────────────────────────────────
 
-  private validateAction(asset: AssetRecord, input: ActionInput) {
+  private async validateAction(asset: AssetRecord, input: ActionInput, actor?: Actor) {
     const recordTime = isoTime(String(input.recordTime ?? ""), "recordTime");
     const params: Record<string, unknown> = { exclude: addresses(input.exclude, "exclude") };
     if (input.windowTo) params.windowTo = isoTime(input.windowTo, "windowTo");
@@ -2755,7 +2755,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   async createAction(ref: string, input: ActionInput, actor?: Actor) {
     const asset = this.asset(ref);
-    const { recordTime, params, defaultTitle } = this.validateAction(asset, input);
+    const { recordTime, params, defaultTitle } = await this.validateAction(asset, input, actor);
     const title = label(input.label, "label") ?? defaultTitle;
     const id = this.db.insert(
       "INSERT INTO actions (asset_id, type, label, record_time, params, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -2804,7 +2804,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       label: patch.label,
     };
 
-    const { recordTime, params, defaultTitle } = this.validateAction(asset, mergedInput);
+    const { recordTime, params, defaultTitle } = await this.validateAction(asset, mergedInput, actor);
 
     const oldDefaultTitle =
       oldType === "dividend"
@@ -3462,7 +3462,17 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     // Never indexed: the controls log runs up to the clock, and there is nothing to replay.
     const row = asset.syncedAt ? this.db.get("SELECT * FROM asset_stats WHERE asset_id = ?", asset.id) : undefined;
     const stats = row ? statsFromRow(row) : this.refreshStats(asset.id);
-    return { ...asset, ...stats };
+    // Not stored with the figures: a register's age grows with the clock, not with any write.
+    const latestRegister = this.db.get<{ as_of: string }>(
+      "SELECT as_of FROM registers WHERE asset_id = ? ORDER BY as_of DESC, id DESC LIMIT 1",
+      asset.id,
+    );
+    // A register nobody has refreshed is the attention item a timer-free service cannot raise itself.
+    const registerStale =
+      asset.registerMaxAgeDays === undefined || !latestRegister
+        ? null
+        : this.registerAge(latestRegister.as_of, asset.registerMaxAgeDays);
+    return { ...asset, ...stats, registerStale };
   }
 
   /** The headline figures recomputed from the data, ignoring any stored row. */
@@ -3472,20 +3482,11 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     const controls = this.controls(asset.id);
     const actions = this.actions(asset.id);
     const events = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE asset_id = ?", asset.id)!.n;
-    const latestRegister = this.db.get<{ as_of: string }>(
-      "SELECT as_of FROM registers WHERE asset_id = ? ORDER BY as_of DESC, id DESC LIMIT 1",
-      asset.id,
-    );
     return {
       supply: formatUnits(state.supply, asset.decimals),
       holderCount: state.balances.size,
       eventCount: events,
       incomplete: state.incomplete.length > 0,
-      // A register nobody has refreshed is the attention item a timer-free service cannot raise itself.
-      registerStale:
-        asset.registerMaxAgeDays === undefined || !latestRegister
-          ? null
-          : this.registerAge(latestRegister.as_of, asset.registerMaxAgeDays),
       lastRun: run && { id: run.id, asOf: run.asOf, status: run.status, openBreaks: run.openBreaks },
       openBreaks: {
         reconciliation: run?.openBreaks ?? 0,
