@@ -49,6 +49,10 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 
 ### Added
 
+- Workspace webhooks (#562): an owner sets an https endpoint (`PUT /api/org/webhook`) that gets an
+  HMAC-signed POST (`x-concord-signature`) when a run or a corporate action has breaks, or a sync
+  starts failing. Private, loopback and metadata addresses are refused, checked again at connect
+  time; redirects are not followed and failed deliveries are retried, then logged.
 - `concord reconcile-all` reconciles every asset that has a register in one command, continuing
   past an asset that fails and summarising each result; `--fail-on-breaks` exits 2 when any
   asset has open breaks (#560).

@@ -42,6 +42,7 @@ import {
 } from "./chain.js";
 import { NETWORK_NAMES, isNetworkName, type NetworkName } from "./config.js";
 import type { Db, Row } from "./db.js";
+import { WebhookSender, newWebhookSecret, webhookUrlProblem, type WebhookEventType } from "./webhook.js";
 
 export class NotFound extends Error {}
 export class Invalid extends Error {}
@@ -610,6 +611,8 @@ export class Concord {
   private readonly syncConcurrency: number;
   private readonly syncAssetBudgetMs: number;
   private readonly clock: () => number;
+  /** Outbound alerts. Replaced in tests so no delivery leaves the machine. */
+  webhooks = new WebhookSender();
 
   constructor(
     readonly db: Db,
@@ -632,6 +635,67 @@ export class Concord {
   /** Forget cached holdings for an asset this instance just changed. */
   private touch(assetId: string): void {
     this.stateMemo.delete(assetId);
+  }
+
+  // ── webhook settings ──────────────────────────────────────────────────────
+
+  private setting(key: string): string | undefined {
+    const row = this.db.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
+    return row ? String(row.value) : undefined;
+  }
+
+  private putSetting(key: string, value: string | null): void {
+    if (value === null) this.db.write("DELETE FROM meta WHERE key = ?", key);
+    else this.db.write("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", key, value);
+  }
+
+  /**
+   * The workspace's outbound webhook, including the secret a receiver checks signatures with.
+   * Only a workspace owner is shown this by the API.
+   */
+  webhookSettings(): { url: string | null; secret: string | null } {
+    return { url: this.setting("webhook_url") ?? null, secret: this.setting("webhook_secret") ?? null };
+  }
+
+  /**
+   * Point alerts at an https endpoint, or clear them with an empty value. The signing secret is
+   * made once and kept across edits, so a receiver does not have to re-key on every change.
+   * `base` is the dashboard origin the payload's link is built from.
+   */
+  setWebhook(rawUrl: unknown, base?: string): { url: string | null; secret: string | null } {
+    const text = typeof rawUrl === "string" ? rawUrl.trim() : "";
+    if (!text) {
+      this.putSetting("webhook_url", null);
+      this.putSetting("webhook_base", null);
+      return this.webhookSettings();
+    }
+    const problem = webhookUrlProblem(text);
+    if (problem) throw new Invalid(problem);
+    let secret = this.setting("webhook_secret");
+    if (!secret) {
+      secret = newWebhookSecret();
+      this.putSetting("webhook_secret", secret);
+    }
+    if (base) this.putSetting("webhook_base", base);
+    this.putSetting("webhook_url", text);
+    return this.webhookSettings();
+  }
+
+  /**
+   * Queue one alert. Deliberately not awaited and never throwing: a slow or broken endpoint must
+   * not hold up indexing or a reconciliation. The sender logs its own failures.
+   */
+  private alert(type: WebhookEventType, asset: AssetRecord, count: number, path: string): void {
+    const url = this.setting("webhook_url");
+    const secret = this.setting("webhook_secret");
+    if (!url || !secret) return;
+    const base = this.setting("webhook_base") ?? "";
+    void this.webhooks.notify(url, secret, {
+      type,
+      asset: { id: asset.id, code: asset.code },
+      count,
+      url: `${base}${path}`,
+    });
   }
 
   /** Forget everything cached when another process (the CLI, say) has written to the file. */
@@ -1006,12 +1070,18 @@ export class Concord {
       return out;
     } catch (err) {
       if (this.removing.has(asset.id)) throw err;
+      const failure = describeFailure(err);
       this.db.write(
         "UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?",
-        describeFailure(err),
+        failure,
         now(),
         asset.id,
       );
+      // A pass that fails every 30 seconds must not alert every 30 seconds; only a new or changed
+      // failure is news.
+      if (asset.syncError !== failure) {
+        this.alert("sync.failed", asset, 1, `/#/a/${asset.id}`);
+      }
       throw err;
     }
   }
@@ -1919,6 +1989,9 @@ export class Concord {
       openBreaks,
       JSON.stringify(result),
     );
+    if (breaks.length > 0) {
+      this.alert("run.breaks", asset, breaks.length, `/#/a/${asset.id}/reconciliation`);
+    }
     return this.run(id);
   }
 
@@ -2731,6 +2804,9 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       coverage,
     };
     this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
+    if (result.breaks.length > 0) {
+      this.alert("action.breaks", asset, result.breaks.length, `/#/a/${asset.id}/actions`);
+    }
     return this.action(id);
   }
 
