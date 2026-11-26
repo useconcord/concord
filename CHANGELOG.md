@@ -49,6 +49,9 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 
 ### Added
 
+- `concord reconcile-all` reconciles every asset that has a register in one command, continuing
+  past an asset that fails and summarising each result; `--fail-on-breaks` exits 2 when any
+  asset has open breaks (#560).
 - A printable HTML report of a reconciliation run, with its summary, coverage, register and run
   digests, and break sign-off history (`GET /api/reconciliations/:id/report`) (#552).
 - `Concord.diffRegisters(asset, fromId, toId)` compares two registers of one asset by

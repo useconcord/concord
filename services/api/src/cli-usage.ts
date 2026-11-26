@@ -141,6 +141,8 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   instructions-list ASSET          list imported control instructions
   reconcile ASSET [--register ID]  re-run a reconciliation
         [--fail-on-breaks]
+  reconcile-all [--network N] [--fail-on-breaks]
+                                   reconcile every asset that has a register, one by one
   runs ASSET [--limit N]           list reconciliation runs for an asset
   run ID                           show one reconciliation run
   action ASSET dividend --record ISO --rate R [--pay-asset A] [--payer G...] [--until ISO]
