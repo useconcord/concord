@@ -1457,6 +1457,13 @@ export class Concord {
       });
   }
 
+  /** Remove a single journal entry by its ref. */
+  deleteJournalEntry(ref: string, entryRef: string): void {
+    const asset = this.asset(ref);
+    const removed = this.db.write("DELETE FROM journal WHERE asset_id = ? AND ref = ?", asset.id, entryRef);
+    if (removed === 0) throw new NotFound(`no such journal entry ${entryRef} for this asset`);
+  }
+
   importInstructions(ref: string, csv: string, options: { mode?: "merge" | "replace" } = {}) {
     const mode = options.mode ?? "merge";
     if (mode !== "merge" && mode !== "replace") {
@@ -1540,6 +1547,13 @@ export class Concord {
         approvedBy: r.approved_by ? String(r.approved_by) : null,
         reason: r.reason ? String(r.reason) : null,
       }));
+  }
+
+  /** Remove a single instruction by its ref. */
+  deleteInstruction(ref: string, instructionRef: string): void {
+    const asset = this.asset(ref);
+    const removed = this.db.write("DELETE FROM instructions WHERE asset_id = ? AND ref = ?", asset.id, instructionRef);
+    if (removed === 0) throw new NotFound(`no such instruction ${instructionRef} for this asset`);
   }
 
   // ── reconciliation ────────────────────────────────────────────────────────

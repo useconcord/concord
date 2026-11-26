@@ -289,10 +289,18 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     if (typeof input.csv !== "string") throw new Invalid("csv is required");
     return c.json(c.var.ws.importJournal(id(c), input.csv, { mode: input.mode, allowPartial: input.allowPartial }), 201);
   });
+  priv.delete("/assets/:id/journal/:entryRef", (c) => {
+    c.var.ws.deleteJournalEntry(id(c), c.req.param("entryRef"));
+    return c.json({ ok: true });
+  });
   priv.post("/assets/:id/instructions", async (c) => {
     const input = await jsonBody<{ csv: string; mode?: "merge" | "replace" }>(c);
     if (typeof input.csv !== "string") throw new Invalid("csv is required");
     return c.json(c.var.ws.importInstructions(id(c), input.csv, { ...(input.mode !== undefined ? { mode: input.mode } : {}) }), 201);
+  });
+  priv.delete("/assets/:id/instructions/:instructionRef", (c) => {
+    c.var.ws.deleteInstruction(id(c), c.req.param("instructionRef"));
+    return c.json({ ok: true });
   });
 
   // ── reconciliation ────────────────────────────────────────────────────────

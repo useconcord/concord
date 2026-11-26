@@ -927,6 +927,50 @@ describe("Concord", () => {
     expect(run.movement).toMatchObject({ matched: 4 });
   });
 
+  it("deletes a single journal entry by ref and throws NotFound when absent (#542)", async () => {
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\n`,
+    );
+    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM journal WHERE asset_id = ?", assetId)!.n).toBe(2);
+
+    // Present ref: row removed
+    concord.deleteJournalEntry("FUND", "J1");
+    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM journal WHERE asset_id = ?", assetId)!.n).toBe(1);
+    expect(concord.db.get("SELECT ref FROM journal WHERE asset_id = ? AND ref = 'J1'", assetId)).toBeUndefined();
+
+    // Absent ref: throws NotFound
+    expect(() => concord.deleteJournalEntry("FUND", "J1")).toThrow(NotFound);
+    expect(() => concord.deleteJournalEntry("FUND", "NONEXISTENT")).toThrow(NotFound);
+
+    // Subsequent reconcile reflects deletion
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    expect(run.movement).toBeDefined();
+  });
+
+  it("deletes a single instruction by ref and throws NotFound when absent (#542)", async () => {
+    concord.importInstructions(
+      "FUND",
+      `ref,type,account,units,issued_at,approved_by,reason\nI1,authorise,${h1},,${at(1)},ops,KYC\nI2,freeze,${h2},,${at(19)},compliance,order\n`,
+    );
+    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM instructions WHERE asset_id = ?", assetId)!.n).toBe(2);
+
+    // Present ref: row removed
+    concord.deleteInstruction("FUND", "I1");
+    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM instructions WHERE asset_id = ?", assetId)!.n).toBe(1);
+    expect(concord.db.get("SELECT ref FROM instructions WHERE asset_id = ? AND ref = 'I1'", assetId)).toBeUndefined();
+
+    // Absent ref: throws NotFound
+    expect(() => concord.deleteInstruction("FUND", "I1")).toThrow(NotFound);
+    expect(() => concord.deleteInstruction("FUND", "NONEXISTENT")).toThrow(NotFound);
+
+    // Subsequent controls reflects deletion
+    await concord.sync("FUND");
+    const log = concord.controls("FUND");
+    expect(log.records.some((r) => r.instruction?.ref === "I1")).toBe(false);
+  });
+
   it("starts from a baseline and only applies later events", async () => {
     const other = key();
     chain.latest = 200;
