@@ -117,8 +117,8 @@ Auditors and scripts may hold packs for years, so these changes need the stricte
 A consumer should ignore fields and columns it does not know, and match CSV columns by header,
 not by position.
 
-When the pack's format first changes, it will gain a `schemaVersion` field, so a pack states its
-own format without relying on `generator`.
+Every pack carries a `schemaVersion` (currently `1`), so it states its own format without relying
+on `generator`. A breaking change to the pack's shape bumps it.
 
 ### The HTTP API
 

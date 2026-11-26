@@ -207,6 +207,9 @@ interface ActionResult {
 const now = () => new Date().toISOString();
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
+/** Version of the audit pack's shape (docs/audit-pack.schema.json); bump it on a breaking change. */
+export const AUDIT_PACK_SCHEMA_VERSION = 1;
+
 /**
  * Serializes a value into RFC 8785 canonical JSON.
  * - Object keys sorted lexicographically by UTF-16 code units
@@ -2810,7 +2813,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         .filter((e) => inPeriod(e.closedAt))
         .map((e) => this.eventJson(e, asset.decimals)),
     };
-    const digest = auditPackDigest({ generator: "concord/0.1.0", ...content });
+    const digest = auditPackDigest({ schemaVersion: AUDIT_PACK_SCHEMA_VERSION, generator: "concord/0.1.0", ...content });
     const signingKey = options.signingKey ?? this.options.signingKey ?? process.env.CONCORD_SIGNING_KEY;
     let signature: string | undefined;
     let keyId: string | undefined;
@@ -2825,6 +2828,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       signature = sign(null, Buffer.from(digest), priv).toString("base64");
     }
     return {
+      schemaVersion: AUDIT_PACK_SCHEMA_VERSION,
       generatedAt: now(),
       generator: "concord/0.1.0",
       sha256: digest,
