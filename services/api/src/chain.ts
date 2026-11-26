@@ -574,7 +574,16 @@ export class StellarSource implements ChainSource {
         for (const record of records) {
           const line = record.balances.find((b) => b.asset_code === code && b.asset_issuer === issuer);
           if (!line) continue;
-          const opening: Opening = { amount: parseUnits(line.balance, decimals), asOfLedger: pageLedger };
+          let amount: bigint;
+          try {
+            amount = parseUnits(line.balance, decimals);
+          } catch {
+            throw new ChainError(
+              `invalid balance "${line.balance}" for account ${record.account_id.slice(0, 8)}`,
+              "rejected",
+            );
+          }
+          const opening: Opening = { amount, asOfLedger: pageLedger };
           if (line.is_authorized !== undefined) opening.authorized = line.is_authorized;
           openings.set(record.account_id, opening);
         }
