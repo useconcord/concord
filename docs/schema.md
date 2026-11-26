@@ -47,6 +47,7 @@ erDiagram
     assets ||--o{ actions : "asset_id"
     assets ||--o{ break_notes : "asset_id"
     assets ||--o{ holdings_checkpoints : "asset_id"
+    actions ||--o{ action_history : "action_id"
     registers ||--o{ register_positions : "register_id"
     registers ||--o{ runs : "register_id"
 ```
@@ -292,6 +293,26 @@ A checkpoint is written after every 1,000 events not yet covered, never on the n
 ledger (more of its events may still arrive). An event indexed into a ledger at or before a
 checkpoint deletes that checkpoint and every later one; rebuilding an asset, or re-reading its
 opening balances, deletes all of its checkpoints.
+
+### `action_history`
+
+Append-only trail of edits to scheduled corporate actions before snapshot (added in migration 12).
+One row per `updateAction` call:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER, PK AUTOINCREMENT | |
+| `action_id` | INTEGER | → `actions.id` |
+| `asset_id` | TEXT | → `assets.id` |
+| `label` | TEXT | |
+| `record_time` | TEXT | |
+| `params` | TEXT (JSON) | Terms as updated. |
+| `author`, `author_id` | TEXT, null | Actor who made the edit, taken from the session. |
+| `at` | TEXT | Timestamp of the edit. |
+
+Index `action_history_action (action_id, id)`.
+
+The `action_changes` view projects all columns from `action_history`.
 
 ## Control database (`control.db`)
 

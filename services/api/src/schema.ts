@@ -228,6 +228,22 @@ ALTER TABLE registers ADD COLUMN imported_by_id TEXT;
   `
 ALTER TABLE assets ADD COLUMN flow_only INTEGER NOT NULL DEFAULT 0;
 `,
+  // v12: keep a change log of corporate action edits before snapshot
+  `
+CREATE TABLE action_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action_id INTEGER NOT NULL REFERENCES actions (id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  record_time TEXT NOT NULL,
+  params TEXT NOT NULL,
+  author TEXT,
+  author_id TEXT,
+  at TEXT NOT NULL
+);
+CREATE INDEX action_history_action ON action_history (action_id, id);
+CREATE VIEW action_changes AS SELECT * FROM action_history;
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */
