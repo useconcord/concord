@@ -139,7 +139,6 @@ const CON_0363_INDEXES = `
 CREATE INDEX events_address_from ON events (asset_id, from_addr);
 CREATE INDEX events_address_to ON events (asset_id, to_addr);
 CREATE INDEX runs_asset_as_of ON runs (asset_id, as_of DESC, id DESC);
-CREATE INDEX actions_due ON actions (snapshot, asset_id, record_time);
 `;
 
 describe("query plans", () => {
@@ -203,13 +202,14 @@ describe("query plans", () => {
       expect(plan.some((s) => s.includes("USE TEMP B-TREE FOR ORDER BY"))).toBe(true);
     });
 
-    it("reconcileDue performs table scan on actions on current schema (concord.ts:1517)", () => {
+    it("reconcileDue reads only pending actions through the partial index actions_due", () => {
       const plan = explain(
         db,
         `SELECT a.id FROM actions a JOIN assets s ON s.id = a.asset_id
          WHERE a.snapshot IS NULL AND s.synced_at IS NOT NULL AND s.synced_at >= a.record_time`,
       );
-      expect(plan.some((s) => s.includes("SCAN a"))).toBe(true);
+      expect(plan.some((s) => s.includes("SCAN a USING INDEX actions_due"))).toBe(true);
+      expect(plan.every((s) => !s.includes("TEMP B-TREE"))).toBe(true);
     });
   });
 
@@ -238,16 +238,6 @@ describe("query plans", () => {
       );
       expect(plan.some((s) => s.includes("SEARCH runs USING INDEX runs_asset_as_of"))).toBe(true);
       expect(plan.every((s) => !s.includes("SCAN") && !s.includes("TEMP B-TREE"))).toBe(true);
-    });
-
-    it("reconcileDue resolves actions join via index with no SCAN or TEMP B-TREE (concord.ts:1517)", () => {
-      const plan = explain(
-        db,
-        `SELECT a.id FROM actions a JOIN assets s ON s.id = a.asset_id
-         WHERE a.snapshot IS NULL AND s.synced_at IS NOT NULL AND s.synced_at >= a.record_time`,
-      );
-      expect(plan.some((s) => s.includes("SEARCH a USING COVERING INDEX actions_due"))).toBe(true);
-      expect(plan.every((s) => !s.includes("SCAN a") && !s.includes("TEMP B-TREE"))).toBe(true);
     });
   });
 });

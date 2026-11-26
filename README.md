@@ -59,7 +59,7 @@ needs a code from `pnpm concord signup-code`; see the [operator guide](./docs/op
 
 ## Command line
 
-Everything on the dashboard except sign-off and team management is also on the command line. It
+Everything on the dashboard except team management is also on the command line. It
 works on the same data directory as the server, and may run while the server does.
 
 ```sh

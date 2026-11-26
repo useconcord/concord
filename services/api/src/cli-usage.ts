@@ -32,6 +32,13 @@ export const CLI_OPTIONS = {
   role: { type: "string" },
   limit: { type: "string" },
   before: { type: "string" },
+  scope: { type: "string" },
+  verify: { type: "boolean" },
+  into: { type: "string" },
+  force: { type: "boolean", short: "f" },
+  status: { type: "string" },
+  key: { type: "string" },
+  run: { type: "string" },
   json: { type: "boolean" },
   "fail-on-breaks": { type: "boolean" },
   yes: { type: "boolean", short: "y" },
@@ -140,6 +147,8 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   actions ASSET                    corporate actions and their state
   controls ASSET                   freeze, authorisation and clawback log
   export ASSET [--from ISO] [--to ISO] [--csv SECTION] [--out FILE]
+  signoff ASSET --scope recon|controls|action:N --key KEY --status open|acknowledged|resolved
+        [--note TEXT] [--run N]
 
 Operator commands.
 
@@ -149,7 +158,10 @@ Operator commands.
   reset-link EMAIL                 a one-day link for setting a new password
   invite ORG EMAIL [--role owner|member]  create a workspace invitation link
   org-delete ORG                   delete a workspace and everything in it
-  backup DIR                       copy every database to DIR while the server runs
+  backup DIR [--verify]            copy every database to DIR while the server runs; --verify
+                                   checks each copy's integrity and schema version
+  restore DIR [--into DIR2] [--force]
+                                   copy a backup into the data directory (refuses a non-empty one)
   serve                            run the API and dashboard
 
 ASSET is a code or a contract id. Add --json to most commands for machine-readable output,
