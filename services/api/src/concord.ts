@@ -88,6 +88,8 @@ export interface AssetRecord {
   instructionWindowHours: number;
   movementWindowHours: number;
   flowOnly?: boolean;
+  /** Flag the latest register once it is older than this many days. Unset means the check is off. */
+  registerMaxAgeDays?: number;
   createdAt: string;
 }
 
@@ -106,6 +108,8 @@ export interface WatchInput {
   ignore?: string[];
   instructionWindowHours?: number;
   movementWindowHours?: number;
+  /** Flag the latest register once it is older than this many days. Omitted means the check is off. */
+  registerMaxAgeDays?: number;
 }
 
 export type ActionType = "dividend" | "split" | "redemption";
@@ -143,6 +147,8 @@ export interface ActionInput {
     payer?: string;
   };
 }
+
+export type ActionPatch = Partial<ActionInput>;
 
 export interface NoteInput {
   fingerprint: string;
@@ -377,6 +383,15 @@ export const EXPORT_CSV_SECTIONS = [
 export const EXPORT_CSV_SECTION_ERROR =
   "section must be holdings, events, controls, breaks, action, positions, runs, actions, journal or instructions";
 export type ExportCsvSection = (typeof EXPORT_CSV_SECTIONS)[number];
+const DAY_MS = 86_400_000;
+
+/** A register freshness limit: whole days, long enough to be meaningful and short enough to be sane. */
+function maxAgeDays(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 3650) {
+    throw new Invalid("registerMaxAgeDays must be a whole number of days from 1 to 3650");
+  }
+  return value;
+}
 
 function isoTime(input: string, field: string): string {
   const t = Date.parse(input);
@@ -477,6 +492,9 @@ function toAsset(row: Row): AssetRecord {
     movementWindowHours: Number(row.movement_window_hours ?? DEFAULT_MOVEMENT_WINDOW_HOURS),
     createdAt: String(row.created_at),
   };
+  if (row.register_max_age_days !== null && row.register_max_age_days !== undefined) {
+    asset.registerMaxAgeDays = Number(row.register_max_age_days);
+  }
   if (row.issuer) asset.issuer = String(row.issuer);
   if (row.start_ledger !== null) asset.startLedger = Number(row.start_ledger);
   if (row.baseline_ledger !== null) asset.baselineLedger = Number(row.baseline_ledger);
@@ -587,6 +605,31 @@ function resume(
   return state;
 }
 
+/** An asset's headline figures, as the overview shows them and `asset_stats` stores them. */
+interface AssetStats {
+  supply: string;
+  holderCount: number;
+  eventCount: number;
+  incomplete: boolean;
+  lastRun: { id: number; asOf: string; status: "clean" | "breaks"; openBreaks: number } | null;
+  openBreaks: { reconciliation: number; controls: number; actions: number };
+}
+
+function statsFromRow(row: Row): AssetStats {
+  return {
+    supply: String(row.supply),
+    holderCount: Number(row.holder_count),
+    eventCount: Number(row.event_count),
+    incomplete: Number(row.incomplete) === 1,
+    lastRun: row.last_run ? (JSON.parse(String(row.last_run)) as AssetStats["lastRun"]) : null,
+    openBreaks: {
+      reconciliation: Number(row.open_reconciliation),
+      controls: Number(row.open_controls),
+      actions: Number(row.open_actions),
+    },
+  };
+}
+
 /**
  * One workspace: every operation the API and the CLI expose over a single database.
  * Reads the chain, never writes it.
@@ -620,6 +663,8 @@ export class Concord {
     readonly db: Db,
     readonly networks: Networks,
     readonly options: ConcordOptions = {},
+    /** Wall clock, in milliseconds. Tests inject one so register age is deterministic. */
+    private readonly options: { now?: () => number } = {},
   ) {
     this.seenVersion = db.dataVersion();
     const every = options.checkpointEvery ?? CHECKPOINT_EVERY;
@@ -632,6 +677,10 @@ export class Concord {
     if (!Number.isFinite(budget) || budget < 0) throw new Error("syncAssetBudgetMs must be zero or more");
     this.syncAssetBudgetMs = budget;
     this.clock = options.now ?? Date.now;
+  }
+
+  private nowMs(): number {
+    return (this.options.now ?? Date.now)();
   }
 
   /** Forget cached holdings for an asset this instance just changed. */
@@ -787,6 +836,8 @@ export class Concord {
     const ignore = addresses(input.ignore, "ignore");
     const instructionWindowHours = windowHours(input.instructionWindowHours, "instructionWindowHours", DEFAULT_INSTRUCTION_WINDOW_HOURS);
     const movementWindowHours = windowHours(input.movementWindowHours, "movementWindowHours", DEFAULT_MOVEMENT_WINDOW_HOURS);
+    const registerMaxAge =
+      input.registerMaxAgeDays === undefined ? undefined : maxAgeDays(input.registerMaxAgeDays);
     let name = label(input.name, "name");
     let decimals = input.decimals;
     if (input.fromLedger !== undefined && (!Number.isInteger(input.fromLedger) || input.fromLedger < 1)) {
@@ -844,8 +895,8 @@ export class Concord {
     }
     try {
       this.db.insert(
-        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, flow_only, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, flow_only, register_max_age_days, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?, ?, ?)`,
         resolved.id,
         input.network,
         resolved.code,
@@ -858,6 +909,7 @@ export class Concord {
         instructionWindowHours,
         movementWindowHours,
         options.flowOnly ? 1 : 0,
+        registerMaxAge ?? null,
         options.actor?.label ?? null,
         now(),
       );
@@ -933,7 +985,14 @@ export class Concord {
 
   updateAsset(
     ref: string,
-    patch: { name?: string; ignore?: string[]; tolerance?: string | null; instructionWindowHours?: number; movementWindowHours?: number },
+    patch: {
+      name?: string;
+      ignore?: string[];
+      tolerance?: string | null;
+      instructionWindowHours?: number;
+      movementWindowHours?: number;
+      registerMaxAgeDays?: number | null;
+    },
   ): AssetRecord {
     const asset = this.asset(ref);
     const name = label(patch.name, "name");
@@ -954,15 +1013,21 @@ export class Concord {
       asset.instructionWindowHours,
     );
     const movementWindowHours = windowHours(patch.movementWindowHours, "movementWindowHours", asset.movementWindowHours);
+    let registerMaxAge = asset.registerMaxAgeDays ?? null;
+    if (patch.registerMaxAgeDays === null) registerMaxAge = null;
+    else if (patch.registerMaxAgeDays !== undefined) registerMaxAge = maxAgeDays(patch.registerMaxAgeDays);
     this.db.write(
-      "UPDATE assets SET name = ?, ignore_addresses = ?, tolerance = ?, instruction_window_hours = ?, movement_window_hours = ? WHERE id = ?",
+      "UPDATE assets SET name = ?, ignore_addresses = ?, tolerance = ?, instruction_window_hours = ?, movement_window_hours = ?, register_max_age_days = ? WHERE id = ?",
       name ?? asset.name,
       JSON.stringify(patch.ignore === undefined ? asset.ignore : addresses(patch.ignore, "ignore")),
       tolerance,
       instructionWindowHours,
       movementWindowHours,
+      registerMaxAge,
       asset.id,
     );
+    // The matching windows decide which controls break, and so the stored open-break count.
+    this.refreshStats(asset.id);
     return this.asset(asset.id);
   }
 
@@ -1004,6 +1069,8 @@ export class Concord {
       );
     });
     this.touch(asset.id);
+    // The history is gone until the next pass; a deferred rebuild must not keep showing it.
+    this.refreshStats(asset.id);
     if (options.defer) void this.sync(asset.id).catch(() => {});
     else await this.sync(asset.id);
     return this.asset(asset.id);
@@ -1090,10 +1157,18 @@ export class Concord {
       if (asset.syncError) {
         this.db.write("UPDATE assets SET sync_error = NULL, sync_error_at = NULL WHERE id = ?", asset.id);
       }
+      // Even a pass that added nothing moved the read-through time the controls log runs to.
+      this.refreshStats(asset.id);
       return out;
     } catch (err) {
       if (this.removing.has(asset.id)) throw err;
       const failure = describeFailure(err);
+      // Pages written before the failure are committed; the figures must include them.
+      try {
+        this.refreshStats(asset.id);
+      } catch {
+        // The sync failure below is the one to report.
+      }
       this.db.write(
         "UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?",
         failure,
@@ -1455,7 +1530,13 @@ export class Concord {
       sha256(input.csv),
     );
     if (existing) {
-      return { registerId: existing.id, asOf, positions: parsed.positions.length, issues: parsed.issues, duplicate: true };
+      return {
+        registerId: existing.id,
+        asOf,
+        positions: parsed.positions.length,
+        issues: parsed.issues,
+        duplicate: true,
+      };
     }
     const registerId = this.db.tx(() => {
       const id = this.db.insert(
@@ -1516,6 +1597,8 @@ export class Concord {
       )?.count ?? 0;
     const removed = this.db.write("DELETE FROM registers WHERE id = ? AND asset_id = ?", registerId, asset.id);
     if (removed === 0) throw new NotFound("no such register for this asset");
+    // Its runs went with it, and the latest run may have been one of them.
+    this.refreshStats(asset.id);
     return { runs };
   }
 
@@ -1608,11 +1691,7 @@ export class Concord {
     });
   }
 
-  importJournal(
-    ref: string,
-    csv: string,
-    options?: { mode?: "merge" | "replace"; allowPartial?: boolean },
-  ) {
+  importJournal(ref: string, csv: string, options?: { mode?: "merge" | "replace"; allowPartial?: boolean }) {
     const mode = options?.mode ?? "merge";
     const allowPartial = options?.allowPartial ?? false;
     if (mode !== "merge" && mode !== "replace") {
@@ -1626,7 +1705,9 @@ export class Concord {
       throw new Invalid((err as Error).message);
     }
     if (mode === "replace" && parsed.issues.length > 0 && !allowPartial) {
-      throw new Invalid(`cannot replace journal: CSV contains ${parsed.issues.length} parse errors and allowPartial is false`);
+      throw new Invalid(
+        `cannot replace journal: CSV contains ${parsed.issues.length} parse errors and allowPartial is false`,
+      );
     }
 
     const existing = this.db.all<{ ref: string }>("SELECT ref FROM journal WHERE asset_id = ?", asset.id);
@@ -1818,6 +1899,7 @@ export class Concord {
         }
       }
     });
+    this.refreshStats(asset.id);
     return { instructions: parsed.instructions.length, added, replaced, removed, issues: parsed.issues };
   }
 
@@ -2016,6 +2098,7 @@ export class Concord {
     if (breaks.length > 0) {
       this.alert("run.breaks", asset, breaks.length, `/#/a/${asset.id}/reconciliation`);
     }
+    this.refreshStats(asset.id);
     return this.run(id);
   }
 
@@ -2276,7 +2359,10 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   /** The newest reconciliation of one register, if it has been reconciled. */
   latestRunForRegister(registerId: number) {
-    const row = this.db.get<{ id: number }>("SELECT id FROM runs WHERE register_id = ? ORDER BY id DESC LIMIT 1", registerId);
+    const row = this.db.get<{ id: number }>(
+      "SELECT id FROM runs WHERE register_id = ? ORDER BY id DESC LIMIT 1",
+      registerId,
+    );
     return row ? this.run(row.id) : null;
   }
 
@@ -2429,6 +2515,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       // A sign-off moves a break out of the open count the runs list reads from a column.
       if (scope === "recon") this.countOpenBreaks(asset.id);
     });
+    this.refreshStats(asset.id);
     return { ok: true };
   }
 
@@ -2543,8 +2630,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   // ── corporate actions ─────────────────────────────────────────────────────
 
-  async createAction(ref: string, input: ActionInput, actor?: Actor) {
-    const asset = this.asset(ref);
+  private validateAction(asset: AssetRecord, input: ActionInput) {
     const recordTime = isoTime(String(input.recordTime ?? ""), "recordTime");
     const params: Record<string, unknown> = { exclude: addresses(input.exclude, "exclude") };
     if (input.windowTo) params.windowTo = isoTime(input.windowTo, "windowTo");
@@ -2658,13 +2744,19 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     if (input.cashInLieu && input.type !== "split") {
       throw new Invalid("cashInLieu is only valid for split actions");
     }
-    const title =
-      label(input.label, "label") ??
-      (input.type === "dividend"
+    const defaultTitle =
+      input.type === "dividend"
         ? `Dividend ${input.ratePerUnit} per unit`
         : input.type === "split"
           ? `Split ${input.num}:${input.den}`
-          : `Redemption ${input.num}/${input.den}`);
+          : `Redemption ${input.num}/${input.den}`;
+    return { recordTime, params, defaultTitle };
+  }
+
+  async createAction(ref: string, input: ActionInput, actor?: Actor) {
+    const asset = this.asset(ref);
+    const { recordTime, params, defaultTitle } = this.validateAction(asset, input);
+    const title = label(input.label, "label") ?? defaultTitle;
     const id = this.db.insert(
       "INSERT INTO actions (asset_id, type, label, record_time, params, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       asset.id,
@@ -2676,6 +2768,128 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       now(),
     );
     return this.reconcileAction(id);
+  }
+
+  async updateAction(id: number, patch: ActionPatch, actor?: Actor) {
+    const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
+    if (!row) throw new NotFound(`corporate action ${id} not found`);
+    if (row.snapshot) {
+      throw new Invalid("already snapshotted");
+    }
+    const asset = this.asset(String(row.asset_id));
+    const existingParams = JSON.parse(String(row.params)) as Record<string, unknown>;
+    const oldType = String(row.type) as ActionType;
+    const effectiveType = patch.type ?? oldType;
+
+    const pick = <T>(patchVal: T | undefined, existingVal: T | undefined): T | undefined => {
+      if (patchVal === null) return undefined;
+      return patchVal !== undefined ? patchVal : existingVal;
+    };
+
+    const isSameType = effectiveType === oldType;
+
+    const mergedInput: ActionInput = {
+      type: effectiveType,
+      recordTime: patch.recordTime ?? String(row.record_time),
+      exclude: pick(patch.exclude, existingParams.exclude as string[] | undefined),
+      windowTo: pick(patch.windowTo, existingParams.windowTo as string | undefined),
+      windowFromLedger: pick(patch.windowFromLedger, existingParams.windowFromLedger as number | undefined),
+      windowToLedger: pick(patch.windowToLedger, existingParams.windowToLedger as number | undefined),
+      ratePerUnit: pick(patch.ratePerUnit, isSameType ? (existingParams.ratePerUnit as string | undefined) : undefined),
+      payAsset: pick(patch.payAsset, isSameType ? (existingParams.payAsset as string | undefined) : undefined),
+      payer: pick(patch.payer, isSameType ? (existingParams.payer as string | undefined) : undefined),
+      rounding: pick(patch.rounding, isSameType ? (existingParams.rounding as Rounding | undefined) : undefined),
+      num: pick(patch.num, isSameType ? (existingParams.num as string | undefined) : undefined),
+      den: pick(patch.den, isSameType ? (existingParams.den as string | undefined) : undefined),
+      label: patch.label,
+    };
+
+    const { recordTime, params, defaultTitle } = this.validateAction(asset, mergedInput);
+
+    const oldDefaultTitle =
+      oldType === "dividend"
+        ? `Dividend ${existingParams.ratePerUnit} per unit`
+        : oldType === "split"
+          ? `Split ${existingParams.num}:${existingParams.den}`
+          : `Redemption ${existingParams.num}/${existingParams.den}`;
+
+    const title =
+      patch.label !== undefined
+        ? (label(patch.label, "label") ?? defaultTitle)
+        : String(row.label) === oldDefaultTitle
+          ? defaultTitle
+          : String(row.label);
+
+    const at = now();
+    const paramsJson = JSON.stringify(params);
+
+    this.db.tx(() => {
+      this.db.write(
+        "UPDATE actions SET type = ?, label = ?, record_time = ?, params = ?, result = NULL, reconciled_at = NULL WHERE id = ?",
+        effectiveType,
+        title,
+        recordTime,
+        paramsJson,
+        id,
+      );
+      this.db.insert(
+        `INSERT INTO action_history (action_id, asset_id, label, record_time, params, author, author_id, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        asset.id,
+        title,
+        recordTime,
+        paramsJson,
+        actor?.label ?? null,
+        actor?.id ?? null,
+        at,
+      );
+    });
+
+    return this.reconcileAction(id);
+  }
+
+  actionHistory(refOrId: string | number, actionId?: number) {
+    let aid: number | undefined;
+    let assetId: string | undefined;
+    if (typeof refOrId === "number") {
+      aid = refOrId;
+    } else if (actionId !== undefined) {
+      assetId = this.asset(refOrId).id;
+      aid = actionId;
+    } else if (/^\d+$/.test(refOrId)) {
+      aid = Number(refOrId);
+    } else {
+      assetId = this.asset(refOrId).id;
+    }
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (aid !== undefined) {
+      where.push("action_id = ?");
+      params.push(aid);
+    }
+    if (assetId !== undefined) {
+      where.push("asset_id = ?");
+      params.push(assetId);
+    }
+    const sql = `SELECT id, action_id, asset_id, label, record_time, params, author, author_id, at FROM action_history${
+      where.length ? " WHERE " + where.join(" AND ") : ""
+    } ORDER BY id`;
+    return this.db.all(sql, ...params).map((r) => ({
+      id: Number(r.id),
+      actionId: Number(r.action_id),
+      assetId: String(r.asset_id),
+      label: String(r.label),
+      recordTime: String(r.record_time),
+      params: JSON.parse(String(r.params)) as Record<string, unknown>,
+      author: r.author ? String(r.author) : null,
+      authorId: r.author_id ? String(r.author_id) : null,
+      at: String(r.at),
+    }));
+  }
+
+  actionChanges(refOrId: string | number, actionId?: number) {
+    return this.actionHistory(refOrId, actionId);
   }
 
   /** Establish where the asset's indexed history begins. */
@@ -2771,6 +2985,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         coverage: this.coverage(asset, recordTime),
       };
       this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
+      this.refreshStats(asset.id);
       return this.action(id);
     }
 
@@ -2962,6 +3177,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     if (result.breaks.length > 0) {
       this.alert("action.breaks", asset, result.breaks.length, `/#/a/${asset.id}/actions`);
     }
+    this.refreshStats(asset.id);
     return this.action(id);
   }
 
@@ -3237,19 +3453,39 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     };
   }
 
-  /** One asset with the headline figures the dashboard lists. */
+  /**
+   * One asset with the headline figures the dashboard lists. The figures come from the
+   * asset's `asset_stats` row, which every change that can move them rewrites (`refreshStats`),
+   * so a poll reads one row however long the history is.
+   */
   assetSummary(asset: AssetRecord) {
+    // Never indexed: the controls log runs up to the clock, and there is nothing to replay.
+    const row = asset.syncedAt ? this.db.get("SELECT * FROM asset_stats WHERE asset_id = ?", asset.id) : undefined;
+    const stats = row ? statsFromRow(row) : this.refreshStats(asset.id);
+    return { ...asset, ...stats };
+  }
+
+  /** The headline figures recomputed from the data, ignoring any stored row. */
+  private computeStats(asset: AssetRecord): AssetStats {
     const state = this.state(asset);
     const run = this.latestRun(asset.id);
     const controls = this.controls(asset.id);
     const actions = this.actions(asset.id);
     const events = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE asset_id = ?", asset.id)!.n;
+    const latestRegister = this.db.get<{ as_of: string }>(
+      "SELECT as_of FROM registers WHERE asset_id = ? ORDER BY as_of DESC, id DESC LIMIT 1",
+      asset.id,
+    );
     return {
-      ...asset,
       supply: formatUnits(state.supply, asset.decimals),
       holderCount: state.balances.size,
       eventCount: events,
       incomplete: state.incomplete.length > 0,
+      // A register nobody has refreshed is the attention item a timer-free service cannot raise itself.
+      registerStale:
+        asset.registerMaxAgeDays === undefined || !latestRegister
+          ? null
+          : this.registerAge(latestRegister.as_of, asset.registerMaxAgeDays),
       lastRun: run && { id: run.id, asOf: run.asOf, status: run.status, openBreaks: run.openBreaks },
       openBreaks: {
         reconciliation: run?.openBreaks ?? 0,
@@ -3265,6 +3501,38 @@ ul { margin: 6px 0 0; padding-left: 20px; }
    */
   isVoided(row: Row): boolean {
     return row.voided_at !== null && row.voided_at !== undefined;
+  }
+
+  /** How far past its limit a register is, or null while it is still fresh enough. */
+  private registerAge(asOf: string, limitDays: number): { ageDays: number } | null {
+    const ageMs = this.nowMs() - Date.parse(asOf);
+    if (!(ageMs > limitDays * DAY_MS)) return null;
+    return { ageDays: Math.floor(ageMs / DAY_MS) };
+  }
+
+  /**
+   * Recompute and store an asset's headline figures. Called at the end of every change that can
+   * move them: a sync pass, a rebuild, a reconciliation or a deleted register, a sign-off, an
+   * instructions import and a corporate action's reconciliation.
+   */
+  private refreshStats(assetId: string): AssetStats {
+    const asset = this.asset(assetId);
+    const stats = this.computeStats(asset);
+    this.db.write(
+      `INSERT OR REPLACE INTO asset_stats (asset_id, supply, holder_count, event_count, incomplete, last_run,
+         open_reconciliation, open_controls, open_actions, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      asset.id,
+      stats.supply,
+      stats.holderCount,
+      stats.eventCount,
+      stats.incomplete ? 1 : 0,
+      stats.lastRun ? JSON.stringify(stats.lastRun) : null,
+      stats.openBreaks.reconciliation,
+      stats.openBreaks.controls,
+      stats.openBreaks.actions,
+      now(),
+    );
+    return stats;
   }
 
   /** Everything an auditor needs for a period, with a digest over the content. */

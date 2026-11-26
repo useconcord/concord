@@ -135,6 +135,37 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("opens the v12 workspace database and reads the action history table and view", () => {
+    upgraded("org-v12.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v12");
+      expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM action_history")?.n).toBe(1);
+      expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM action_changes")?.n).toBe(1);
+    });
+  });
+
+  it("opens the v13 workspace database and keeps each asset's register freshness limit", () => {
+    upgraded("org-v13.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v13");
+      expect(db.get<{ register_max_age_days: number }>("SELECT register_max_age_days FROM assets")?.register_max_age_days).toBe(35);
+    });
+  });
+
+  it("adds an empty asset_stats table to a v13 workspace database", () => {
+    upgraded("org-v13.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM asset_stats")?.n).toBe(0);
+    });
+  });
+
+  it("opens the v14 workspace database and keeps its stored asset figures", () => {
+    upgraded("org-v14.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v14");
+      expect(db.get("SELECT supply, open_controls FROM asset_stats WHERE asset_id = 'usd-mainnet'")).toEqual({
+        supply: "1000",
+        open_controls: 1,
+      });
+    });
+  });
+
   it("opens the v1 control database with the current migrations and keeps its rows", () => {
     upgraded("control-v1.db", CONTROL_MIGRATIONS, (db) => {
       expect(db.get<{ name: string }>("SELECT name FROM users WHERE id = 'u1'")?.name).toBe("Alice");

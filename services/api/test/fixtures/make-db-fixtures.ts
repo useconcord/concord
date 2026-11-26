@@ -168,6 +168,31 @@ build(join(outDir, "org-v11.db"), ORG_MIGRATIONS.slice(0, 11), (db) => {
     VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', 1, '2024-01-01T00:00:00Z')`);
 });
 
+// v12: keep a change log of corporate action edits before snapshot
+build(join(outDir, "org-v12.db"), ORG_MIGRATIONS.slice(0, 12), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v12')");
+  db.exec("INSERT INTO assets (id, network, code, name, decimals, start_mode, state, created_at) VALUES ('a1', 'testnet', 'A', 'Asset A', 7, 'baseline', 'ready', '2026-01-01T00:00:00Z')");
+  db.exec("INSERT INTO actions (id, asset_id, type, label, record_time, params, created_at) VALUES (1, 'a1', 'dividend', 'Div', '2026-02-01T00:00:00Z', '{}', '2026-01-01T00:00:00Z')");
+  db.exec("INSERT INTO action_history (action_id, asset_id, label, record_time, params, at) VALUES (1, 'a1', 'Div', '2026-02-01T00:00:00Z', '{}', '2026-01-01T00:00:00Z')");
+});
+
+// v13: per-asset register freshness limit; NULL means the stale-register check is off
+build(join(outDir, "org-v13.db"), ORG_MIGRATIONS.slice(0, 13), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v13')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, register_max_age_days, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', 35, '2024-01-01T00:00:00Z')`);
+});
+
+// v14: each asset's headline figures, so the polled overview reads one row; derived data, recomputed when missing
+build(join(outDir, "org-v14.db"), ORG_MIGRATIONS.slice(0, 14), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v14')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '2024-01-01T00:00:00Z')`);
+  db.exec(`INSERT INTO asset_stats (asset_id, supply, holder_count, event_count, incomplete, last_run,
+      open_reconciliation, open_controls, open_actions, updated_at)
+    VALUES ('usd-mainnet', '1000', 2, 5, 0, NULL, 0, 1, 0, '2024-01-02T00:00:00Z')`);
+});
+
 build(join(outDir, "control-v1.db"), CONTROL_MIGRATIONS.slice(0, 1), (db) => {
   db.exec(`INSERT INTO users (id, email, name, email_verified, created_at)
     VALUES ('u1', 'alice@example.org', 'Alice', 1, '2024-01-01T00:00:00Z')`);

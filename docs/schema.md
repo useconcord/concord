@@ -47,13 +47,15 @@ erDiagram
     assets ||--o{ actions : "asset_id"
     assets ||--o{ break_notes : "asset_id"
     assets ||--o{ holdings_checkpoints : "asset_id"
+    actions ||--o{ action_history : "action_id"
+    assets ||--o| asset_stats : "asset_id"
     registers ||--o{ register_positions : "register_id"
     registers ||--o{ runs : "register_id"
 ```
 
 Every arrow is `ON DELETE CASCADE`. Deleting an asset therefore deletes its events, opening
 balances, registers (and through them their positions and runs), journal, instructions, corporate
-actions, break notes and holdings checkpoints. Deleting a register deletes its positions *and the runs made from it*.
+actions, break notes, holdings checkpoints and stored figures. Deleting a register deletes its positions *and the runs made from it*.
 `meta` stands alone.
 
 ### `meta`
@@ -85,6 +87,7 @@ One row per watched asset.
 | `synced_at` | TEXT, null | Close time of that ledger. |
 | `sync_error`, `sync_error_at` | TEXT, null | Why the last pass failed, and when. Cleared by a successful pass. |
 | `ignore_addresses` | TEXT (JSON) | Array of address strings left out of reconciliation. Default `'[]'`. |
+| `register_max_age_days` | INTEGER, null | Flag the latest register as stale once it is older than this many days. `NULL` (the default) turns the check off. |
 | `created_by` | TEXT, null | Label of the actor who started watching (`cli:<user>` or a session's person). |
 | `created_at` | TEXT | |
 | `flow_only` | INTEGER | `1` for a dividend's pay asset that Concord watched on its own so the payments can be seen (migration 11). Hidden from the asset list; watching it explicitly makes it a normal asset. |
@@ -292,6 +295,49 @@ A checkpoint is written after every 1,000 events not yet covered, never on the n
 ledger (more of its events may still arrive). An event indexed into a ledger at or before a
 checkpoint deletes that checkpoint and every later one; rebuilding an asset, or re-reading its
 opening balances, deletes all of its checkpoints.
+
+### `action_history`
+
+Append-only trail of edits to scheduled corporate actions before snapshot (added in migration 12).
+One row per `updateAction` call:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER, PK AUTOINCREMENT | |
+| `action_id` | INTEGER | → `actions.id` |
+| `asset_id` | TEXT | → `assets.id` |
+| `label` | TEXT | |
+| `record_time` | TEXT | |
+| `params` | TEXT (JSON) | Terms as updated. |
+| `author`, `author_id` | TEXT, null | Actor who made the edit, taken from the session. |
+| `at` | TEXT | Timestamp of the edit. |
+
+Index `action_history_action (action_id, id)`.
+
+The `action_changes` view projects all columns from `action_history`.
+
+### `asset_stats`
+
+Each asset's headline figures (added in migration 14), so the dashboard's polled
+`GET /api/overview` and `GET /api/assets/:id` read one row instead of replaying events and
+rebuilding the controls log. Primary key `asset_id`. Derived data: a missing row is recomputed
+and stored on the next read (`Concord.assetSummary`, `services/api/src/concord.ts`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `asset_id` | TEXT | → `assets.id` |
+| `supply` | TEXT | Current supply in whole units, formatted as the overview shows it. |
+| `holder_count` | INTEGER | Addresses with a non-zero balance. |
+| `event_count` | INTEGER | Indexed events. |
+| `incomplete` | INTEGER | `1` when some holder's derived balance is negative (history missing). |
+| `last_run` | TEXT (JSON), null | `{ id, asOf, status, openBreaks }` of the latest reconciliation. |
+| `open_reconciliation`, `open_controls`, `open_actions` | INTEGER | Open breaks in the latest run, the controls log, and all corporate actions. |
+| `updated_at` | TEXT | |
+
+The row is rewritten at the end of every change that can move a figure (`Concord.refreshStats`):
+a sync pass (also one that adds nothing, since the controls log runs to the read-through time),
+a rebuild, a reconciliation, a deleted register, a sign-off, an instructions import and a
+corporate action's reconciliation. An asset that has never been synced is always recomputed.
 
 ## Control database (`control.db`)
 
