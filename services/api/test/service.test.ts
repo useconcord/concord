@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import Ajv from "ajv";
 import { Keypair, StrKey, nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -3534,7 +3536,11 @@ describe("streamed events export", () => {
       }
     });
 
-    if (global.gc) global.gc();
+    // Measure what the stream keeps alive, not garbage the collector has not reached yet: without a
+    // collection before each sample the figure swings with GC timing and the bound flakes.
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    gc();
     const initialHeap = process.memoryUsage().heapUsed;
     let peakGrowth = 0;
     let rowCount = 0;
@@ -3543,6 +3549,7 @@ describe("streamed events export", () => {
     for (const _chunk of concord.exportEvents("BIG", {}, "csv")) {
       rowCount++;
       if (rowCount % 20_000 === 0) {
+        gc();
         const growth = process.memoryUsage().heapUsed - initialHeap;
         if (growth > peakGrowth) peakGrowth = growth;
       }
