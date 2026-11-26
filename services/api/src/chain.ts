@@ -11,8 +11,15 @@ const PACKAGE_VERSION = (JSON.parse(readFileSync(new URL("../package.json", impo
 const USER_AGENT = `concord/${PACKAGE_VERSION} (+https://github.com/useconcord/concord)`;
 
 export interface EventPage {
+  /** The sequence of parsed and recognized asset events on this page. */
   events: AssetEvent[];
+  /**
+   * Opaque pagination token pointing past the last delivered event.
+   * The cursor must guarantee monotonic ordering across pages so resuming from it
+   * yields neither duplicate events nor skipped gaps.
+   */
   cursor?: string;
+  /** The latest closed ledger known to the RPC node at the time this page was queried. */
   latestLedger: number;
   /** ISO-8601 close time of latestLedger, when the RPC reports it. */
   latestLedgerClosedAt?: string;
@@ -21,14 +28,26 @@ export interface EventPage {
 }
 
 export interface Baseline {
+  /** The snapshot ledger boundary at which initial balances were established. */
   ledger: number;
+  /**
+   * Account opening balances indexed by public address.
+   * Invariant: every opening across pages satisfies `asOfLedger <= baseline.ledger`,
+   * ensuring initial balances reflect state at or before the baseline ledger without future drift.
+   */
   openings: Map<string, Opening>;
 }
 
 export interface ChainHead {
+  /**
+   * The latest closed ledger on the network.
+   * Tip detection observes network advancement, but this value may lag briefly behind consensus
+   * due to local caching (e.g. 2s head cache) or replica ingestion delay.
+   */
   latest: number;
   /** The earliest ledger the RPC still holds events for. */
   oldest: number;
+  /** ISO-8601 close time of oldest ledger, when reported by the chain source. */
   oldestClosedAt?: string;
 }
 
@@ -55,19 +74,60 @@ export interface AssetCandidate {
   clawbackEnabled: boolean;
 }
 
-/** What the indexer needs from a ledger data source. Tests supply an in-memory one. */
+/**
+ * What the indexer needs from a ledger data source.
+ * Implementations wrap Stellar RPC and Horizon endpoints, or provide an in-memory fake for tests.
+ */
 export interface ChainSource {
+  /**
+   * Returns the ledger range currently available on the network.
+   * Used for tip detection to determine whether new ledgers have closed,
+   * though individual node responses may lag slightly due to caching or replica replication.
+   */
   latestLedger(): Promise<ChainHead>;
-  /** Either startLedger or cursor. */
+
+  /**
+   * Fetches an ordered page of transfer and clawback events for a contract or token.
+   * The query accepts either an initial start ledger or an opaque cursor pointing past the previous page.
+   * The returned cursor must guarantee monotonic progression without event omission or duplication.
+   */
   getEvents(contractId: string, from: { startLedger: number } | { cursor: string }, limit: number): Promise<EventPage>;
+
+  /**
+   * Retrieves opening trustline balances from Horizon for a classic asset.
+   * Invariant: every entry in `Baseline.openings` must satisfy `asOfLedger <= baseline.ledger`
+   * (or later per page), ensuring opening positions are never read ahead of the recorded ledger.
+   */
   baseline(code: string, issuer: string, decimals: number): Promise<Baseline>;
-  /** Undefined when the network has no such asset. A source without this cannot check. */
+
+  /**
+   * Resolves on-chain metadata (name, symbol, decimals, or classic asset wrap) for an asset.
+   * Returns undefined when the network has no record of the given asset or contract ID.
+   */
   describe?(asset: ResolvedAsset): Promise<AssetDescription | undefined>;
+
+  /**
+   * Searches the network for classic assets matching an asset code prefix or name.
+   * Returns candidates sorted by holder count, ready to be watched by a workspace.
+   */
   search?(code: string): Promise<AssetCandidate[]>;
 }
 
-/** A failure of the ledger data source, worded for the person looking at the dashboard. */
+/**
+ * A failure of the ledger data source, worded for the person looking at the dashboard.
+ * Maps to HTTP 502 with a descriptive error message surfaced to the client.
+ */
 export class ChainError extends Error {
+  /**
+   * @param message Human-readable error description safe for display in the dashboard.
+   * @param kind Categorization driving UI treatment:
+   *   - `"unavailable"`: network unreachable, timeouts, or 5xx failures across all endpoints;
+   *     the UI warns the user that connectivity is interrupted and retries periodically.
+   *   - `"rate_limited"`: endpoint rate limit (HTTP 429) hit with backoff delay;
+   *     the UI displays a cooldown countdown indicating when syncing will resume.
+   *   - `"rejected"`: request permanently rejected (e.g. invalid cursor, missing result, malformed balance);
+   *     the UI surfaces the rejection directly without retrying.
+   */
   constructor(
     message: string,
     readonly kind: "unavailable" | "rate_limited" | "rejected",
@@ -265,6 +325,7 @@ class EndpointPool {
           return await call(endpoint);
         } catch (err) {
           if (!(err instanceof EndpointFailure)) throw err;
+          // The budget is checked between attempts, not during one.
           const outOfTime = this.deps.now() - started >= BUDGET_MS;
           if (err.options.retrySame && attempt < ATTEMPTS_PER_ENDPOINT && !outOfTime) {
             await this.deps.sleep(250 * 2 ** (attempt - 1) + Math.random() * 250);
@@ -276,6 +337,7 @@ class EndpointPool {
           break;
         }
       }
+      // The budget is checked between attempts, not during one.
       if (this.deps.now() - started >= BUDGET_MS) break;
     }
     throw new ChainError(
@@ -352,6 +414,7 @@ export class StellarSource implements ChainSource {
     return res;
   }
 
+  /** Parses JSON response, converting unparseable bodies (e.g. captive portal HTML, empty body) to retryable failure. */
   private async json<T>(res: Response): Promise<T> {
     try {
       return (await res.json()) as T;
