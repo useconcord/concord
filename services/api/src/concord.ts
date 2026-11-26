@@ -331,8 +331,6 @@ export interface DeletionCounts {
 }
 
 export interface ConcordOptions {
-  /** Wall clock, in milliseconds. Tests inject one so register age is deterministic. */
-  now?: () => number;
   checkpointEvery?: number;
   /** ed25519 private key (PEM, or a path to one) that signs audit packs. */
   signingKey?: string;
