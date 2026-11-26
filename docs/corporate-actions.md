@@ -16,7 +16,7 @@ per-type terms (`ActionInput`, `services/api/src/concord.ts`):
 
 | Type | Terms | Meaning |
 |---|---|---|
-| `dividend` | `ratePerUnit`, optional `payAsset`, `payer`, `rounding` | Pay-asset units per one whole unit held at the record time |
+| `dividend` | `ratePerUnit`, optional `payAsset`, `payer`, `rounding`, `withholdingRate`, `withholdingOverrides` | Pay-asset units per one whole unit held at the record time |
 | `split` | whole-number `num`, `den` | Forward split when `num > den` (2:1 doubles), reverse when `num < den` |
 | `redemption` | whole-number `num`, `den` with `num ≤ den` | Pro-rata redemption of `num/den` of every holding; `1/1` redeems in full |
 
@@ -27,6 +27,11 @@ Notes on the inputs, as validated in `createAction`:
 - `ratePerUnit` is a non-negative decimal string of **any** precision (e.g. `0.0123456789`) —
   it is parsed as an exact rational (`parseRatio`, `packages/core/src/amount.ts`), never as a
   float, so a rate with more decimals than either asset carries loses nothing.
+- `withholdingRate` is the share of the gross the payer keeps back for tax, a decimal from `0`
+  to `1` (`0.15` for 15%). `withholdingOverrides` maps addresses to their own rate, replacing
+  `withholdingRate` for them (a treaty rate, or `0` for an exempt holder). With either set, the
+  dividend expects each holder to receive the **net**, and its result lines also carry `gross`,
+  `withheld` and `net`; see "Rounding" for the order.
 - A dividend defaults to being paid **in kind** — `payAsset` defaults to the asset itself — and
   may instead name any other watched asset on the same network (cross-asset, e.g. a share class
   paying in a stablecoin).
@@ -92,6 +97,13 @@ Which events count as the distribution depends on the action (`reconcileAction`,
   half-up matches terms written as "rounded to the nearest unit". The choice applies to the
   smallest unit of the **pay** asset (7 decimals for classic assets), and the entitlement is
   computed from the exact rational rate, so the only rounding is this final step.
+- **Dividends with withholding** round in this order (`dividendBreakdown`,
+  `packages/core/src/distributions.ts`): (1) the gross is rounded per holder exactly as above;
+  (2) the withheld amount is `gross × withholding rate`, rounded with the same `rounding`;
+  (3) the net is `gross − withheld`, with no further rounding, so gross = withheld + net to the
+  smallest unit. With the default `floor`, rounding the withheld amount down means the net is
+  never short of the exact net. A holder whose net is zero (withheld in full) is expected to
+  receive nothing.
 - **Splits and redemptions** always floor: fractions of the smallest unit **drop**
   (`splitDeltas`, `redemptionDeltas`). In a 3-for-2 split, a holder of 5 units' worth
   `0.0000005` ends at `0.0000007`, not `0.0000008` — the expected delta is

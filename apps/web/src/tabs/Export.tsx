@@ -8,6 +8,11 @@ const SECTIONS = [
   ["breaks", "Breaks", "Every break raised in the period with its sign-off note."],
   ["controls", "Controls log", "Freezes, authorisations and clawbacks with their instructions."],
   ["events", "Ledger events", "The raw event trail the figures are derived from."],
+  ["positions", "Positions", "Lines of each reconciliation run in the period."],
+  ["runs", "Reconciliation runs", "Each reconciliation run in the period with its summary."],
+  ["actions", "Corporate actions", "Corporate actions recorded in the period."],
+  ["journal", "Transaction journal", "The loaded transaction journal entries."],
+  ["instructions", "Instructions", "The loaded control instructions."],
 ] as const;
 
 export function Export({ asset }: { asset: AssetSummary }) {

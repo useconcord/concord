@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   buildControlsLog,
+  dividendBreakdown,
   dividendEntitlements,
   formatUnits,
   observeFlows,
@@ -12,9 +13,13 @@ import {
   reconcilePositions,
   redemptionDeltas,
   replay,
+  sortEvents,
+  splitCashInLieu,
   splitDeltas,
   toCsv,
   type AssetEvent,
+  type DividendAmounts,
+  type DividendTerms,
   type EventKind,
   type ExpectedFlows,
   type HoldingsState,
@@ -76,6 +81,10 @@ export interface AssetRecord {
   syncError?: string;
   syncErrorAt?: string;
   ignore: string[];
+  /** Absolute per-address difference (in smallest units) still treated as a match. */
+  tolerance?: string;
+  instructionWindowHours: number;
+  movementWindowHours: number;
   createdAt: string;
 }
 
@@ -92,6 +101,8 @@ export interface WatchInput {
   baseline?: boolean;
   /** Addresses outside the register, e.g. the issuer's distribution account. */
   ignore?: string[];
+  instructionWindowHours?: number;
+  movementWindowHours?: number;
 }
 
 export type ActionType = "dividend" | "split" | "redemption";
@@ -103,6 +114,10 @@ export interface ActionInput {
   recordTime: string;
   /** End of the execution window. Open-ended when absent. */
   windowTo?: string;
+  /** First ledger of the execution window (inclusive). Events before this ledger are ignored. */
+  windowFromLedger?: number;
+  /** Last ledger of the execution window (inclusive). Events after this ledger are ignored. */
+  windowToLedger?: number;
   exclude?: string[];
   /** Dividend: pay-asset units per whole unit held. */
   ratePerUnit?: string;
@@ -111,9 +126,19 @@ export interface ActionInput {
   /** Dividend: paying agent. Without one, mints of the pay asset are counted. */
   payer?: string;
   rounding?: Rounding;
+  /** Dividend: share of the gross the payer withholds, a decimal from 0 to 1 such as "0.15". */
+  withholdingRate?: string;
+  /** Dividend: per-address withholding rates that replace `withholdingRate`. */
+  withholdingOverrides?: Record<string, string>;
   /** Split ratio or redemption fraction. */
   num?: string;
   den?: string;
+  /** Split: optional cash in lieu of fractional units. */
+  cashInLieu?: {
+    asset: string;
+    pricePerUnit: string;
+    payer?: string;
+  };
 }
 
 export interface NoteInput {
@@ -151,9 +176,19 @@ interface RunResult {
   chainBehind: boolean;
   warnings: string[];
   status: "clean" | "breaks";
+  tolerance: string | null;
   summary: Record<string, string | number | null>;
   lines: Array<Record<string, unknown>>;
   movement: Record<string, unknown> | null;
+  breaks: StoredBreak[];
+}
+
+interface ActionFlowResult {
+  reconciledThrough: string | null;
+  status: "clean" | "breaks";
+  flowAsset: { id: string; code: string };
+  summary: Record<string, string | number>;
+  lines: Array<Record<string, unknown>>;
   breaks: StoredBreak[];
 }
 
@@ -165,13 +200,60 @@ interface ActionResult {
   summary: Record<string, string | number>;
   lines: Array<Record<string, unknown>>;
   breaks: StoredBreak[];
+  cashInLieu?: ActionFlowResult;
 }
 
 const now = () => new Date().toISOString();
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const MAX_REGISTER_CLOCK_SKEW_MS = 5 * 60_000;
+const DEFAULT_INSTRUCTION_WINDOW_HOURS = 72;
+const DEFAULT_MOVEMENT_WINDOW_HOURS = 24;
+const MIN_WINDOW_HOURS = 1;
+const MAX_WINDOW_HOURS = 720;
 
-export const EXPORT_CSV_SECTIONS = ["holdings", "events", "controls", "breaks"] as const;
+function windowHours(value: number | undefined, field: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < MIN_WINDOW_HOURS || value > MAX_WINDOW_HOURS) {
+    throw new Invalid(`${field} must be an integer between ${MIN_WINDOW_HOURS} and ${MAX_WINDOW_HOURS}`);
+  }
+  return value;
+}
+
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]!);
+const SUMMARY_LABELS: Record<string, string> = {
+  chainSupply: "Chain supply",
+  registerTotal: "Register total",
+  supplyDifference: "Supply difference",
+  unmappedUnits: "Unmapped units",
+  grossDifference: "Gross difference",
+  chainHolders: "Chain holders",
+  registerHolders: "Register holders",
+  lines: "Lines",
+  matchedLines: "Matched lines",
+  breakCount: "Breaks",
+};
+
+export const EXPORT_CSV_SECTIONS = [
+  "holdings",
+  "events",
+  "controls",
+  "breaks",
+  "action",
+  "positions",
+  "runs",
+  "actions",
+  "journal",
+  "instructions",
+] as const;
+export const EXPORT_CSV_SECTION_ERROR =
+  "section must be holdings, events, controls, breaks, action, positions, runs, actions, journal or instructions";
 export type ExportCsvSection = (typeof EXPORT_CSV_SECTIONS)[number];
 
 function isoTime(input: string, field: string): string {
@@ -216,11 +298,47 @@ function label(value: unknown, field: string, max = 120): string | undefined {
   return value.trim() || undefined;
 }
 
+function isDbLockedError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  if (typeof e.errcode === "number") {
+    const primary = e.errcode & 0xff;
+    if (primary === 5 || primary === 6) return true;
+  }
+  if (e.code === "SQLITE_BUSY" || e.code === "SQLITE_LOCKED") return true;
+  const msg = typeof e.message === "string" ? e.message : "";
+  const errstr = typeof e.errstr === "string" ? e.errstr : "";
+  return (
+    /sqlite_busy|sqlite_locked/i.test(msg) ||
+    /database is locked|database table is locked/i.test(msg) ||
+    /database is locked|busy/i.test(errstr)
+  );
+}
+
+function isDiskFullError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  if (typeof e.errcode === "number") {
+    const primary = e.errcode & 0xff;
+    if (primary === 13) return true;
+  }
+  if (e.code === "SQLITE_FULL" || e.code === "ENOSPC") return true;
+  const msg = typeof e.message === "string" ? e.message : "";
+  const errstr = typeof e.errstr === "string" ? e.errstr : "";
+  return (
+    /sqlite_full|enospc/i.test(msg) ||
+    /database or disk is full|disk full|no space left/i.test(msg) ||
+    /database or disk is full/i.test(errstr)
+  );
+}
+
 /** What to tell the dashboard about a failed pass. Internals stay in the server log. */
-function describeFailure(err: unknown): string {
+export function describeFailure(err: unknown): string {
   if (err instanceof ChainError || err instanceof Invalid || err instanceof NotFound) return err.message;
   console.error(err);
-  return "Indexing stopped on an unexpected error.";
+  if (isDbLockedError(err)) return "[db_locked] Database is locked.";
+  if (isDiskFullError(err)) return "[disk_full] Database or disk is full.";
+  return "[internal] Indexing stopped on an unexpected error.";
 }
 
 function toAsset(row: Row): AssetRecord {
@@ -233,6 +351,8 @@ function toAsset(row: Row): AssetRecord {
     state: String(row.state) as AssetRecord["state"],
     startMode: String(row.start_mode) as AssetRecord["startMode"],
     ignore: JSON.parse(String(row.ignore_addresses)) as string[],
+    instructionWindowHours: Number(row.instruction_window_hours ?? DEFAULT_INSTRUCTION_WINDOW_HOURS),
+    movementWindowHours: Number(row.movement_window_hours ?? DEFAULT_MOVEMENT_WINDOW_HOURS),
     createdAt: String(row.created_at),
   };
   if (row.issuer) asset.issuer = String(row.issuer);
@@ -244,6 +364,7 @@ function toAsset(row: Row): AssetRecord {
   if (row.synced_at) asset.syncedAt = String(row.synced_at);
   if (row.sync_error) asset.syncError = String(row.sync_error);
   if (row.sync_error_at) asset.syncErrorAt = String(row.sync_error_at);
+  if (row.tolerance) asset.tolerance = String(row.tolerance);
   return asset;
 }
 
@@ -263,21 +384,107 @@ function toEvent(row: Row): AssetEvent {
   return ev;
 }
 
+/** Events folded in between two holdings checkpoints. */
+export const CHECKPOINT_EVERY = 1000;
+
+function encodeCheckpoint(state: HoldingsState): string {
+  return JSON.stringify({
+    balances: Object.fromEntries([...state.balances].map(([address, units]) => [address, units.toString()])),
+    authorized: Object.fromEntries(state.authorized),
+    ledger: state.ledger,
+    eventCount: state.eventCount,
+    skipped: (state.skipped ?? []).map((ev) => ({ ...ev, amount: ev.amount.toString() })),
+  });
+}
+
+function decodeCheckpoint(text: string): HoldingsState {
+  const stored = JSON.parse(text) as {
+    balances: Record<string, string>;
+    authorized: Record<string, boolean>;
+    ledger: number;
+    eventCount: number;
+    skipped: (Omit<AssetEvent, "amount"> & { amount: string })[];
+  };
+  const balances = new Map(Object.entries(stored.balances).map(([address, units]) => [address, BigInt(units)]));
+  let supply = 0n;
+  for (const units of balances.values()) supply += units;
+  const state: HoldingsState = {
+    balances,
+    authorized: new Map(Object.entries(stored.authorized)),
+    supply,
+    ledger: stored.ledger,
+    eventCount: stored.eventCount,
+    incomplete: [...balances]
+      .filter(([, units]) => units < 0n)
+      .map(([address]) => address)
+      .sort(),
+  };
+  if (stored.skipped.length > 0) state.skipped = stored.skipped.map((ev) => ({ ...ev, amount: BigInt(ev.amount) }));
+  return state;
+}
+
+/**
+ * Continue a replay from a checkpoint: `from` is the state after every event up to some ledger,
+ * `events` are the ones after it. Each holder keeps the cutoff its opening balance gave it, so the
+ * result is the one a replay of the whole history would give.
+ */
+function resume(
+  from: HoldingsState,
+  events: AssetEvent[],
+  opening: Map<string, Opening>,
+  baselineLedger: number,
+  upToTime?: string,
+): HoldingsState {
+  const seeded = new Map<string, Opening>();
+  for (const address of new Set([...opening.keys(), ...from.balances.keys(), ...from.authorized.keys()])) {
+    const seed: Opening = {
+      amount: from.balances.get(address) ?? 0n,
+      asOfLedger: opening.get(address)?.asOfLedger ?? baselineLedger,
+    };
+    const authorized = from.authorized.get(address);
+    if (authorized !== undefined) seed.authorized = authorized;
+    seeded.set(address, seed);
+  }
+  const next = replay(events, { opening: seeded, baselineLedger, ...(upToTime ? { upToTime } : {}) });
+  const state: HoldingsState = {
+    balances: next.balances,
+    authorized: next.authorized,
+    supply: next.supply,
+    ledger: Math.max(from.ledger, next.ledger),
+    eventCount: from.eventCount + next.eventCount,
+    // A holder carried negative from the checkpoint is still short of history even if no later
+    // event touches it.
+    incomplete: [...next.balances]
+      .filter(([, units]) => units < 0n)
+      .map(([address]) => address)
+      .sort(),
+  };
+  const skipped = [...(from.skipped ?? []), ...(next.skipped ?? [])];
+  if (skipped.length > 0) state.skipped = skipped;
+  return state;
+}
+
 /**
  * One workspace: every operation the API and the CLI expose over a single database.
  * Reads the chain, never writes it.
  */
 export class Concord {
   private readonly syncing = new Map<string, Promise<{ added: number }>>();
+  private readonly removing = new Set<string>();
   /** Current holdings per asset; replaying every event on each dashboard poll is too slow. */
   private readonly stateMemo = new Map<string, HoldingsState>();
   private seenVersion: number;
+  private readonly checkpointEvery: number;
 
   constructor(
     readonly db: Db,
     readonly networks: Networks,
+    options: { checkpointEvery?: number } = {},
   ) {
     this.seenVersion = db.dataVersion();
+    const every = options.checkpointEvery ?? CHECKPOINT_EVERY;
+    if (!Number.isSafeInteger(every) || every < 1) throw new Error("checkpointEvery must be a positive integer");
+    this.checkpointEvery = every;
   }
 
   /** Forget cached holdings for an asset this instance just changed. */
@@ -311,6 +518,15 @@ export class Concord {
       ? this.db.all("SELECT * FROM assets WHERE network = ? ORDER BY created_at", network)
       : this.db.all("SELECT * FROM assets ORDER BY created_at");
     return rows.map(toAsset);
+  }
+
+  /**
+   * Count assets consuming the workspace watch limit (`maxAssetsPerOrg`).
+   * Assets still in initial `'indexing'` with a recorded `syncError` have never reached `'ready'`
+   * and are excluded so a failing deferred watch cannot lock up the workspace limit.
+   */
+  quotaAssetCount(): number {
+    return this.assets().filter((a) => a.state === "ready" || !a.syncError).length;
   }
 
   networkNames(): NetworkName[] {
@@ -352,10 +568,12 @@ export class Concord {
     } catch (err) {
       throw new Invalid((err as Error).message);
     }
-    if (this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
+    if (this.removing.has(resolved.id) || this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
       throw new Invalid(`${resolved.code} is already watched`);
     }
     const ignore = addresses(input.ignore, "ignore");
+    const instructionWindowHours = windowHours(input.instructionWindowHours, "instructionWindowHours", DEFAULT_INSTRUCTION_WINDOW_HOURS);
+    const movementWindowHours = windowHours(input.movementWindowHours, "movementWindowHours", DEFAULT_MOVEMENT_WINDOW_HOURS);
     let name = label(input.name, "name");
     let decimals = input.decimals;
     if (input.fromLedger !== undefined && (!Number.isInteger(input.fromLedger) || input.fromLedger < 1)) {
@@ -394,13 +612,13 @@ export class Concord {
 
     // The check above ran before the awaits on the chain; another request may have watched the
     // same asset since. Nothing awaits between this check and the insert.
-    if (this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
+    if (this.removing.has(resolved.id) || this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
       throw new Invalid(`${resolved.code} is already watched`);
     }
     try {
       this.db.insert(
-        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?)`,
+        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?)`,
         resolved.id,
         input.network,
         resolved.code,
@@ -410,6 +628,8 @@ export class Concord {
         startMode,
         input.fromLedger ?? null,
         JSON.stringify(ignore),
+        instructionWindowHours,
+        movementWindowHours,
         options.actor?.label ?? null,
         now(),
       );
@@ -477,17 +697,42 @@ export class Concord {
         );
       }
     }
+    // Checkpoints fold in the opening balances and the baseline ledger, both just (re)set.
+    this.db.write("DELETE FROM holdings_checkpoints WHERE asset_id = ?", asset.id);
     this.touch(asset.id);
     return this.asset(asset.id);
   }
 
-  updateAsset(ref: string, patch: { name?: string; ignore?: string[] }): AssetRecord {
+  updateAsset(
+    ref: string,
+    patch: { name?: string; ignore?: string[]; tolerance?: string | null; instructionWindowHours?: number; movementWindowHours?: number },
+  ): AssetRecord {
     const asset = this.asset(ref);
     const name = label(patch.name, "name");
+    let tolerance: string | null = asset.tolerance ?? null;
+    if (patch.tolerance !== undefined) {
+      if (patch.tolerance === null || patch.tolerance === "") {
+        tolerance = null;
+      } else {
+        if (!/^\d+$/.test(patch.tolerance) || BigInt(patch.tolerance) < 0n) {
+          throw new Invalid("tolerance must be a non-negative integer (smallest units)");
+        }
+        tolerance = patch.tolerance;
+      }
+    }
+    const instructionWindowHours = windowHours(
+      patch.instructionWindowHours,
+      "instructionWindowHours",
+      asset.instructionWindowHours,
+    );
+    const movementWindowHours = windowHours(patch.movementWindowHours, "movementWindowHours", asset.movementWindowHours);
     this.db.write(
-      "UPDATE assets SET name = ?, ignore_addresses = ? WHERE id = ?",
+      "UPDATE assets SET name = ?, ignore_addresses = ?, tolerance = ?, instruction_window_hours = ?, movement_window_hours = ? WHERE id = ?",
       name ?? asset.name,
       JSON.stringify(patch.ignore === undefined ? asset.ignore : addresses(patch.ignore, "ignore")),
+      tolerance,
+      instructionWindowHours,
+      movementWindowHours,
       asset.id,
     );
     return this.asset(asset.id);
@@ -496,10 +741,15 @@ export class Concord {
   /** Stop watching: the asset, its events and every book uploaded against it are deleted. */
   async unwatchAsset(ref: string): Promise<void> {
     const asset = this.asset(ref);
-    // A pass still running would write its events into an asset watched again under the same id.
-    await this.syncing.get(asset.id)?.catch(() => {});
-    this.db.write("DELETE FROM assets WHERE id = ?", asset.id);
-    this.touch(asset.id);
+    this.removing.add(asset.id);
+    try {
+      // A pass still running would write its events into an asset watched again under the same id.
+      await this.syncing.get(asset.id)?.catch(() => {});
+      this.db.write("DELETE FROM assets WHERE id = ?", asset.id);
+      this.touch(asset.id);
+    } finally {
+      this.removing.delete(asset.id);
+    }
   }
 
   /**
@@ -509,10 +759,13 @@ export class Concord {
    */
   async rebuild(ref: string, options: { defer?: boolean } = {}): Promise<AssetRecord> {
     const asset = this.asset(ref);
+    if (this.removing.has(asset.id)) throw new NotFound(`asset ${ref} is not watched`);
     await this.syncing.get(asset.id)?.catch(() => {});
+    if (this.removing.has(asset.id)) throw new NotFound(`asset ${ref} is not watched`);
     this.db.tx(() => {
       this.db.write("DELETE FROM events WHERE asset_id = ?", asset.id);
       this.db.write("DELETE FROM openings WHERE asset_id = ?", asset.id);
+      this.db.write("DELETE FROM holdings_checkpoints WHERE asset_id = ?", asset.id);
       this.db.write(
         `UPDATE assets SET state = 'indexing', start_mode = ?, start_ledger = NULL, baseline_ledger = NULL,
            history_from = NULL, cursor = NULL, synced_ledger = NULL, synced_at = NULL, sync_error = NULL, sync_error_at = NULL
@@ -532,6 +785,7 @@ export class Concord {
   /** Pull new events for one asset. Concurrent calls share one pass. */
   sync(ref: string, head?: ChainHead): Promise<{ added: number }> {
     const asset = this.asset(ref);
+    if (this.removing.has(asset.id)) throw new NotFound(`asset ${ref} is not watched`);
     const running = this.syncing.get(asset.id);
     if (running) return running;
     const pass = this.runSync(asset, head).finally(() => this.syncing.delete(asset.id));
@@ -591,11 +845,13 @@ export class Concord {
         }
       }
       const out = await this.syncPass(ready, chain);
+      if (this.removing.has(asset.id)) return { added: 0 };
       if (asset.syncError) {
         this.db.write("UPDATE assets SET sync_error = NULL, sync_error_at = NULL WHERE id = ?", asset.id);
       }
       return out;
     } catch (err) {
+      if (this.removing.has(asset.id)) throw err;
       this.db.write(
         "UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?",
         describeFailure(err),
@@ -614,7 +870,9 @@ export class Concord {
       : { startLedger: asset.startLedger };
     let added = 0;
     for (let i = 0; i < 10_000; i++) {
+      if (this.removing.has(asset.id)) break;
       const page = await chain.getEvents(asset.id, from, limit);
+      if (this.removing.has(asset.id)) break;
       const cursor = page.cursor ?? page.events.at(-1)?.id;
       const previous = "cursor" in from ? from.cursor : undefined;
       // Caught up when the cursor stops moving, or a short page ends at the chain's tip.
@@ -622,7 +880,16 @@ export class Concord {
         !cursor || cursor === previous || (page.events.length < limit && cursorLedger(cursor) >= page.latestLedger);
       let wrote = 0;
       this.db.tx(() => {
-        for (const ev of page.events) wrote += this.insertEvent(asset.id, ev) ? 1 : 0;
+        let lowest: number | undefined;
+        for (const ev of page.events) {
+          if (!this.insertEvent(asset.id, ev)) continue;
+          wrote++;
+          if (lowest === undefined || ev.ledger < lowest) lowest = ev.ledger;
+        }
+        // A checkpoint at or after a ledger that just gained an event no longer covers it.
+        if (lowest !== undefined) {
+          this.db.write("DELETE FROM holdings_checkpoints WHERE asset_id = ? AND ledger >= ?", asset.id, lowest);
+        }
         if (atTip) {
           this.db.write(
             `UPDATE assets SET cursor = COALESCE(?, cursor), synced_ledger = MAX(COALESCE(synced_ledger, 0), ?),
@@ -699,7 +966,13 @@ export class Concord {
     return out;
   }
 
-  /** Holdings from replaying events over the opening balances. Treat the result as read-only. */
+  /**
+   * Holdings from replaying events over the opening balances. Treat the result as read-only.
+   *
+   * Without `events`, the replay starts from the nearest stored checkpoint at or before
+   * `upToTime` and reads only the events after it, so the cost near the tip does not grow with
+   * the length of the history. Given `events`, it replays exactly those.
+   */
   state(asset: AssetRecord, upToTime?: string, events?: AssetEvent[]): HoldingsState {
     const current = upToTime === undefined && events === undefined;
     if (current) {
@@ -707,13 +980,81 @@ export class Concord {
       const hit = this.stateMemo.get(asset.id);
       if (hit) return hit;
     }
-    const state = replay(events ?? this.loadEvents(asset.id), {
-      opening: this.openings(asset.id),
-      baselineLedger: asset.baselineLedger ?? 0,
-      ...(upToTime ? { upToTime } : {}),
-    });
+    const opening = this.openings(asset.id);
+    const baselineLedger = asset.baselineLedger ?? 0;
+    let state: HoldingsState;
+    if (events) {
+      state = replay(events, { opening, baselineLedger, ...(upToTime ? { upToTime } : {}) });
+    } else {
+      this.extendCheckpoints(asset.id, opening, baselineLedger);
+      const checkpoint = upToTime
+        ? this.db.get(
+            "SELECT * FROM holdings_checkpoints WHERE asset_id = ? AND closed_at <= ? ORDER BY ledger DESC LIMIT 1",
+            asset.id,
+            upToTime,
+          )
+        : this.db.get("SELECT * FROM holdings_checkpoints WHERE asset_id = ? ORDER BY ledger DESC LIMIT 1", asset.id);
+      if (checkpoint) {
+        const tail = this.db
+          .all(
+            `SELECT * FROM events WHERE asset_id = ? AND ledger > ?${upToTime ? " AND closed_at <= ?" : ""} ORDER BY id`,
+            asset.id,
+            Number(checkpoint.ledger),
+            ...(upToTime ? [upToTime] : []),
+          )
+          .map(toEvent);
+        state = resume(decodeCheckpoint(String(checkpoint.state)), tail, opening, baselineLedger, upToTime);
+      } else {
+        state = replay(this.loadEvents(asset.id), { opening, baselineLedger, ...(upToTime ? { upToTime } : {}) });
+      }
+    }
     if (current) this.stateMemo.set(asset.id, state);
     return state;
+  }
+
+  /**
+   * Store a checkpoint after every `checkpointEvery` events not yet covered by one. A checkpoint
+   * sits on a ledger boundary (every event after it is in a later ledger) and records the latest
+   * close time it covers, so a replay up to any later time can start from it. The newest ledger
+   * is never checkpointed: more of its events may still arrive.
+   */
+  private extendCheckpoints(assetId: string, opening: Map<string, Opening>, baselineLedger: number): void {
+    const last = this.db.get(
+      "SELECT ledger, closed_at, state FROM holdings_checkpoints WHERE asset_id = ? ORDER BY ledger DESC LIMIT 1",
+      assetId,
+    );
+    const after = last ? Number(last.ledger) : -1;
+    const pending =
+      this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE asset_id = ? AND ledger > ?", assetId, after)
+        ?.n ?? 0;
+    if (pending <= this.checkpointEvery) return;
+    const events = sortEvents(
+      this.db.all("SELECT * FROM events WHERE asset_id = ? AND ledger > ?", assetId, after).map(toEvent),
+    );
+    // Lowest ledger at or after each position: a boundary needs every later event in a later ledger.
+    const lowestFrom = new Array<number>(events.length + 1).fill(Number.POSITIVE_INFINITY);
+    for (let i = events.length - 1; i >= 0; i--) lowestFrom[i] = Math.min(events[i]!.ledger, lowestFrom[i + 1]!);
+    let state = last ? decodeCheckpoint(String(last.state)) : undefined;
+    let closedAt = last ? String(last.closed_at) : "";
+    let start = 0;
+    this.db.tx(() => {
+      for (let i = 0; i < events.length - 1; i++) {
+        const ev = events[i]!;
+        if (ev.closedAt > closedAt) closedAt = ev.closedAt;
+        if (i + 1 - start < this.checkpointEvery || lowestFrom[i + 1]! <= ev.ledger) continue;
+        const chunk = events.slice(start, i + 1);
+        state = state ? resume(state, chunk, opening, baselineLedger) : replay(chunk, { opening, baselineLedger });
+        this.db.write(
+          "INSERT OR REPLACE INTO holdings_checkpoints (asset_id, ledger, closed_at, state, created_at) VALUES (?, ?, ?, ?, ?)",
+          assetId,
+          ev.ledger,
+          closedAt,
+          encodeCheckpoint(state),
+          now(),
+        );
+        start = i + 1;
+      }
+    });
   }
 
   holdings(ref: string, asOf?: string) {
@@ -861,10 +1202,96 @@ export class Concord {
   }
 
   /** Remove a register, its holder lines and every reconciliation run against it. */
-  deleteRegister(ref: string, registerId: number): void {
+  deleteRegister(ref: string, registerId: number): { runs: number } {
     const asset = this.asset(ref);
+    const runs =
+      this.db.get<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM runs WHERE register_id = ? AND asset_id = ?",
+        registerId,
+        asset.id,
+      )?.count ?? 0;
     const removed = this.db.write("DELETE FROM registers WHERE id = ? AND asset_id = ?", registerId, asset.id);
     if (removed === 0) throw new NotFound("no such register for this asset");
+    return { runs };
+  }
+
+  /**
+   * What the transfer agent changed between two registers of one asset, independently of the
+   * chain: holders added and removed, and holders whose units, accounts or statuses differ.
+   * Keyed by `holder_id`; a holder listed on several lines is compared on the sum of its units
+   * and the set of its accounts and statuses. Every list is sorted by holder id.
+   */
+  diffRegisters(ref: string, fromId: number, toId: number) {
+    const asset = this.asset(ref);
+    const load = (registerId: number) => {
+      const reg = this.db.get("SELECT id, asset_id, as_of FROM registers WHERE id = ?", registerId);
+      if (!reg) throw new NotFound(`no register ${registerId}`);
+      if (String(reg.asset_id) !== asset.id) throw new Invalid(`register ${registerId} belongs to a different asset`);
+      const holders = new Map<string, { name?: string; units: bigint; accounts: Set<string>; statuses: Set<string> }>();
+      for (const p of this.registerPositions(registerId)) {
+        const h = holders.get(p.holderId) ?? { units: 0n, accounts: new Set<string>(), statuses: new Set<string>() };
+        h.units += p.units;
+        if (p.holderName && h.name === undefined) h.name = p.holderName;
+        if (p.account) h.accounts.add(p.account);
+        if (p.status) h.statuses.add(p.status);
+        holders.set(p.holderId, h);
+      }
+      return { ref: { registerId, asOf: String(reg.as_of) }, holders };
+    };
+    const from = load(fromId);
+    const to = load(toId);
+    const sorted = (s: Set<string>) => [...s].sort();
+    const view = (h: { units: bigint; accounts: Set<string>; statuses: Set<string> }) => ({
+      units: formatUnits(h.units, asset.decimals),
+      accounts: sorted(h.accounts),
+      statuses: sorted(h.statuses),
+    });
+    const same = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
+    const byId = (a: { holderId: string }, b: { holderId: string }) =>
+      a.holderId < b.holderId ? -1 : a.holderId > b.holderId ? 1 : 0;
+
+    const added = [];
+    const removed = [];
+    const changed = [];
+    let unchanged = 0;
+    for (const [holderId, h] of to.holders) {
+      if (!from.holders.has(holderId)) added.push({ holderId, holderName: h.name ?? null, ...view(h) });
+    }
+    for (const [holderId, before] of from.holders) {
+      const after = to.holders.get(holderId);
+      if (!after) {
+        removed.push({ holderId, holderName: before.name ?? null, ...view(before) });
+        continue;
+      }
+      const fields: Array<"units" | "accounts" | "statuses"> = [];
+      if (before.units !== after.units) fields.push("units");
+      if (!same(before.accounts, after.accounts)) fields.push("accounts");
+      if (!same(before.statuses, after.statuses)) fields.push("statuses");
+      if (fields.length === 0) {
+        unchanged++;
+        continue;
+      }
+      changed.push({
+        holderId,
+        holderName: after.name ?? before.name ?? null,
+        fields,
+        unitsDelta: formatUnits(after.units - before.units, asset.decimals),
+        from: view(before),
+        to: view(after),
+      });
+    }
+    added.sort(byId);
+    removed.sort(byId);
+    changed.sort(byId);
+    return {
+      asset: { id: asset.id, code: asset.code },
+      from: from.ref,
+      to: to.ref,
+      summary: { added: added.length, removed: removed.length, changed: changed.length, unchanged },
+      added,
+      removed,
+      changed,
+    };
   }
 
   private registerPositions(registerId: number): RegisterPosition[] {
@@ -877,7 +1304,16 @@ export class Concord {
     });
   }
 
-  importJournal(ref: string, csv: string) {
+  importJournal(
+    ref: string,
+    csv: string,
+    options?: { mode?: "merge" | "replace"; allowPartial?: boolean },
+  ) {
+    const mode = options?.mode ?? "merge";
+    const allowPartial = options?.allowPartial ?? false;
+    if (mode !== "merge" && mode !== "replace") {
+      throw new Invalid("mode must be 'merge' or 'replace'");
+    }
     const asset = this.asset(ref);
     let parsed;
     try {
@@ -885,23 +1321,82 @@ export class Concord {
     } catch (err) {
       throw new Invalid((err as Error).message);
     }
+    if (mode === "replace" && parsed.issues.length > 0 && !allowPartial) {
+      throw new Invalid(`cannot replace journal: CSV contains ${parsed.issues.length} parse errors and allowPartial is false`);
+    }
+
+    const existing = this.db.all<{ ref: string }>("SELECT ref FROM journal WHERE asset_id = ?", asset.id);
+    const existingRefs = new Set(existing.map((r) => r.ref));
+
+    let added = 0;
+    let replaced = 0;
+    let removed = 0;
+
     this.db.tx(() => {
-      for (const e of parsed.entries) {
-        this.db.insert(
-          `INSERT OR REPLACE INTO journal (asset_id, ref, date, type, from_addr, to_addr, units, tx_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          asset.id,
-          e.ref,
-          e.date,
-          e.type,
-          e.from ?? null,
-          e.to ?? null,
-          e.units.toString(),
-          e.txHash ?? null,
-        );
+      if (mode === "replace") {
+        const fileRefs = new Set(parsed.entries.map((e) => e.ref));
+        for (const r of existingRefs) {
+          if (!fileRefs.has(r)) {
+            removed++;
+          }
+        }
+        this.db.write("DELETE FROM journal WHERE asset_id = ?", asset.id);
+        const seenInFile = new Set<string>();
+        for (const e of parsed.entries) {
+          if (!seenInFile.has(e.ref)) {
+            seenInFile.add(e.ref);
+            if (existingRefs.has(e.ref)) {
+              replaced++;
+            } else {
+              added++;
+            }
+          }
+          this.db.insert(
+            `INSERT OR REPLACE INTO journal (asset_id, ref, date, type, from_addr, to_addr, units, tx_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            asset.id,
+            e.ref,
+            e.date,
+            e.type,
+            e.from ?? null,
+            e.to ?? null,
+            e.units.toString(),
+            e.txHash ?? null,
+          );
+        }
+      } else {
+        const seenInFile = new Set<string>();
+        for (const e of parsed.entries) {
+          if (!seenInFile.has(e.ref)) {
+            seenInFile.add(e.ref);
+            if (existingRefs.has(e.ref)) {
+              replaced++;
+            } else {
+              added++;
+            }
+          }
+          this.db.insert(
+            `INSERT OR REPLACE INTO journal (asset_id, ref, date, type, from_addr, to_addr, units, tx_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            asset.id,
+            e.ref,
+            e.date,
+            e.type,
+            e.from ?? null,
+            e.to ?? null,
+            e.units.toString(),
+            e.txHash ?? null,
+          );
+        }
       }
     });
-    return { entries: parsed.entries.length, issues: parsed.issues };
+    return {
+      entries: parsed.entries.length,
+      issues: parsed.issues,
+      added,
+      replaced,
+      removed,
+    };
   }
 
   private journal(assetId: string): JournalEntry[] {
@@ -919,7 +1414,53 @@ export class Concord {
     });
   }
 
-  importInstructions(ref: string, csv: string) {
+  /** Imported journal entries with formatted units and latest-run movement match status. */
+  journalEntries(ref: string, options: { limit?: number; before?: string } = {}) {
+    const asset = this.asset(ref);
+    const where = ["asset_id = ?"];
+    const params: Array<string | number> = [asset.id];
+    if (options.before) {
+      const anchor = this.db.get<{ date: string }>(
+        "SELECT date FROM journal WHERE asset_id = ? AND ref = ?",
+        asset.id,
+        options.before,
+      );
+      if (anchor) {
+        where.push("(date < ? OR (date = ? AND ref < ?))");
+        params.push(anchor.date, anchor.date, options.before);
+      } else {
+        where.push("date < ?");
+        params.push(options.before);
+      }
+    }
+    const rawLimit = Number.isFinite(options.limit) ? Math.trunc(options.limit!) : 100;
+    params.push(Math.min(Math.max(rawLimit, 1), 1000));
+    const latest = this.latestRun(asset.id);
+    const movementMatches = (latest?.movement?.matches as Array<{ ref: string }> | undefined) ?? null;
+    const matchedRefs = movementMatches ? new Set(movementMatches.map((m) => m.ref)) : null;
+
+    return this.db
+      .all(`SELECT * FROM journal WHERE ${where.join(" AND ")} ORDER BY date DESC, ref DESC LIMIT ?`, ...params)
+      .map((r) => {
+        const entryRef = String(r.ref);
+        return {
+          ref: entryRef,
+          date: String(r.date),
+          type: String(r.type) as JournalEntry["type"],
+          from: r.from_addr ? String(r.from_addr) : null,
+          to: r.to_addr ? String(r.to_addr) : null,
+          units: formatUnits(BigInt(String(r.units)), asset.decimals),
+          txHash: r.tx_hash ? String(r.tx_hash) : null,
+          status: matchedRefs === null ? null : matchedRefs.has(entryRef) ? ("matched" as const) : ("unmatched" as const),
+        };
+      });
+  }
+
+  importInstructions(ref: string, csv: string, options: { mode?: "merge" | "replace" } = {}) {
+    const mode = options.mode ?? "merge";
+    if (mode !== "merge" && mode !== "replace") {
+      throw new Invalid('mode must be "merge" or "replace"');
+    }
     const asset = this.asset(ref);
     let parsed;
     try {
@@ -927,8 +1468,24 @@ export class Concord {
     } catch (err) {
       throw new Invalid((err as Error).message);
     }
+    if (mode === "replace" && parsed.issues.length > 0) {
+      throw new Invalid(
+        `replace mode refused because the CSV had ${parsed.issues.length} parse issue(s) (line ${parsed.issues[0]!.line}: ${parsed.issues[0]!.message})`,
+      );
+    }
+    let added = 0;
+    let replaced = 0;
+    let removed = 0;
     this.db.tx(() => {
+      const existingRefs = new Set(
+        this.db.all<{ ref: string }>("SELECT ref FROM instructions WHERE asset_id = ?", asset.id).map((r) => r.ref),
+      );
+      const incomingRefs = new Set<string>();
       for (const i of parsed.instructions) {
+        if (existingRefs.has(i.ref)) replaced++;
+        else added++;
+        existingRefs.add(i.ref);
+        incomingRefs.add(i.ref);
         this.db.insert(
           `INSERT OR REPLACE INTO instructions (asset_id, ref, type, account, units, issued_at, approved_by, reason)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -942,8 +1499,15 @@ export class Concord {
           i.reason ?? null,
         );
       }
+      if (mode === "replace") {
+        for (const existingRef of existingRefs) {
+          if (!incomingRefs.has(existingRef)) {
+            removed += this.db.write("DELETE FROM instructions WHERE asset_id = ? AND ref = ?", asset.id, existingRef);
+          }
+        }
+      }
     });
-    return { instructions: parsed.instructions.length, issues: parsed.issues };
+    return { instructions: parsed.instructions.length, added, replaced, removed, issues: parsed.issues };
   }
 
   private instructions(assetId: string): Instruction[] {
@@ -959,6 +1523,22 @@ export class Concord {
       if (r.reason) i.reason = String(r.reason);
       return i;
     });
+  }
+
+  /** Imported control instructions with formatted units. */
+  instructionList(ref: string) {
+    const asset = this.asset(ref);
+    return this.db
+      .all("SELECT * FROM instructions WHERE asset_id = ? ORDER BY issued_at DESC, ref DESC", asset.id)
+      .map((r) => ({
+        ref: String(r.ref),
+        type: String(r.type) as Instruction["type"],
+        account: String(r.account),
+        units: r.units ? formatUnits(BigInt(String(r.units)), asset.decimals) : null,
+        issuedAt: String(r.issued_at),
+        approvedBy: r.approved_by ? String(r.approved_by) : null,
+        reason: r.reason ? String(r.reason) : null,
+      }));
   }
 
   // ── reconciliation ────────────────────────────────────────────────────────
@@ -989,7 +1569,10 @@ export class Concord {
     }
     const events = this.loadEvents(asset.id);
     const state = this.state(asset, asOf, events);
-    const positions = reconcilePositions(state, this.registerPositions(Number(reg.id)), { ignore: asset.ignore });
+    const positions = reconcilePositions(state, this.registerPositions(Number(reg.id)), {
+      ignore: asset.ignore,
+      ...(asset.tolerance ? { tolerance: BigInt(asset.tolerance) } : {}),
+    });
 
     const breaks: StoredBreak[] = positions.breaks.map((b) => ({
       scope: "position",
@@ -1023,6 +1606,7 @@ export class Concord {
       });
       const result = reconcileMovements(scoped, scopedJournal, {
         to: asOf,
+        windowMs: asset.movementWindowHours * 3600_000,
         ...(previous ? { from: new Date(Date.parse(previous.as_of) + 1).toISOString() } : {}),
       });
       movement = { from: previous?.as_of ?? null, to: asOf, ...result.summary, matches: result.matches };
@@ -1068,6 +1652,7 @@ export class Concord {
       chainBehind,
       warnings,
       status: breaks.length === 0 ? "clean" : "breaks",
+      tolerance: asset.tolerance ?? null,
       summary: {
         chainSupply: fmt(s.chainSupply),
         registerTotal: fmt(s.registerTotal),
@@ -1120,6 +1705,171 @@ export class Concord {
     };
   }
 
+  runReport(id: number) {
+    const row = this.db.get("SELECT * FROM runs WHERE id = ?", id);
+    if (!row) throw new NotFound(`reconciliation ${id} not found`);
+    const stored = String(row.result);
+    const result = JSON.parse(stored) as RunResult;
+    const asset = this.asset(String(row.asset_id));
+    const breaks = this.annotate(asset.id, "recon", result.breaks);
+    const digest = sha256(stored);
+    const historyStart = this.historyStart(asset);
+    const value = (raw: unknown) => (raw === null || raw === undefined || raw === "" ? "n/a" : escapeHtml(raw));
+    const facts = (entries: Array<[string, unknown]>) =>
+      entries
+        .map(([label, raw]) => `<tr><th scope="row">${escapeHtml(label)}</th><td>${value(raw)}</td></tr>`)
+        .join("\n            ");
+    const summary = facts([
+      ["Status", result.status],
+      ...Object.entries(result.summary).map(([key, raw]): [string, unknown] => [SUMMARY_LABELS[key] ?? key, raw]),
+    ]);
+    const coverage = facts([
+      ["History starts", historyStart ?? null],
+      ["Start mode", asset.startMode],
+      ["Start ledger", asset.startLedger ?? null],
+      ["Baseline ledger", asset.baselineLedger ?? null],
+      ["Indexed to ledger", asset.syncedLedger ?? null],
+      ["Indexed to time", asset.syncedAt ?? null],
+      ["Chain ledger at run", result.chainLedger],
+      ["Chain synced at run", result.chainSyncedAt],
+      ["Chain behind register", result.chainBehind ? "yes" : "no"],
+      ["Ignored addresses", asset.ignore.length === 0 ? "none" : asset.ignore.join(", ")],
+    ]);
+    const warnings =
+      result.warnings.length === 0
+        ? `<p class="empty">No warnings.</p>`
+        : `<ul>\n            ${result.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join("\n            ")}\n          </ul>`;
+    const breakSections =
+      breaks.length === 0
+        ? `<p class="empty">No breaks in this run.</p>`
+        : breaks
+            .map((b) => {
+              const history = this.noteHistory(asset.id, "recon", b.key);
+              const historyRows =
+                history.length === 0
+                  ? `<tr><td colspan="4">No sign-off history.</td></tr>`
+                  : history
+                      .map(
+                        (h) =>
+                          `<tr><td>${value(h.at)}</td><td>${value(h.status)}</td><td>${value(h.author)}</td><td>${value(h.note)}</td></tr>`,
+                      )
+                      .join("\n                  ");
+              const factsRows = facts([
+                ["Scope", b.scope],
+                ["Key", b.key],
+                ["Address", b.address],
+                ["Holder IDs", b.holderIds?.join(", ") ?? null],
+                ["Chain units", b.chainUnits],
+                ["Register units", b.registerUnits],
+                ["Difference", b.difference],
+                ["Expected", b.expected],
+                ["Observed", b.observed],
+                ["Transaction", b.txHash],
+                ["Event", b.eventId],
+                ["First seen", b.firstSeen],
+                ["Current status", b.status],
+                ["Current note", b.note],
+                ["Noted by", b.noteAuthor],
+                ["Noted at", b.noteAt],
+                ["Stale note", b.noteStale ? "yes" : "no"],
+              ]);
+              return `<article class="break">
+          <h3>${escapeHtml(b.type)} <span class="severity severity-${escapeHtml(b.severity)}">${escapeHtml(b.severity)}</span></h3>
+          <p>${escapeHtml(b.message)}</p>
+          <table class="facts">
+            ${factsRows}
+          </table>
+          <h4>Sign-off history</h4>
+          <table>
+            <thead><tr><th>When</th><th>Status</th><th>By</th><th>Note</th></tr></thead>
+            <tbody>
+                  ${historyRows}
+            </tbody>
+          </table>
+        </article>`;
+            })
+            .join("\n        ");
+    return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concord reconciliation report ${escapeHtml(asset.code)} ${escapeHtml(result.asOf)}</title>
+<style>
+:root { color-scheme: light; }
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; background: #f6f7f9; color: #16181d; font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; background: #fff; }
+header { border-bottom: 2px solid #16181d; padding-bottom: 16px; margin-bottom: 24px; }
+.eyebrow { margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; color: #5b6070; }
+h1 { margin: 0 0 8px; font-size: 26px; line-height: 1.2; }
+h2 { font-size: 18px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #d8dbe2; }
+h3 { font-size: 15px; margin: 0 0 6px; }
+h4 { font-size: 13px; margin: 16px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; color: #5b6070; }
+.meta, .empty { color: #5b6070; }
+section { margin-bottom: 28px; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0 0; }
+th, td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid #e3e5ea; }
+th { font-weight: 600; color: #3b3f4a; }
+table.facts th { width: 34%; }
+.break { border: 1px solid #d8dbe2; border-radius: 6px; padding: 12px 14px; margin: 12px 0; page-break-inside: avoid; break-inside: avoid; }
+.severity { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; background: #eef0f4; color: #3b3f4a; }
+.severity-high { background: #fde8e6; color: #9f1d14; }
+.severity-medium { background: #fff2d9; color: #8a5a00; }
+.severity-low { background: #e7f0fb; color: #1f4e8c; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+ul { margin: 6px 0 0; padding-left: 20px; }
+@media print {
+  body { background: #fff; font-size: 11pt; }
+  main { max-width: none; padding: 0; }
+  h2 { page-break-after: avoid; break-after: avoid; }
+  .break { page-break-inside: avoid; break-inside: avoid; }
+  @page { margin: 16mm; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">Concord reconciliation report</p>
+    <h1>${escapeHtml(asset.name)} (${escapeHtml(asset.code)})</h1>
+    <p class="meta">Run ${escapeHtml(row.id)} | ${escapeHtml(asset.network)} | created ${value(row.created_at)} | as of ${value(result.asOf)}</p>
+  </header>
+
+  <section>
+    <h2>Integrity</h2>
+    <table class="facts">
+      <tr><th scope="row">Run result SHA-256</th><td><code>${escapeHtml(digest)}</code></td></tr>
+      <tr><th scope="row">Register SHA-256</th><td><code>${escapeHtml(result.registerSha256)}</code></td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Summary</h2>
+    <table class="facts">
+      ${summary}
+    </table>
+  </section>
+
+  <section>
+    <h2>Coverage</h2>
+    <table class="facts">
+      ${coverage}
+    </table>
+    <h3>Warnings</h3>
+    ${warnings}
+  </section>
+
+  <section>
+    <h2>Breaks</h2>
+    ${breakSections}
+  </section>
+</main>
+</body>
+</html>
+`;
+  }
+
   runs(ref: string) {
     const asset = this.asset(ref);
     return this.db
@@ -1136,6 +1886,50 @@ export class Concord {
           openBreaks: r.openBreaks,
         };
       });
+  }
+
+  /**
+   * What changed between two reconciliations of one asset, yesterday's against today's say.
+   * Breaks are matched by `key`: `new` ones appear only in the later run, `resolved` ones only
+   * in the earlier, and of those in both, `changed` ones have a different `fingerprint` (the
+   * figures moved) while `persisting` ones do not. Every list is sorted by key.
+   */
+  diffRuns(fromId: number, toId: number) {
+    const load = (id: number) => {
+      const row = this.db.get("SELECT id, asset_id, as_of, result FROM runs WHERE id = ?", id);
+      if (!row) throw new NotFound(`reconciliation ${id} not found`);
+      const breaks = new Map<string, StoredBreak>();
+      for (const b of (JSON.parse(String(row.result)) as RunResult).breaks) breaks.set(b.key, b);
+      return { assetId: String(row.asset_id), ref: { runId: id, asOf: String(row.as_of) }, breaks };
+    };
+    const from = load(fromId);
+    const to = load(toId);
+    if (from.assetId !== to.assetId) {
+      throw new Invalid(`reconciliations ${fromId} and ${toId} are of different assets`);
+    }
+    const byKey = (a: { key: string }, b: { key: string }) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+    const added: StoredBreak[] = [];
+    const resolved: StoredBreak[] = [];
+    const persisting: StoredBreak[] = [];
+    const changed: Array<{ key: string; type: string; from: StoredBreak; to: StoredBreak }> = [];
+    for (const [key, after] of to.breaks) {
+      const before = from.breaks.get(key);
+      if (!before) added.push(after);
+      else if (before.fingerprint === after.fingerprint) persisting.push(after);
+      else changed.push({ key, type: after.type, from: before, to: after });
+    }
+    for (const [key, before] of from.breaks) if (!to.breaks.has(key)) resolved.push(before);
+    for (const list of [added, resolved, persisting, changed]) list.sort(byKey);
+    return {
+      assetId: from.assetId,
+      from: from.ref,
+      to: to.ref,
+      summary: { new: added.length, resolved: resolved.length, persisting: persisting.length, changed: changed.length },
+      new: added,
+      resolved,
+      persisting,
+      changed,
+    };
   }
 
   /** The newest reconciliation of one register, if it has been reconciled. */
@@ -1268,6 +2062,18 @@ export class Concord {
     const recordTime = isoTime(String(input.recordTime ?? ""), "recordTime");
     const params: Record<string, unknown> = { exclude: addresses(input.exclude, "exclude") };
     if (input.windowTo) params.windowTo = isoTime(input.windowTo, "windowTo");
+    if (input.windowFromLedger !== undefined) {
+      if (!Number.isInteger(input.windowFromLedger) || input.windowFromLedger < 1) {
+        throw new Invalid("windowFromLedger must be a positive ledger sequence number");
+      }
+      params.windowFromLedger = input.windowFromLedger;
+    }
+    if (input.windowToLedger !== undefined) {
+      if (!Number.isInteger(input.windowToLedger) || input.windowToLedger < 1) {
+        throw new Invalid("windowToLedger must be a positive ledger sequence number");
+      }
+      params.windowToLedger = input.windowToLedger;
+    }
     if (input.type === "dividend") {
       if (!input.ratePerUnit || !/^\d+(\.\d+)?$/.test(input.ratePerUnit)) {
         throw new Invalid("dividend needs ratePerUnit as a decimal");
@@ -1282,6 +2088,27 @@ export class Concord {
         throw new Invalid("rounding must be floor or half-up");
       }
       params.rounding = input.rounding ?? "floor";
+      const fraction = (value: unknown, field: string): string => {
+        if (typeof value !== "string" || !/^(0(\.\d+)?|1(\.0+)?)$/.test(value)) {
+          throw new Invalid(`${field} must be a decimal from 0 to 1, such as 0.15`);
+        }
+        return value;
+      };
+      if (input.withholdingRate !== undefined) {
+        params.withholdingRate = fraction(input.withholdingRate, "withholdingRate");
+      }
+      if (input.withholdingOverrides !== undefined) {
+        const given = input.withholdingOverrides;
+        if (given === null || typeof given !== "object" || Array.isArray(given) || Object.keys(given).length > 500) {
+          throw new Invalid("withholdingOverrides must map addresses to rates");
+        }
+        const overrides: Record<string, string> = {};
+        for (const [key, value] of Object.entries(given)) {
+          const holder = address(key, "a withholdingOverrides address")!;
+          overrides[holder] = fraction(value, `withholdingOverrides for ${holder}`);
+        }
+        params.withholdingOverrides = overrides;
+      }
     } else if (input.type === "split" || input.type === "redemption") {
       if (!input.num || !input.den || !/^\d+$/.test(input.num) || !/^\d+$/.test(input.den)) {
         throw new Invalid(`${input.type} needs whole-number num and den`);
@@ -1292,8 +2119,25 @@ export class Concord {
       }
       params.num = input.num;
       params.den = input.den;
+      if (input.type === "split" && input.cashInLieu) {
+        if (!input.cashInLieu.asset) throw new Invalid("cashInLieu needs asset");
+        const cash = this.asset(String(input.cashInLieu.asset));
+        if (cash.network !== asset.network) throw new Invalid("the cash in lieu asset must be on the same network");
+        if (!input.cashInLieu.pricePerUnit || !/^\d+(\.\d+)?$/.test(input.cashInLieu.pricePerUnit)) {
+          throw new Invalid("cashInLieu needs pricePerUnit as a decimal");
+        }
+        const cilPayer = address(input.cashInLieu.payer ?? input.payer, "payer");
+        params.cashInLieu = {
+          asset: cash.id,
+          pricePerUnit: input.cashInLieu.pricePerUnit,
+          ...(cilPayer ? { payer: cilPayer } : {}),
+        };
+      }
     } else {
       throw new Invalid("type must be dividend, split or redemption");
+    }
+    if (input.cashInLieu && input.type !== "split") {
+      throw new Invalid("cashInLieu is only valid for split actions");
     }
     const title =
       label(input.label, "label") ??
@@ -1352,7 +2196,7 @@ export class Concord {
   async reconcileAction(id: number, options: { sync?: boolean } = {}) {
     const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
     if (!row) throw new NotFound(`corporate action ${id} not found`);
-    const params = JSON.parse(String(row.params)) as Record<string, string | string[] | undefined>;
+    const params = JSON.parse(String(row.params)) as Record<string, unknown>;
     const type = String(row.type) as ActionType;
     const warnings: string[] = [];
     const refresh = options.sync !== false;
@@ -1363,6 +2207,15 @@ export class Concord {
       await this.trySync(flowAsset, warnings);
       // The sync moved the pay asset's read-through time; the record read above is stale.
       flowAsset = this.asset(flowAsset.id);
+    }
+    const cilParams =
+      type === "split" && params.cashInLieu
+        ? (params.cashInLieu as { asset: string; pricePerUnit: string; payer?: string })
+        : undefined;
+    let cashAsset = cilParams ? this.asset(cilParams.asset) : undefined;
+    if (refresh && cashAsset && cashAsset.id !== asset.id && cashAsset.id !== flowAsset.id) {
+      await this.trySync(cashAsset, warnings);
+      cashAsset = this.asset(cashAsset.id);
     }
 
     const recordTime = String(row.record_time);
@@ -1391,21 +2244,34 @@ export class Concord {
     let expected: ExpectedFlows;
     let plus: EventKind[];
     let minus: EventKind[] = [];
+    let splitFractions: Map<string, bigint> | undefined;
     const payer = params.payer as string | undefined;
+    // Only a dividend with withholding terms shows gross, withheld and net on its lines.
+    let withholding: Map<string, DividendAmounts> | undefined;
     if (type === "dividend") {
-      expected = dividendEntitlements(snapshot, {
+      const terms: DividendTerms = {
         ratePerUnit: String(params.ratePerUnit),
         baseDecimals: asset.decimals,
         payDecimals: flowAsset.decimals,
         rounding: (params.rounding as Rounding | undefined) ?? "floor",
         exclude,
-      });
+      };
+      if (params.withholdingRate !== undefined) terms.withholdingRate = String(params.withholdingRate);
+      if (params.withholdingOverrides !== undefined) {
+        terms.withholdingOverrides = params.withholdingOverrides as Record<string, string>;
+      }
+      expected = dividendEntitlements(snapshot, terms);
+      if (terms.withholdingRate !== undefined || terms.withholdingOverrides !== undefined) {
+        withholding = dividendBreakdown(snapshot, terms);
+      }
       // A payment made by the pay asset's own issuer surfaces as a mint, not a transfer.
       plus = payer && payer !== flowAsset.issuer ? ["transfer"] : ["mint"];
     } else {
       const ratio = { num: BigInt(String(params.num)), den: BigInt(String(params.den)) };
       if (type === "split") {
-        expected = splitDeltas(snapshot, ratio, exclude).deltas;
+        const splitRes = splitDeltas(snapshot, ratio, exclude);
+        expected = splitRes.deltas;
+        splitFractions = splitRes.fractions;
         plus = ["mint"];
         // Reverse splits can retire units via burn as well as issuer clawback.
         minus = ["burn", "clawback"];
@@ -1416,11 +2282,15 @@ export class Concord {
       }
     }
     const windowTo = params.windowTo as string | undefined;
+    const windowFromLedger = params.windowFromLedger as number | undefined;
+    const windowToLedger = params.windowToLedger as number | undefined;
     const observed = observeFlows(this.loadEvents(flowAsset.id), {
       afterTime: recordTime,
       plus,
       minus,
       ...(windowTo ? { untilTime: windowTo } : {}),
+      ...(windowFromLedger !== undefined ? { fromLedger: windowFromLedger } : {}),
+      ...(windowToLedger !== undefined ? { toLedger: windowToLedger } : {}),
       ...(payer ? { payer } : {}),
     });
     if (payer && observed.size === 0) {
@@ -1428,12 +2298,91 @@ export class Concord {
     }
     const ignore = [...exclude, ...(payer ? [payer] : [])];
     const recon = reconcileDistribution(snapshot, expected, observed, { ignore });
+
+    let cashFlowResult: ActionFlowResult | undefined;
+    if (type === "split" && cilParams && cashAsset && splitFractions) {
+      const ratio = { num: BigInt(String(params.num)), den: BigInt(String(params.den)) };
+      const cashExpected = splitCashInLieu(splitFractions, ratio.den, {
+        pricePerUnit: String(cilParams.pricePerUnit),
+        baseDecimals: asset.decimals,
+        payDecimals: cashAsset.decimals,
+        rounding: (params.rounding as Rounding | undefined) ?? "floor",
+      });
+      const cashPayer = cilParams.payer ?? payer;
+      const cashPlus: EventKind[] = cashPayer && cashPayer !== cashAsset.issuer ? ["transfer"] : ["mint"];
+      const cashObserved = observeFlows(this.loadEvents(cashAsset.id), {
+        afterTime: recordTime,
+        plus: cashPlus,
+        minus: [],
+        ...(windowTo ? { untilTime: windowTo } : {}),
+        ...(windowFromLedger !== undefined ? { fromLedger: windowFromLedger } : {}),
+        ...(windowToLedger !== undefined ? { toLedger: windowToLedger } : {}),
+        ...(cashPayer ? { payer: cashPayer } : {}),
+      });
+      if (cashPayer && cashObserved.size === 0) {
+        warnings.push(`Payer ${cashPayer} has no recorded flows in the action window for cash in lieu`);
+      }
+      const cashIgnore = [...exclude, ...(cashPayer ? [cashPayer] : [])];
+      const cashRecon = reconcileDistribution(snapshot, cashExpected, cashObserved, { ignore: cashIgnore });
+      const cflow = (v: bigint) => formatUnits(v, cashAsset.decimals);
+      cashFlowResult = {
+        reconciledThrough: cashAsset.syncedAt ?? null,
+        status: cashRecon.breaks.length === 0 ? "clean" : "breaks",
+        flowAsset: { id: cashAsset.id, code: cashAsset.code },
+        summary: {
+          holders: cashRecon.summary.holders,
+          expectedTotal: cflow(cashRecon.summary.expectedTotal),
+          observedTotal: cflow(cashRecon.summary.observedTotal),
+          difference: cflow(cashRecon.summary.difference),
+          breakCount: cashRecon.summary.breakCount,
+        },
+        lines: cashRecon.lines.map((l) => ({
+          address: l.address,
+          basis: base(l.basis),
+          expected: cflow(l.expected),
+          observed: cflow(l.observed),
+          difference: cflow(l.difference),
+          txHashes: l.txHashes,
+          status: l.status,
+        })),
+        breaks: cashRecon.breaks.map((b): StoredBreak => ({
+          scope: "distribution",
+          type: b.type,
+          severity: b.severity,
+          key: `cash:${b.key}`,
+          fingerprint: `${b.expected}|${b.observed}`,
+          message: `${b.message} (cash in lieu)`,
+          address: b.address,
+          expected: cflow(b.expected),
+          observed: cflow(b.observed),
+          difference: cflow(b.difference),
+        })),
+      };
+    }
+
     const base = (v: bigint) => formatUnits(v, asset.decimals);
     const flow = (v: bigint) => formatUnits(v, flowAsset.decimals);
+
+    const unitBreaks = recon.breaks.map((b): StoredBreak => ({
+      scope: "distribution",
+      type: b.type,
+      severity: b.severity,
+      key: b.key,
+      fingerprint: `${b.expected}|${b.observed}`,
+      message: b.message,
+      address: b.address,
+      expected: flow(b.expected),
+      observed: flow(b.observed),
+      difference: flow(b.difference),
+    }));
+
+    const allBreaks = cashFlowResult ? [...unitBreaks, ...cashFlowResult.breaks] : unitBreaks;
+    const isClean = recon.breaks.length === 0 && (!cashFlowResult || cashFlowResult.breaks.length === 0);
+
     const result: ActionResult = {
       reconciledThrough: flowAsset.syncedAt ?? null,
       warnings,
-      status: recon.breaks.length === 0 ? "clean" : "breaks",
+      status: isClean ? "clean" : "breaks",
       flowAsset: { id: flowAsset.id, code: flowAsset.code },
       summary: {
         holders: recon.summary.holders,
@@ -1442,27 +2391,27 @@ export class Concord {
         difference: flow(recon.summary.difference),
         breakCount: recon.summary.breakCount,
       },
-      lines: recon.lines.map((l) => ({
-        address: l.address,
-        basis: base(l.basis),
-        expected: flow(l.expected),
-        observed: flow(l.observed),
-        difference: flow(l.difference),
-        txHashes: l.txHashes,
-        status: l.status,
-      })),
-      breaks: recon.breaks.map((b): StoredBreak => ({
-        scope: "distribution",
-        type: b.type,
-        severity: b.severity,
-        key: b.key,
-        fingerprint: `${b.expected}|${b.observed}`,
-        message: b.message,
-        address: b.address,
-        expected: flow(b.expected),
-        observed: flow(b.observed),
-        difference: flow(b.difference),
-      })),
+      lines: recon.lines.map((l) => {
+        const amounts = withholding?.get(l.address);
+        return {
+          address: l.address,
+          basis: base(l.basis),
+          expected: flow(l.expected),
+          ...(withholding
+            ? {
+                gross: flow(amounts?.gross ?? 0n),
+                withheld: flow(amounts?.withheld ?? 0n),
+                net: flow(amounts?.net ?? 0n),
+              }
+            : {}),
+          observed: flow(l.observed),
+          difference: flow(l.difference),
+          txHashes: l.txHashes,
+          status: l.status,
+        };
+      }),
+      breaks: allBreaks,
+      ...(cashFlowResult ? { cashInLieu: cashFlowResult } : {}),
     };
     this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
     return this.action(id);
@@ -1533,8 +2482,22 @@ export class Concord {
         "SELECT synced_at FROM assets WHERE id = ?",
         result.flowAsset.id,
       );
-      if (!flow?.synced_at) continue;
-      if (result.reconciledThrough === null || flow.synced_at > result.reconciledThrough) due.push(row.id);
+      if (flow?.synced_at && (result.reconciledThrough === null || flow.synced_at > result.reconciledThrough)) {
+        due.push(row.id);
+        continue;
+      }
+      if (result.cashInLieu?.flowAsset?.id) {
+        const cashFlow = this.db.get<{ synced_at: string | null }>(
+          "SELECT synced_at FROM assets WHERE id = ?",
+          result.cashInLieu.flowAsset.id,
+        );
+        if (
+          cashFlow?.synced_at &&
+          (result.cashInLieu.reconciledThrough === null || cashFlow.synced_at > result.cashInLieu.reconciledThrough)
+        ) {
+          due.push(row.id);
+        }
+      }
     }
     let done = 0;
     for (const id of due) {
@@ -1570,6 +2533,7 @@ export class Concord {
       instructionList.filter((i) => !window || Date.parse(i.issuedAt) <= Date.parse(window.to)),
       {
         asOf: window?.to ?? asset.syncedAt ?? new Date().toISOString(),
+        windowMs: asset.instructionWindowHours * 3600_000,
         initialFrozen,
         ...(indexedFrom ? { indexedFrom } : {}),
       },
@@ -1700,6 +2664,10 @@ export class Concord {
       .all<{ id: number }>("SELECT id FROM runs WHERE asset_id = ? ORDER BY as_of, id", asset.id)
       .map(({ id }) => this.run(id))
       .filter((r) => inPeriod(r.asOf));
+    const runRegisterIds = new Set(runs.map((r) => r.registerId));
+    const registers = this.registers(asset.id)
+      .filter((r) => inPeriod(r.asOf) || runRegisterIds.has(r.id))
+      .sort((a, b) => a.asOf.localeCompare(b.asOf) || a.id - b.id);
     const content = {
       asset: {
         id: asset.id,
@@ -1714,14 +2682,32 @@ export class Concord {
         indexedToLedger: asset.syncedLedger ?? null,
         indexedTo: asset.syncedAt ?? null,
         ignoredAddresses: asset.ignore,
+        instructionWindowHours: asset.instructionWindowHours,
+        movementWindowHours: asset.movementWindowHours,
       },
       period: { from, to },
       holdings: (() => {
         const { beforeHistory: _beforeHistory, warnings: _warnings, ...rest } = this.holdings(asset.id, to);
         return rest;
       })(),
+      registers,
       reconciliations: runs,
-      corporateActions: this.actions(asset.id).filter((a) => inPeriod(a.recordTime)),
+      corporateActions: this.actions(asset.id)
+        .filter((a) => inPeriod(a.recordTime))
+        .map(({ result, ...rest }) => ({
+          ...rest,
+          result: result
+            ? {
+                reconciledThrough: result.reconciledThrough,
+                warnings: result.warnings,
+                status: result.status,
+                flowAsset: result.flowAsset,
+                summary: result.summary,
+                lines: result.lines,
+                breaks: result.breaks,
+              }
+            : null,
+        })),
       controls,
       // The whole trail, not the period: sign-offs happen in wall-clock time, not chain time.
       signoffHistory: this.noteHistory(asset.id),
@@ -1732,14 +2718,44 @@ export class Concord {
     return { generatedAt: now(), generator: "concord/0.1.0", sha256: sha256(JSON.stringify(content)), ...content };
   }
 
-  /** One section of the audit pack as CSV. */
-  exportCsv(ref: string, section: string, period: { from?: string; to?: string } = {}): string {
-    if (!(EXPORT_CSV_SECTIONS as readonly string[]).includes(section)) {
-      throw new Invalid("section must be holdings, events, controls or breaks");
+  /** One section of the audit pack, or one corporate action's entitlement table, as CSV. */
+  exportCsv(ref: string, section: string, period: { from?: string; to?: string; id?: number } = {}): string {
+    // Reject an unknown section before building the audit pack, which replays every event.
+    if (!(EXPORT_CSV_SECTIONS as readonly string[]).includes(section)) throw new Invalid(EXPORT_CSV_SECTION_ERROR);
+    if (section === "action") {
+      const asset = this.asset(ref);
+      if (period.id === undefined || !Number.isSafeInteger(period.id) || period.id < 1) {
+        throw new Invalid("action export needs a positive integer id");
+      }
+      const act = this.action(period.id);
+      if (act.assetId !== asset.id) {
+        throw new Invalid(`corporate action ${period.id} belongs to another asset`);
+      }
+      const lines = (act.result?.lines ?? []) as Array<{
+        address: string;
+        basis: string;
+        expected: string;
+        observed: string;
+        difference: string;
+        status: string;
+        txHashes: string[];
+      }>;
+      return toCsv(
+        ["address", "recordHolding", "expected", "observed", "difference", "status", "txHashes"],
+        lines.map((l) => ({
+          address: l.address,
+          recordHolding: l.basis,
+          expected: l.expected,
+          observed: l.observed,
+          difference: l.difference,
+          status: l.status,
+          txHashes: l.txHashes.join(";"),
+        })),
+      );
     }
     const pack = this.auditExport(ref, period);
-    const s: ExportCsvSection = section as ExportCsvSection;
-    switch (s) {
+    const asset = this.asset(ref);
+    switch (section) {
       case "holdings":
         return toCsv(["address", "units", "share", "status", "ignored"], pack.holdings.holders);
       case "events":
@@ -1787,10 +2803,127 @@ export class Concord {
           rows,
         );
       }
-      default: {
-        const _exhaustive: never = s;
-        throw new Invalid("section must be holdings, events, controls or breaks");
+      case "positions": {
+        const rows: Array<Record<string, unknown>> = [];
+        for (const run of pack.reconciliations) {
+          for (const l of run.lines) {
+            rows.push({
+              runId: run.id,
+              asOf: run.asOf,
+              address: l.address,
+              holderIds: Array.isArray(l.holderIds) ? l.holderIds.join(";") : "",
+              chainUnits: l.chainUnits,
+              registerUnits: l.registerUnits,
+              difference: l.difference,
+              chainStatus: l.chainStatus ?? "",
+              registerStatus: l.registerStatus ?? "",
+              matched: l.matched,
+            });
+          }
+        }
+        return toCsv(
+          [
+            "runId",
+            "asOf",
+            "address",
+            "holderIds",
+            "chainUnits",
+            "registerUnits",
+            "difference",
+            "chainStatus",
+            "registerStatus",
+            "matched",
+          ],
+          rows,
+        );
       }
+      case "runs": {
+        const rows = pack.reconciliations.map((r) => ({
+          id: r.id,
+          asOf: r.asOf,
+          createdAt: r.createdAt,
+          registerId: r.registerId,
+          status: r.status,
+          chainLedger: r.chainLedger,
+          chainSyncedAt: r.chainSyncedAt ?? "",
+          chainBehind: r.chainBehind,
+          chainSupply: r.summary.chainSupply,
+          registerTotal: r.summary.registerTotal,
+          supplyDifference: r.summary.supplyDifference,
+          chainHolders: r.summary.chainHolders,
+          registerHolders: r.summary.registerHolders,
+          lines: r.summary.lines,
+          matchedLines: r.summary.matchedLines,
+          breakCount: r.summary.breakCount,
+          openBreaks: r.openBreaks,
+        }));
+        return toCsv(
+          [
+            "id",
+            "asOf",
+            "createdAt",
+            "registerId",
+            "status",
+            "chainLedger",
+            "chainSyncedAt",
+            "chainBehind",
+            "chainSupply",
+            "registerTotal",
+            "supplyDifference",
+            "chainHolders",
+            "registerHolders",
+            "lines",
+            "matchedLines",
+            "breakCount",
+            "openBreaks",
+          ],
+          rows,
+        );
+      }
+      case "actions": {
+        const rows = pack.corporateActions.map((a) => ({
+          id: a.id,
+          type: a.type,
+          label: a.label,
+          recordTime: a.recordTime,
+          state: a.state,
+          createdAt: a.createdAt,
+          reconciledAt: a.reconciledAt ?? "",
+          openBreaks: a.openBreaks,
+        }));
+        return toCsv(
+          ["id", "type", "label", "recordTime", "state", "createdAt", "reconciledAt", "openBreaks"],
+          rows,
+        );
+      }
+      case "journal": {
+        const entries = this.db.all("SELECT * FROM journal WHERE asset_id = ? ORDER BY date, ref", asset.id);
+        const rows = entries.map((r) => ({
+          ref: String(r.ref),
+          date: String(r.date),
+          type: String(r.type),
+          from_account: r.from_addr ? String(r.from_addr) : "",
+          to_account: r.to_addr ? String(r.to_addr) : "",
+          units: formatUnits(BigInt(String(r.units)), asset.decimals),
+          tx_hash: r.tx_hash ? String(r.tx_hash) : "",
+        }));
+        return toCsv(["ref", "date", "type", "from_account", "to_account", "units", "tx_hash"], rows);
+      }
+      case "instructions": {
+        const list = this.db.all("SELECT * FROM instructions WHERE asset_id = ? ORDER BY issued_at, ref", asset.id);
+        const rows = list.map((r) => ({
+          ref: String(r.ref),
+          type: String(r.type),
+          account: String(r.account),
+          units: r.units ? formatUnits(BigInt(String(r.units)), asset.decimals) : "",
+          issued_at: String(r.issued_at),
+          approved_by: r.approved_by ? String(r.approved_by) : "",
+          reason: r.reason ? String(r.reason) : "",
+        }));
+        return toCsv(["ref", "type", "account", "units", "issued_at", "approved_by", "reason"], rows);
+      }
+      default:
+        throw new Invalid(EXPORT_CSV_SECTION_ERROR);
     }
   }
 }
