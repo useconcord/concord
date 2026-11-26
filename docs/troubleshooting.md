@@ -77,7 +77,7 @@ The <network> ledger is now behind this asset's history: the network was reset. 
 - **Resolution:**
   - Unwatch and delete the asset from the workspace, as its prior ledger history belongs to a discarded network incarnation:
     ```sh
-    pnpm concord unwatch <ASSET_CODE>
+    pnpm concord unwatch <ASSET_CODE> --yes
     ```
   - Once removed, watch the new asset instance on the fresh network.
 

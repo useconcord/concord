@@ -95,6 +95,30 @@ export async function runCli(
     const out = (value: unknown) => console.log(JSON.stringify(value, null, 2));
     const orgRef = values.org ?? env.CONCORD_ORG;
   const workspace = (): Concord => tenants.forOrg(auth.findOrg(need(orgRef, "--org (see `concord orgs`)")).id);
+  /**
+   * A delete shows what it would remove and then does nothing until the operator confirms, with
+   * `--yes` or by answering the prompt on a terminal. `--dry-run` stops after the counts.
+   */
+  const approved = async (what: string, counts: DeletionCounts): Promise<boolean> => {
+    if (values.json) out(counts);
+    else {
+      console.log(what);
+      table([{ ...counts }]);
+    }
+    if (values["dry-run"]) return false;
+    if (values.yes) return true;
+    if (process.stdin.isTTY) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const answer = await rl.question(`Delete ${what}? This cannot be undone. Type "yes" to continue: `);
+        if (answer.trim().toLowerCase() === "yes") return true;
+      } finally {
+        rl.close();
+      }
+      throw new Error(`nothing was deleted: ${what} was not confirmed`);
+    }
+    throw new Error(`nothing was deleted: ${what} needs --yes`);
+  };
   const printRun = (run: Awaited<ReturnType<Concord["reconcile"]>>) => {
     if (values.json) return out(run);
     console.log(`reconciliation ${run.id} · as of ${run.asOf} · ${run.status.toUpperCase()}`);
@@ -141,9 +165,12 @@ export async function runCli(
     }
     case "org-delete": {
       const org = auth.findOrg(need(a, "workspace"));
-      auth.deleteOrg(org.id);
-      tenants.drop(org.id);
-      console.log(`deleted ${org.name} (${org.id})`);
+      const what = `workspace ${org.name} (${org.id})`;
+      if (await approved(what, tenants.forOrg(org.id).deletionCounts())) {
+        auth.deleteOrg(org.id);
+        tenants.drop(org.id);
+        console.log(`deleted ${org.name} (${org.id})`);
+      }
       break;
     }
     case "backup": {
@@ -177,10 +204,16 @@ export async function runCli(
       console.log(`watching ${asset.code} (${asset.id}) on ${asset.network} from ledger ${asset.startLedger}; ${added} events indexed`);
       break;
     }
-    case "unwatch":
-      await workspace().unwatchAsset(need(a, "asset"));
-      console.log("stopped watching; the asset and its books are deleted");
+    case "unwatch": {
+      const concord = workspace();
+      const asset = concord.asset(need(a, "asset"));
+      const what = `asset ${asset.code} (${asset.id}) on ${asset.network}`;
+      if (await approved(what, concord.deletionCounts(asset.id))) {
+        await concord.unwatchAsset(asset.id);
+        console.log("stopped watching; the asset and its books are deleted");
+      }
       break;
+    }
     case "rebuild": {
       const asset = await workspace().rebuild(need(a, "asset"));
       console.log(`rebuilt ${asset.code} from ledger ${asset.startLedger}`);
