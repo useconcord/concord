@@ -224,6 +224,10 @@ ALTER TABLE break_notes ADD COLUMN assignee_label TEXT;
   `
 ALTER TABLE registers ADD COLUMN imported_by_id TEXT;
 `,
+  // v11: a dividend's pay asset that nobody watches is watched automatically as a hidden, flow-only asset
+  `
+ALTER TABLE assets ADD COLUMN flow_only INTEGER NOT NULL DEFAULT 0;
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */

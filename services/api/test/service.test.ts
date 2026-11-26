@@ -3839,6 +3839,77 @@ describe("streamed events export", () => {
     });
     expect(okRes.status).toBe(200);
   });
+
+  it("auto-watches unwatched dividend payAsset as hidden flow-only, indexes it, excludes it from overview/limits, and removes it when deleted", async () => {
+    const h = harness({ maxAssetsPerOrg: 1 });
+    const client = await new Client(h.app).signUp("divpay@example.test", "Div Pay");
+    const issuer = key();
+    const h1 = key();
+    const payer = key();
+    const concord = h.tenants.forOrg(client.orgId);
+
+    const fund = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+    h.chain.push(fund.id, "mint", 2, { to: h1, amount: u(100) });
+    await concord.sync(fund.id);
+
+    // Provide describe metadata for an unwatched SEP-41 contract payAsset.
+    const payContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+    h.chain.describe = async (candidate) =>
+      candidate.id === payContract ? { decimals: 7, code: "USDC", name: "USD Coin" } : { decimals: 7 };
+    h.chain.push(payContract, "transfer", 10, { from: payer, to: h1, amount: u(25), txHash: "tx-div" });
+
+    // Even with maxAssetsPerOrg=1 already filled by FUND, creating a dividend in an unwatched contract payAsset succeeds.
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(5),
+      ratePerUnit: "0.25",
+      payAsset: payContract,
+      payer,
+    });
+    expect(action.state).toBe("clean");
+    expect(action.result?.flowAsset).toEqual({ id: payContract, code: "USDC" });
+    expect(action.result?.summary.expectedTotal).toBe("25");
+    expect(action.result?.summary.observedTotal).toBe("25");
+
+    // Excluded from overview and asset limit, yet present via concord.asset() and indexed in syncAll().
+    expect(concord.overview().assets.map((a) => a.id)).toEqual([fund.id]);
+    expect(concord.asset(payContract).flowOnly).toBe(true);
+
+    // Deleting the action removes the flow-only pay asset.
+    const delRes = await client.call(`/api/actions/${action.id}`, { method: "DELETE" });
+    expect(delRes.status).toBe(200);
+    expect(() => concord.asset(payContract)).toThrow(/not watched/);
+  });
+
+  it("promotes a flow-only pay asset to a watched asset with the matching windows it was watched with", async () => {
+    const h = harness();
+    const client = await new Client(h.app).signUp("promote@example.test", "Promote Pay");
+    const issuer = key();
+    const h1 = key();
+    const payer = key();
+    const concord = h.tenants.forOrg(client.orgId);
+
+    const fund = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+    h.chain.push(fund.id, "mint", 2, { to: h1, amount: u(100) });
+    await concord.sync(fund.id);
+
+    const payContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+    h.chain.describe = async (candidate) =>
+      candidate.id === payContract ? { decimals: 7, code: "USDC", name: "USD Coin" } : { decimals: 7 };
+    await concord.createAction("FUND", { type: "dividend", recordTime: at(5), ratePerUnit: "0.25", payAsset: payContract, payer });
+    expect(concord.asset(payContract).flowOnly).toBe(true);
+
+    const promoted = await concord.watchAsset({
+      network: "testnet",
+      asset: payContract,
+      fromLedger: 1,
+      instructionWindowHours: 6,
+      movementWindowHours: 3,
+    });
+    expect(promoted.flowOnly).toBeUndefined();
+    expect(promoted).toMatchObject({ instructionWindowHours: 6, movementWindowHours: 3 });
+    expect(concord.overview().assets.map((a) => a.id).sort()).toEqual([fund.id, payContract].sort());
+  });
 });
 
 describe("documented input files", () => {

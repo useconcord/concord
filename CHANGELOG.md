@@ -49,6 +49,9 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 
 ### Added
 
+- A dividend paid in an asset nobody watches now watches that asset automatically as a hidden,
+  flow-only asset, so the payments can be reconciled (#569). Schema: `ORG_MIGRATIONS` entry 11
+  adds `assets.flow_only`.
 - A four-eyes rule for sign-off (#539): with `requireSecondSigner` on (`PATCH /api/org/settings`,
   owners only; off by default), a break cannot be resolved by the person who acknowledged it or
   who imported the register. Schema: `ORG_MIGRATIONS` entry 10 adds `registers.imported_by_id`.
