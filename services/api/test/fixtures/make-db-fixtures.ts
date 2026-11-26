@@ -143,6 +143,15 @@ build(join(outDir, "org-v8.db"), ORG_MIGRATIONS.slice(0, 8), (db) => {
            (2, 'usd-mainnet', 'split', 'Split 2:1', '2024-01-04T00:00:00Z', '{"num":"2","den":"1","exclude":[]}', 'alice', '2024-01-04T00:00:00Z', '2024-01-05T00:00:00Z', 'bob', 'typo in the rate')`);
 });
 
+// v9: a break can be owned by one workspace member; the label is stored beside the id so a payload still names the person after they leave
+build(join(outDir, "org-v9.db"), ORG_MIGRATIONS.slice(0, 9), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v9')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '2024-01-01T00:00:00Z')`);
+  db.exec(`INSERT INTO break_notes (asset_id, scope, key, fingerprint, status, note, author, author_id, assignee_id, assignee_label, updated_at)
+    VALUES ('usd-mainnet', 'recon', 'SUPPLY_MISMATCH', '10|12', 'acknowledged', 'looking', 'alice', 'u1', 'u2', 'Bob <bob@example.org>', '2024-01-04T00:00:00Z')`);
+});
+
 build(join(outDir, "control-v1.db"), CONTROL_MIGRATIONS.slice(0, 1), (db) => {
   db.exec(`INSERT INTO users (id, email, name, email_verified, created_at)
     VALUES ('u1', 'alice@example.org', 'Alice', 1, '2024-01-01T00:00:00Z')`);

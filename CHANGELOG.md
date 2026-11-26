@@ -49,6 +49,10 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 
 ### Added
 
+- Assign a break to a workspace member (`PUT /api/assets/:id/notes/assignee`) and list current
+  breaks by owner (`GET /api/assets/:id/breaks?assignee=<id|none>`); the owner is in break payloads
+  and the breaks CSV (#563). Schema: `ORG_MIGRATIONS` entry 9 adds `break_notes.assignee_id` and
+  `assignee_label`.
 - Workspace webhooks (#562): an owner sets an https endpoint (`PUT /api/org/webhook`) that gets an
   HMAC-signed POST (`x-concord-signature`) when a run or a corporate action has breaks, or a sync
   starts failing. Private, loopback and metadata addresses are refused, checked again at connect

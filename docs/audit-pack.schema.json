@@ -257,7 +257,9 @@
               "at": { "$ref": "#/definitions/dateTime" }
             }
           }
-        }
+        },
+        "assigneeId": { "$ref": "#/definitions/nullableString" },
+        "assigneeLabel": { "$ref": "#/definitions/nullableString" }
       }
     },
     "reconciliation": {

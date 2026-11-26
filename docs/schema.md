@@ -246,7 +246,7 @@ strings. Its break objects have the same shape as a run's.
 ### `break_notes`
 
 The current sign-off on each break. Primary key `(asset_id, scope, key)`; saving a note for the
-same break replaces this row, and `break_note_history` keeps the one it replaced.
+same break updates this row, and `break_note_history` keeps the one it replaced.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -257,6 +257,7 @@ same break replaces this row, and `break_note_history` keeps the one it replaced
 | `status` | TEXT | `open`, `acknowledged` or `resolved`. Not constrained in SQL; the application rejects other values. |
 | `note` | TEXT | Required text for anything other than `open`. |
 | `author`, `author_id` | TEXT, null | Who signed off, taken from the session, never from the request body. |
+| `assignee_id`, `assignee_label` | TEXT, null | The workspace member who owns the break (migration 9), set with `PUT /api/assets/:id/notes/assignee`. The label is kept so a payload still names someone who has left. A sign-off updates the row in place, so it keeps its owner. |
 | `updated_at` | TEXT | |
 
 A note holds only while the break's current `fingerprint` equals the stored one. If the figures
