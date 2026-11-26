@@ -86,6 +86,7 @@ One row per watched asset.
 | `synced_at` | TEXT, null | Close time of that ledger. |
 | `sync_error`, `sync_error_at` | TEXT, null | Why the last pass failed, and when. Cleared by a successful pass. |
 | `ignore_addresses` | TEXT (JSON) | Array of address strings left out of reconciliation. Default `'[]'`. |
+| `register_max_age_days` | INTEGER, null | Flag the latest register as stale once it is older than this many days. `NULL` (the default) turns the check off. |
 | `created_by` | TEXT, null | Label of the actor who started watching (`cli:<user>` or a session's person). |
 | `created_at` | TEXT | |
 | `flow_only` | INTEGER | `1` for a dividend's pay asset that Concord watched on its own so the payments can be seen (migration 11). Hidden from the asset list; watching it explicitly makes it a normal asset. |
