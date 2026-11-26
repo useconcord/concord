@@ -125,28 +125,6 @@ export class FakeChain implements ChainSource {
     this.onGetEvents = () => entered();
     return { entered: whenEntered, release };
   }
-
-  known?: Set<string>;
-  candidates: AssetCandidate[] = [];
-
-  async describe(asset: ResolvedAsset): Promise<AssetDescription | undefined> {
-    if (this.known === undefined) return {};
-    if (!this.known.has(asset.id) && !this.known.has(asset.code) && !(asset.issuer && this.known.has(`${asset.code}:${asset.issuer}`))) {
-      return undefined;
-    }
-    return { code: asset.code, issuer: asset.issuer, decimals: 7 };
-  }
-
-  async search(code: string): Promise<AssetCandidate[]> {
-    return this.candidates.filter((c) => c.code.toUpperCase() === code.toUpperCase());
-  }
-
-  advance(n: number, options: { retain?: number } = {}): void {
-    this.latest += n;
-    if (options.retain !== undefined) {
-      this.oldest = Math.max(this.oldest, this.latest - options.retain + 1);
-    }
-  }
 }
 
 export interface Harness {

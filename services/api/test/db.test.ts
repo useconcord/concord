@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Db } from "../src/db.js";
+import { spawn, type ChildProcess } from "node:child_process";
 
 const SCHEMA = ["CREATE TABLE t (k TEXT PRIMARY KEY, v TEXT NOT NULL);"];
 
@@ -185,11 +186,6 @@ describe("Db.tx", () => {
     }
   });
 });
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Db } from "../src/db.js";
 
 describe("migrate", () => {
   let dir: string;
@@ -251,12 +247,6 @@ describe("migrate", () => {
     dbReopened.close();
   });
 });
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Db } from "../src/db.js";
 
 describe("Db busy_timeout", () => {
   let tempDir: string;

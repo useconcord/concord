@@ -142,12 +142,6 @@ describe("security headers", () => {
     }
   });
 });
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { Hono } from "hono";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createStaticHandler } from "../src/main.js";
 
 describe("static handler cache headers", () => {
   let tempDir: string;

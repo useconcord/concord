@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, basename } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { backup } from "node:sqlite";
@@ -166,7 +166,7 @@ export async function runCli(
       const file = need(b, "file");
       const imported = concord.importRegister(
         asset,
-        { csv: readFileSync(file, "utf8"), asOf: need(values["as-of"], "--as-of"), source: file },
+        { csv: readFileSync(file, "utf8"), asOf: need(values["as-of"], "--as-of"), source: basename(file) },
         actor,
       );
       if (imported.duplicate) {
@@ -175,7 +175,11 @@ export async function runCli(
         console.log(`register ${imported.registerId}: ${imported.positions} positions, ${imported.issues.length} rejected rows`);
         for (const issue of imported.issues) console.log(`  line ${issue.line}: ${issue.message}`);
       }
-      printRun((imported.duplicate && concord.latestRunForRegister(imported.registerId)) || (await concord.reconcile(asset, imported.registerId, actor)));
+      const run =
+        (imported.duplicate && concord.latestRunForRegister(imported.registerId)) ||
+        (await concord.reconcile(asset, imported.registerId, actor));
+      printRun(run);
+      if (values["fail-on-breaks"] && run.openBreaks > 0) process.exitCode = 2;
       break;
     }
     case "registers": {
@@ -268,9 +272,12 @@ export async function runCli(
       );
       break;
     }
-    case "reconcile":
-      printRun(await workspace().reconcile(need(a, "asset"), values.register ? Number(values.register) : undefined, actor));
+    case "reconcile": {
+      const run = await workspace().reconcile(need(a, "asset"), values.register ? Number(values.register) : undefined, actor);
+      printRun(run);
+      if (values["fail-on-breaks"] && run.openBreaks > 0) process.exitCode = 2;
       break;
+    }
     case "runs": {
       const limit = values.limit ? Number(values.limit) : undefined;
       if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {

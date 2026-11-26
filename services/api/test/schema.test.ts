@@ -125,9 +125,6 @@ describe("schema cascade deletion", () => {
     db.close();
   });
 });
-import { describe, expect, it } from "vitest";
-import { Db } from "../src/db.js";
-import { ORG_MIGRATIONS } from "../src/schema.js";
 
 /**
  * EXPLAIN QUERY PLAN assertions to catch query performance regressions (CON-0420).

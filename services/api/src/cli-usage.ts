@@ -33,6 +33,7 @@ export const CLI_OPTIONS = {
   limit: { type: "string" },
   before: { type: "string" },
   json: { type: "boolean" },
+  "fail-on-breaks": { type: "boolean" },
   yes: { type: "boolean", short: "y" },
   help: { type: "boolean", short: "h" },
 } as const satisfies ParseArgsOptionsConfig;
@@ -122,6 +123,7 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   sync [ASSET]                     pull new events (every workspace when no --org)
   holdings ASSET [--as-of ISO]     on-chain holders
   register ASSET FILE --as-of ISO  import a register export and reconcile it
+        [--fail-on-breaks]
   registers ASSET                  list imported registers
   register-delete ASSET ID [--yes] remove a register and its reconciliation runs
   journal ASSET FILE               import the register's transaction journal
@@ -129,6 +131,7 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   instructions ASSET FILE          import control instructions
   instructions-list ASSET          list imported control instructions
   reconcile ASSET [--register ID]  re-run a reconciliation
+        [--fail-on-breaks]
   runs ASSET [--limit N]           list reconciliation runs for an asset
   run ID                           show one reconciliation run
   action ASSET dividend --record ISO --rate R [--pay-asset A] [--payer G...] [--until ISO]
@@ -150,4 +153,6 @@ Operator commands.
   serve                            run the API and dashboard
 
 ASSET is a code or a contract id. Add --json to most commands for machine-readable output,
-or --help (-h) to see this text. Settings come from the environment; see .env.example.`;
+or --help (-h) to see this text. Settings come from the environment; see .env.example.
+
+Exit codes: 0 success, 1 error, 2 open breaks (--fail-on-breaks).`;
