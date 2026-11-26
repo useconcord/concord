@@ -92,10 +92,10 @@ button. The four CSV sections are `holdings`, `events`, `controls` and `breaks`,
   - then `asset`, `period`, `holdings`, `reconciliations`, `corporateActions`, `controls` and
     `events`
 - **The pack has no schema version field.** `generator` is the only version marker.
-- **`sha256` covers the content, in order.** It is the SHA-256 of `JSON.stringify` of everything
-  except `generatedAt`, `generator` and `sha256`, in the order the fields appear. To verify a
-  pack, rebuild that object in the same field order and hash it. That is why field order is part
-  of the format.
+- **`sha256` covers the content using RFC 8785 canonical JSON.** It is the SHA-256 digest of
+  the pack serialised as RFC 8785 canonical JSON, excluding `sha256` and `generatedAt`.
+  Because RFC 8785 canonical JSON sorts all object keys by UTF-16 code units and standardises formatting,
+  key order does not affect the digest. Any pack can be verified with `concord verify-pack FILE`.
 - **Each CSV section has fixed columns.** Every section writes a header row with its columns in a
   fixed order (`toCsv` in `packages/core/src/csv.ts`).
 
@@ -117,8 +117,8 @@ Auditors and scripts may hold packs for years, so these changes need the stricte
 A consumer should ignore fields and columns it does not know, and match CSV columns by header,
 not by position.
 
-When the pack's format first changes, it will gain a `schemaVersion` field, so a pack states its
-own format without relying on `generator`.
+Every pack carries a `schemaVersion` (currently `1`), so it states its own format without relying
+on `generator`. A breaking change to the pack's shape bumps it.
 
 ### The HTTP API
 

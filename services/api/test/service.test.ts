@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { replay, type HoldingsState, parseCsv } from "@concord/core";
 import { ChainError, StellarSource, cursorLedger, decodeEvent, type AssetCandidate } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
-import { Concord, EXPORT_CSV_SECTION_ERROR, Invalid, NotFound, describeFailure, verifyPack } from "../src/concord.js";
+import { Concord, EXPORT_CSV_SECTION_ERROR, Invalid, NotFound, describeFailure, verifyPack, auditPackDigest, canonicalJson } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
@@ -1348,6 +1348,51 @@ describe("Concord", () => {
     expect(concord.auditExport("FUND").sha256).toBe(pack.sha256);
     expect(concord.exportCsv("FUND", "controls").split("\n")[0]).toContain("instructionRef");
     expect(concord.exportCsv("FUND", "breaks")).toContain("UNINSTRUCTED_CONTROL");
+
+    // RFC 8785 Canonical JSON and verify-pack verification
+    const verification = verifyPack(pack);
+    expect(verification).toMatchObject({ digestValid: true, expectedDigest: pack.sha256, digest: pack.sha256 });
+    expect(verifyPack(JSON.parse(JSON.stringify(pack))).digestValid).toBe(true);
+
+    // Reordering keys in the file does not change the digest
+    const reordered: Record<string, unknown> = {};
+    for (const key of Object.keys(pack).reverse()) {
+      reordered[key] = pack[key as keyof typeof pack];
+    }
+    // Deeply reorder nested object keys as well
+    reordered.asset = {
+      decimals: pack.asset.decimals,
+      code: pack.asset.code,
+      id: pack.asset.id,
+      network: pack.asset.network,
+      name: pack.asset.name,
+      ignoredAddresses: pack.asset.ignoredAddresses,
+      issuer: pack.asset.issuer,
+      historyFrom: pack.asset.historyFrom,
+      baselineLedger: pack.asset.baselineLedger,
+      indexedFromLedger: pack.asset.indexedFromLedger,
+      indexedTo: pack.asset.indexedTo,
+      indexedToLedger: pack.asset.indexedToLedger,
+    };
+    expect(auditPackDigest(reordered)).toBe(pack.sha256);
+    expect(verifyPack(reordered).digestValid).toBe(true);
+
+    // Editing any value makes verification fail
+    const tamperedAsset = JSON.parse(JSON.stringify(pack));
+    tamperedAsset.asset.code = "CORRUPTED";
+    expect(verifyPack(tamperedAsset).digestValid).toBe(false);
+
+    const tamperedHoldings = JSON.parse(JSON.stringify(pack));
+    tamperedHoldings.holdings.supply = "999999";
+    expect(verifyPack(tamperedHoldings).digestValid).toBe(false);
+
+    const tamperedGenerator = JSON.parse(JSON.stringify(pack));
+    tamperedGenerator.generator = "fake/0.0.1";
+    expect(verifyPack(tamperedGenerator).digestValid).toBe(false);
+
+    const tamperedDigest = JSON.parse(JSON.stringify(pack));
+    tamperedDigest.sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    expect(verifyPack(tamperedDigest).digestValid).toBe(false);
   });
 
   it("keeps the audit pack inside the published schema", async () => {
@@ -1380,6 +1425,7 @@ describe("Concord", () => {
     await concord.createAction("FUND", { type: "split", recordTime: at(5), num: "2", den: "1" });
 
     const pack = concord.auditExport("FUND");
+    expect(pack.schemaVersion).toBe(1);
     expect(validateAuditPack(pack), JSON.stringify(validateAuditPack.errors, null, 2)).toBe(true);
 
     // The schema rejects added fields and misses required ones. This list catches a field that
@@ -1608,6 +1654,7 @@ describe("Concord", () => {
         "registers[].positions",
         "registers[].sha256",
         "registers[].source",
+        "schemaVersion",
         "sha256",
         "signoffHistory[]",
         "signoffHistory[].at",
@@ -3023,7 +3070,7 @@ describe("Concord", () => {
       events: "id,ledger,closedAt,kind,from,to,units,authorized,txHash",
       controls: "closedAt,ledger,type,account,units,txHash,instructionRef,approvedBy,reason",
       breaks:
-        "source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor",
+        "source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor,history",
     };
 
     for (const section of ["holdings", "events", "controls", "breaks"] as const) {
@@ -3325,5 +3372,25 @@ describe("holdings checkpoints", () => {
         "checkpointEvery must be a positive integer",
       );
     }
+  });
+});
+
+describe("RFC 8785 canonicalJson", () => {
+  it("serializes numbers according to ECMAScript and formats -0 as 0", () => {
+    expect(canonicalJson(0)).toBe("0");
+    expect(canonicalJson(-0)).toBe("0");
+    expect(canonicalJson(123.456)).toBe("123.456");
+    expect(canonicalJson(1e21)).toBe("1e+21");
+    expect(canonicalJson(-123)).toBe("-123");
+  });
+
+  it("sorts object keys lexicographically by UTF-16 code units", () => {
+    expect(canonicalJson({ b: 2, a: 1, c: 3 })).toBe('{"a":1,"b":2,"c":3}');
+    expect(canonicalJson({ "\u00e9": 1, e: 2 })).toBe('{"e":2,"\u00e9":1}');
+  });
+
+  it("omits undefined, functions, and symbols from objects, and converts them to null in arrays", () => {
+    expect(canonicalJson({ a: undefined, b: () => {}, c: Symbol("test"), d: 1 })).toBe('{"d":1}');
+    expect(canonicalJson([undefined, () => {}, Symbol("test"), 1])).toBe("[null,null,null,1]");
   });
 });

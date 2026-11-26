@@ -470,7 +470,8 @@ export async function runCli(
     }
     case "verify-pack": {
       const file = need(a, "pack file");
-      const raw = readFileSync(resolve(file), "utf8");
+      // `pnpm concord` runs from services/api; INIT_CWD is where the operator typed the command.
+      const raw = readFileSync(existsSync(file) ? file : resolve(env.INIT_CWD ?? process.cwd(), file), "utf8");
       const pack = JSON.parse(raw);
       const res = verifyPack(pack, values.key ? resolve(values.key) : undefined);
       if (values.json) {

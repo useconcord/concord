@@ -225,6 +225,12 @@ of the contents. With `--csv`, one section: `holdings`, `events`, `controls` or 
 With `--out FILE` it writes the file and prints `wrote FILE`; otherwise it writes to standard
 output with no trailing newline. `--json` has no effect: JSON is already the default.
 
+### `verify-pack FILE`
+
+Recomputes the RFC 8785 canonical JSON digest over `FILE` (excluding `sha256` and `generatedAt`)
+and compares it with the pack's `sha256` field. Prints `OK` on success, or a mismatch error
+and exits with code 1 if the digest does not match.
+
 ## Operator commands
 
 These act on the whole installation, not one workspace.

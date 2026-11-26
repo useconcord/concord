@@ -206,6 +206,62 @@ interface ActionResult {
 
 const now = () => new Date().toISOString();
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+/** Version of the audit pack's shape (docs/audit-pack.schema.json); bump it on a breaking change. */
+export const AUDIT_PACK_SCHEMA_VERSION = 1;
+
+/**
+ * Serializes a value into RFC 8785 canonical JSON.
+ * - Object keys sorted lexicographically by UTF-16 code units
+ * - Primitives formatted according to ECMAScript standard JSON rules (-0 formatted as "0")
+ * - Whitespace stripped
+ * - undefined, functions, and symbols in objects omitted; in arrays rendered as null
+ */
+export function canonicalJson(value: unknown): string {
+  if (value && typeof (value as { toJSON?: unknown }).toJSON === "function") {
+    value = (value as { toJSON: () => unknown }).toJSON();
+  }
+  if (value === null || typeof value !== "object") {
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return "null";
+      if (Object.is(value, -0)) return "0";
+      return JSON.stringify(value);
+    }
+    if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
+      return undefined as unknown as string;
+    }
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    const items = value.map((v) => {
+      const s = canonicalJson(v);
+      return s === undefined ? "null" : s;
+    });
+    return `[${items.join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const entries: string[] = [];
+  for (const k of keys) {
+    const val = obj[k];
+    if (val === undefined || typeof val === "function" || typeof val === "symbol") continue;
+    const json = canonicalJson(val);
+    if (json !== undefined) {
+      entries.push(`${JSON.stringify(k)}:${json}`);
+    }
+  }
+  return `{${entries.join(",")}}`;
+}
+
+/**
+ * Computes the SHA-256 digest of an audit pack over RFC 8785 canonical JSON,
+ * excluding volatile/digest fields sha256 and generatedAt.
+ */
+export function auditPackDigest(pack: Record<string, unknown>): string {
+  // The signature fields are added after the digest is taken, so they are never part of it.
+  const { sha256: _sha256, generatedAt: _generatedAt, keyId: _keyId, signature: _signature, ...content } = pack;
+  return sha256(canonicalJson(content));
+}
 const MAX_REGISTER_CLOCK_SKEW_MS = 5 * 60_000;
 const DEFAULT_INSTRUCTION_WINDOW_HOURS = 72;
 const DEFAULT_MOVEMENT_WINDOW_HOURS = 24;
@@ -2757,7 +2813,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         .filter((e) => inPeriod(e.closedAt))
         .map((e) => this.eventJson(e, asset.decimals)),
     };
-    const digest = sha256(JSON.stringify(content));
+    const digest = auditPackDigest({ schemaVersion: AUDIT_PACK_SCHEMA_VERSION, generator: "concord/0.1.0", ...content });
     const signingKey = options.signingKey ?? this.options.signingKey ?? process.env.CONCORD_SIGNING_KEY;
     let signature: string | undefined;
     let keyId: string | undefined;
@@ -2772,6 +2828,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       signature = sign(null, Buffer.from(digest), priv).toString("base64");
     }
     return {
+      schemaVersion: AUDIT_PACK_SCHEMA_VERSION,
       generatedAt: now(),
       generator: "concord/0.1.0",
       sha256: digest,
@@ -3010,11 +3067,11 @@ export function verifyPack(pack: unknown, publicKeyPemOrPath?: string): VerifyPa
     throw new Invalid("audit pack must be a JSON object");
   }
   const p = pack as Record<string, unknown>;
-  const { generatedAt: _generatedAt, generator: _generator, sha256: packSha256, keyId, signature, ...content } = p;
+  const { sha256: packSha256, keyId, signature } = p;
   if (typeof packSha256 !== "string") {
     throw new Invalid("audit pack is missing sha256 digest");
   }
-  const expectedDigest = sha256(JSON.stringify(content));
+  const expectedDigest = auditPackDigest(p);
   const digestValid = packSha256 === expectedDigest;
   const signed = typeof signature === "string";
 
