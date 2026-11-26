@@ -71,6 +71,15 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("opens the v9 workspace database with each break's owner intact", () => {
+    upgraded("org-v9.db", ORG_MIGRATIONS, (db) => {
+      const note = db.get<{ assignee_id: string; assignee_label: string; status: string }>(
+        "SELECT assignee_id, assignee_label, status FROM break_notes WHERE key = 'SUPPLY_MISMATCH'",
+      );
+      expect(note).toMatchObject({ assignee_id: "u2", assignee_label: "Bob <bob@example.org>", status: "acknowledged" });
+    });
+  });
+
   it("backfills sign-off history from the v1 notes when upgrading", () => {
     upgraded("org-v1.db", ORG_MIGRATIONS, (db) => {
       expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM break_note_history")?.n).toBe(0);

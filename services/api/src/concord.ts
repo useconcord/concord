@@ -2303,6 +2303,8 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         noteAt: n ? String(n.updated_at) : null,
         noteStale: n !== undefined && !current,
         history: histories.get(b.key) ?? [],
+        assigneeId: n?.assignee_id ? String(n.assignee_id) : null,
+        assigneeLabel: n?.assignee_label ? String(n.assignee_label) : null,
       };
     });
   }
@@ -2322,26 +2324,23 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     ) {
       throw new Invalid("key and fingerprint must be short text");
     }
-    if (scope !== "recon" && scope !== "controls") {
-      const action = /^action:(\d+)$/.exec(String(scope));
-      const owned =
-        action && this.db.get("SELECT id FROM actions WHERE id = ? AND asset_id = ?", Number(action[1]), asset.id);
-      if (!owned) throw new Invalid("scope must be recon, controls or an action of this asset");
-    }
     // Only a break that exists now can be signed off: a typo or a stale tab would otherwise leave
     // an orphan row for a later break with the same key to inherit.
-    const current =
-      scope === "recon"
-        ? this.latestRun(asset.id)?.breaks
-        : scope === "controls"
-          ? this.controls(asset.id).breaks
-          : this.action(Number(scope.slice("action:".length))).result?.breaks;
+    const current = this.currentBreaks(asset.id, scope);
     if (!current?.some((b) => b.key === key)) throw new NotFound(`no break ${key} in the current ${scope.split(":")[0]} results`);
     const at = now();
     this.db.tx(() => {
+      // An upsert, not a replace: a replace would drop the break's owner when it is signed off.
       this.db.insert(
-        `INSERT OR REPLACE INTO break_notes (asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO break_notes (asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (asset_id, scope, key) DO UPDATE SET
+           fingerprint = excluded.fingerprint,
+           status = excluded.status,
+           note = excluded.note,
+           author = excluded.author,
+           author_id = excluded.author_id,
+           updated_at = excluded.updated_at`,
         asset.id,
         scope,
         key,
@@ -2390,6 +2389,67 @@ ul { margin: 6px 0 0; padding-left: 20px; }
        ) WHERE asset_id = ?`,
       assetId,
     );
+  }
+
+  /** The breaks one scope currently produces, or a rejection naming the scopes that exist. */
+  private currentBreaks(assetId: string, scope: string) {
+    if (scope === "recon") return this.latestRun(assetId)?.breaks;
+    if (scope === "controls") return this.controls(assetId).breaks;
+    const action = /^action:(\d+)$/.exec(String(scope));
+    const owned =
+      action && this.db.get("SELECT id FROM actions WHERE id = ? AND asset_id = ?", Number(action[1]), assetId);
+    if (!owned) throw new Invalid("scope must be recon, controls or an action of this asset");
+    return this.action(Number(action![1])).result?.breaks;
+  }
+
+  /**
+   * Give a break an owner, or clear it with null. The caller checks that the person is a member of
+   * the workspace; this only records them beside the note, where every payload and the CSV read it.
+   */
+  assignBreak(ref: string, scope: string, key: string, assignee: Actor | null) {
+    const asset = this.asset(ref);
+    if (typeof key !== "string" || !key.trim() || key.length > 500) throw new Invalid("key must be short text");
+    const brk = this.currentBreaks(asset.id, scope)?.find((b) => b.key === key);
+    if (!brk) throw new NotFound(`no break ${key} in the current ${scope.split(":")[0]} results`);
+    if (assignee !== null && (!assignee.id || !assignee.label)) {
+      throw new Invalid("an assignee needs a member id and a label");
+    }
+    // The row is the same one the sign-off lives in, so an owner survives re-runs and a sign-off
+    // does not remove them. Only the assignment columns change; the note keeps its own timestamp.
+    this.db.insert(
+      `INSERT INTO break_notes (asset_id, scope, key, fingerprint, status, note, assignee_id, assignee_label, updated_at)
+       VALUES (?, ?, ?, ?, 'open', '', ?, ?, ?)
+       ON CONFLICT (asset_id, scope, key) DO UPDATE SET
+         assignee_id = excluded.assignee_id,
+         assignee_label = excluded.assignee_label`,
+      asset.id,
+      scope,
+      key,
+      brk.fingerprint,
+      assignee?.id ?? null,
+      assignee?.label ?? null,
+      now(),
+    );
+    return { ok: true, scope, key, assigneeId: assignee?.id ?? null, assigneeLabel: assignee?.label ?? null };
+  }
+
+  /**
+   * Current breaks across every scope, with their sign-off and owner. An assignee id narrows the
+   * list to that member's breaks; "none" (or "unassigned") narrows it to the unowned ones.
+   */
+  breaks(ref: string, assignee?: string) {
+    const asset = this.asset(ref);
+    const all = [
+      ...(this.latestRun(asset.id)?.breaks ?? []),
+      ...this.controls(asset.id).breaks,
+      // A voided action is in the trail, but its breaks are not current.
+      ...this.actions(asset.id)
+        .filter((a) => a.voidedAt === null)
+        .flatMap((a) => a.result?.breaks ?? []),
+    ];
+    if (assignee === undefined) return all;
+    const unassigned = assignee === "none" || assignee === "unassigned";
+    return all.filter((b) => (unassigned ? b.assigneeId === null : b.assigneeId === assignee));
   }
 
   /** Every sign-off change for one break, oldest first: who, when, what status, and the note. */
@@ -3317,6 +3377,8 @@ ul { margin: 6px 0 0; padding-left: 20px; }
             "status",
             "note",
             "noteAuthor",
+            "assigneeId",
+            "assigneeLabel",
             "history",
           ],
           rows.map((r) => ({

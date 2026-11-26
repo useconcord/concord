@@ -215,6 +215,11 @@ ALTER TABLE actions ADD COLUMN voided_at TEXT;
 ALTER TABLE actions ADD COLUMN voided_by TEXT;
 ALTER TABLE actions ADD COLUMN void_reason TEXT;
 `,
+  // v9: a break can be owned by one workspace member; the label is stored beside the id so a payload still names the person after they leave
+  `
+ALTER TABLE break_notes ADD COLUMN assignee_id TEXT;
+ALTER TABLE break_notes ADD COLUMN assignee_label TEXT;
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */
