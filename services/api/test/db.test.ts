@@ -66,7 +66,7 @@ describe("migration rollback", () => {
     expect(() => {
       const db = new Db(path, ["CREATE TABLE a (x); CREATE TABLE b (y); INSERT INTO nope VALUES (1);"]);
       db.raw.close();
-    }).toThrow(/^no such table: nope$/);
+    }).toThrow(/^failed to initialize database .*: no such table: nope$/);
 
     const inspection = new DatabaseSync(path, { readOnly: true });
     try {
@@ -93,7 +93,7 @@ describe("migration rollback", () => {
         "CREATE TABLE parent (id INTEGER PRIMARY KEY); CREATE TABLE child (parent_id INTEGER REFERENCES parent(id)); INSERT INTO child VALUES (1);",
       ]);
       db.raw.close();
-    }).toThrow(/^migration 1 leaves dangling references$/);
+    }).toThrow(/^failed to initialize database .*: migration 1 leaves dangling references$/);
   });
 });
 

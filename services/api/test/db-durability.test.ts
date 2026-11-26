@@ -17,7 +17,7 @@ describe("SQLite WAL durability configuration", () => {
       const full = new Db(join(dir, "full.db"), [], "full");
       expect(full.get<{ synchronous: number }>("PRAGMA synchronous")?.synchronous).toBe(2);
       full.close();
-      const store = fileStore(dir, "full");
+      const store = fileStore(dir, { synchronous: "full" });
       const workspace = store.open("deadbeefdeadbeef");
       expect(workspace.get<{ synchronous: number }>("PRAGMA synchronous")?.synchronous).toBe(2);
       workspace.close();

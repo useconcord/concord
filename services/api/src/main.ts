@@ -45,13 +45,19 @@ export interface Runtime {
 /** Identity records, the chain sources for both networks, and the workspaces over them. */
 export function openRuntime(config: Config): Runtime {
   const control = new Db(join(config.dataDir, "control.db"), CONTROL_MIGRATIONS, config.sqliteSynchronous);
+  try {
+    control.check();
+  } catch (err) {
+    control.close();
+    throw err;
+  }
   const auth = new Auth(control, { signup: config.signup, maxInvites: config.maxInvitesPerOrg, ...(config.passwordCost ? { cost: config.passwordCost } : {}) });
   const networks: Networks = {};
   for (const name of NETWORK_NAMES) {
     networks[name] = { passphrase: config.networks[name].passphrase, chain: new StellarSource(config.networks[name]) };
   }
   const tenants = new Tenants(
-    fileStore(config.dataDir, config.sqliteSynchronous),
+    fileStore(config.dataDir, { synchronous: config.sqliteSynchronous, checkOnOpen: config.checkOnOpen }),
     networks,
     (orgId) => auth.orgExists(orgId),
     () => auth.orgIds(),

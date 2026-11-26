@@ -35,6 +35,7 @@ value.
 | `CONCORD_WEB_DIR` | `<repo>/apps/web/dist` | A directory holding the built dashboard. A relative path is resolved against the repository root, not the working directory | Not checked |
 | `CONCORD_DATA_DIR` | `<repo>/data` | A directory on a local disk. A relative path is resolved against the repository root, not the working directory | Not checked |
 | `CONCORD_SQLITE_SYNCHRONOUS` | `normal` | `normal` (fast writes; WAL keeps the database consistent, a power cut can lose the last commits) or `full` (syncs every commit) | Anything else, including an empty value |
+| `CONCORD_CHECK_ON_OPEN` | Off | As `CONCORD_EPHEMERAL`. On, each workspace database runs `PRAGMA quick_check` and `foreign_key_check` when it opens (the control database is always checked at startup) | As `CONCORD_EPHEMERAL` |
 | `CONCORD_EPHEMERAL` | Off | `1`, `true`, `yes` or `on` turns it on; `0`, `false`, `no` or `off` turns it off (case-insensitive) | Anything else |
 | `CONCORD_SIGNUP` | `open` | `open` or `code` | Anything else, including an empty value |
 | `CONCORD_MAX_ASSETS` | `10` | A whole number, 1 to 1000 | Not a whole number, below 1, or above 1000 |
