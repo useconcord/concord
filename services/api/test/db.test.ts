@@ -348,7 +348,9 @@ describe("Db busy_timeout", () => {
     // Lower the busy timeout so it gives up quickly
     db.raw.exec("PRAGMA busy_timeout = 100;");
 
-    const holdMs = 500;
+    // Hold far longer than the timeout: the child's clock starts when it takes the lock, and on a
+    // slow runner the parent can take hundreds of ms to see "locked" and try its write.
+    const holdMs = 5000;
     const cp = await lockDbInChild(dbPath, holdMs);
 
     expect(() => {

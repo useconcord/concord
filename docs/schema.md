@@ -87,6 +87,7 @@ One row per watched asset.
 | `ignore_addresses` | TEXT (JSON) | Array of address strings left out of reconciliation. Default `'[]'`. |
 | `created_by` | TEXT, null | Label of the actor who started watching (`cli:<user>` or a session's person). |
 | `created_at` | TEXT | |
+| `flow_only` | INTEGER | `1` for a dividend's pay asset that Concord watched on its own so the payments can be seen (migration 11). Hidden from the asset list; watching it explicitly makes it a normal asset. |
 
 ### `events`
 
@@ -132,6 +133,7 @@ Index `registers_asset (asset_id, as_of)`.
 | `sha256` | TEXT | Hash of the CSV text. The CSV itself is not kept. |
 | `issues` | TEXT (JSON) | Array of `{ "line": number, "message": string }` for rows that could not be read. |
 | `imported_by`, `imported_at` | TEXT | Actor label and time. |
+| `imported_by_id` | TEXT, null | The importer's user id (migration 10). With the workspace's four-eyes setting on, that person cannot resolve the breaks of a run on this register. |
 
 ### `register_positions`
 

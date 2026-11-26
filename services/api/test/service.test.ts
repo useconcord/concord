@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import Ajv from "ajv";
 import { Keypair, StrKey, nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -3605,7 +3607,11 @@ describe("streamed events export", () => {
       }
     });
 
-    if (global.gc) global.gc();
+    // Measure what the stream keeps alive, not garbage the collector has not reached yet: without a
+    // collection before each sample the figure swings with GC timing and the bound flakes.
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    gc();
     const initialHeap = process.memoryUsage().heapUsed;
     let peakGrowth = 0;
     let rowCount = 0;
@@ -3614,6 +3620,7 @@ describe("streamed events export", () => {
     for (const _chunk of concord.exportEvents("BIG", {}, "csv")) {
       rowCount++;
       if (rowCount % 20_000 === 0) {
+        gc();
         const growth = process.memoryUsage().heapUsed - initialHeap;
         if (growth > peakGrowth) peakGrowth = growth;
       }
@@ -3692,6 +3699,216 @@ describe("streamed events export", () => {
     // Test invalid format returns 400
     const resBad = await client.call(`/api/assets/${watched.code}/export?section=events&format=xml`);
     expect(resBad.status).toBe(400);
+  });
+
+  it("enforces the four-eyes rule when requireSecondSigner is enabled (#539)", async () => {
+    const userA = { id: "user_a", label: "Alice <alice@example.test>" };
+    const userB = { id: "user_b", label: "Bob <bob@example.test>" };
+
+    // 1. By default, setting is off and importer can resolve their own break
+    expect(concord.requireSecondSigner).toBe(false);
+    expect(concord.settings()).toEqual({ requireSecondSigner: false });
+
+    const csv1 = `holder_id,account,units\nA,${h1},90\n`;
+    const reg1 = concord.importRegister("FUND", { csv: csv1, asOf: at(40) }, userA);
+    const run1 = await concord.reconcile("FUND", reg1.registerId, userA);
+    const break1 = run1.breaks[0]!;
+
+    // Importer resolving with setting off succeeds
+    expect(
+      concord.setNote("FUND", "recon", break1.key, {
+        fingerprint: break1.fingerprint,
+        status: "resolved",
+        note: "verified and resolved by importer",
+      }, userA),
+    ).toEqual({ ok: true });
+
+    // 2. Enable requireSecondSigner
+    concord.setRequireSecondSigner(true);
+    expect(concord.requireSecondSigner).toBe(true);
+    expect(concord.settings()).toEqual({ requireSecondSigner: true });
+
+    // Import a new register and reconcile to create a new break
+    const csv2 = `holder_id,account,units\nA,${h1},80\n`;
+    const reg2 = concord.importRegister("FUND", { csv: csv2, asOf: at(45) }, userA);
+    const run2 = await concord.reconcile("FUND", reg2.registerId, userA);
+    const break2 = run2.breaks[0]!;
+
+    // Same user (importer) trying to resolve is rejected
+    expect(() =>
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "attempted resolve by importer",
+      }, userA),
+    ).toThrow(/four-eyes/i);
+
+    // Second user (userB) can acknowledge the break
+    expect(
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "acknowledged",
+        note: "acknowledged by Bob",
+      }, userB),
+    ).toEqual({ ok: true });
+
+    // UserB who acknowledged cannot now resolve it (needs a different second signer)
+    expect(() =>
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "attempted resolve by same acknowledging user",
+      }, userB),
+    ).toThrow(/four-eyes/i);
+
+    // UserC can resolve the acknowledged break
+    const userC = { id: "user_c", label: "Charlie <charlie@example.test>" };
+    expect(
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "verified and resolved by Charlie",
+      }, userC),
+    ).toEqual({ ok: true });
+  });
+
+  it("handles requireSecondSigner via API endpoints (#539)", async () => {
+    const h = harness();
+    const owner = await new Client(h.app).signUp("owner@example.test", "FourEyes Org", "Alice");
+    const member = new Client(h.app);
+    // Invite member
+    const inviteRes = await owner.json<{ link: string }>("/api/org/invites", {
+      body: { email: "bob@example.test", role: "member" },
+    });
+    const token = inviteRes.link.split("/#/invite/")[1]!;
+    await member.json("/api/auth/invites/accept", {
+      body: { token, name: "Bob", password: "correct horse battery" },
+    });
+
+    const asset = await owner.json<{ id: string }>("/api/assets", {
+      body: { network: "testnet", asset: `FOUREYES:${key()}`, fromLedger: 1 },
+    });
+    const id = asset.id;
+
+    // Default settings: false
+    expect(await owner.json("/api/org/settings")).toEqual({ requireSecondSigner: false });
+
+    // Enable requireSecondSigner
+    const patched = await owner.json<{ requireSecondSigner: boolean }>("/api/org/settings", {
+      method: "PATCH",
+      body: { requireSecondSigner: true },
+    });
+    expect(patched).toEqual({ requireSecondSigner: true });
+
+    // Alice (owner) imports register
+    const regRes = await owner.json<{ registerId: number; run: { id: number; breaks: Array<{ key: string; fingerprint: string }> } }>(
+      `/api/assets/${id}/registers`,
+      {
+        body: {
+          csv: `holder_id,account,units\nA,${h1},90\n`,
+          asOf: at(40),
+        },
+      },
+    );
+    const breakItem = regRes.run.breaks[0]!;
+
+    // Alice tries to resolve -> 400
+    const failRes = await owner.call(`/api/assets/${id}/notes`, {
+      method: "PUT",
+      body: {
+        scope: "recon",
+        key: breakItem.key,
+        fingerprint: breakItem.fingerprint,
+        status: "resolved",
+        note: "trying to self-resolve",
+      },
+    });
+    expect(failRes.status).toBe(400);
+    expect(await failRes.text()).toContain("four-eyes");
+
+    // Bob resolves -> 200
+    const okRes = await member.call(`/api/assets/${id}/notes`, {
+      method: "PUT",
+      body: {
+        scope: "recon",
+        key: breakItem.key,
+        fingerprint: breakItem.fingerprint,
+        status: "resolved",
+        note: "approved by second signer",
+      },
+    });
+    expect(okRes.status).toBe(200);
+  });
+
+  it("auto-watches unwatched dividend payAsset as hidden flow-only, indexes it, excludes it from overview/limits, and removes it when deleted", async () => {
+    const h = harness({ maxAssetsPerOrg: 1 });
+    const client = await new Client(h.app).signUp("divpay@example.test", "Div Pay");
+    const issuer = key();
+    const h1 = key();
+    const payer = key();
+    const concord = h.tenants.forOrg(client.orgId);
+
+    const fund = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+    h.chain.push(fund.id, "mint", 2, { to: h1, amount: u(100) });
+    await concord.sync(fund.id);
+
+    // Provide describe metadata for an unwatched SEP-41 contract payAsset.
+    const payContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+    h.chain.describe = async (candidate) =>
+      candidate.id === payContract ? { decimals: 7, code: "USDC", name: "USD Coin" } : { decimals: 7 };
+    h.chain.push(payContract, "transfer", 10, { from: payer, to: h1, amount: u(25), txHash: "tx-div" });
+
+    // Even with maxAssetsPerOrg=1 already filled by FUND, creating a dividend in an unwatched contract payAsset succeeds.
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(5),
+      ratePerUnit: "0.25",
+      payAsset: payContract,
+      payer,
+    });
+    expect(action.state).toBe("clean");
+    expect(action.result?.flowAsset).toEqual({ id: payContract, code: "USDC" });
+    expect(action.result?.summary.expectedTotal).toBe("25");
+    expect(action.result?.summary.observedTotal).toBe("25");
+
+    // Excluded from overview and asset limit, yet present via concord.asset() and indexed in syncAll().
+    expect(concord.overview().assets.map((a) => a.id)).toEqual([fund.id]);
+    expect(concord.asset(payContract).flowOnly).toBe(true);
+
+    // Deleting the action removes the flow-only pay asset.
+    const delRes = await client.call(`/api/actions/${action.id}`, { method: "DELETE" });
+    expect(delRes.status).toBe(200);
+    expect(() => concord.asset(payContract)).toThrow(/not watched/);
+  });
+
+  it("promotes a flow-only pay asset to a watched asset with the matching windows it was watched with", async () => {
+    const h = harness();
+    const client = await new Client(h.app).signUp("promote@example.test", "Promote Pay");
+    const issuer = key();
+    const h1 = key();
+    const payer = key();
+    const concord = h.tenants.forOrg(client.orgId);
+
+    const fund = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+    h.chain.push(fund.id, "mint", 2, { to: h1, amount: u(100) });
+    await concord.sync(fund.id);
+
+    const payContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+    h.chain.describe = async (candidate) =>
+      candidate.id === payContract ? { decimals: 7, code: "USDC", name: "USD Coin" } : { decimals: 7 };
+    await concord.createAction("FUND", { type: "dividend", recordTime: at(5), ratePerUnit: "0.25", payAsset: payContract, payer });
+    expect(concord.asset(payContract).flowOnly).toBe(true);
+
+    const promoted = await concord.watchAsset({
+      network: "testnet",
+      asset: payContract,
+      fromLedger: 1,
+      instructionWindowHours: 6,
+      movementWindowHours: 3,
+    });
+    expect(promoted.flowOnly).toBeUndefined();
+    expect(promoted).toMatchObject({ instructionWindowHours: 6, movementWindowHours: 3 });
+    expect(concord.overview().assets.map((a) => a.id).sort()).toEqual([fund.id, payContract].sort());
   });
 });
 
