@@ -3009,6 +3009,77 @@ describe("Concord", () => {
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
   });
 
+  it("enforces the four-eyes rule when requireSecondSigner is enabled (#539)", async () => {
+    const userA = { id: "user_a", label: "Alice <alice@example.test>" };
+    const userB = { id: "user_b", label: "Bob <bob@example.test>" };
+
+    // 1. By default, setting is off and importer can resolve their own break
+    expect(concord.requireSecondSigner).toBe(false);
+    expect(concord.settings()).toEqual({ requireSecondSigner: false });
+
+    const csv1 = `holder_id,account,units\nA,${h1},90\n`;
+    const reg1 = concord.importRegister("FUND", { csv: csv1, asOf: at(40) }, userA);
+    const run1 = await concord.reconcile("FUND", reg1.registerId, userA);
+    const break1 = run1.breaks[0]!;
+
+    // Importer resolving with setting off succeeds
+    expect(
+      concord.setNote("FUND", "recon", break1.key, {
+        fingerprint: break1.fingerprint,
+        status: "resolved",
+        note: "verified and resolved by importer",
+      }, userA),
+    ).toEqual({ ok: true });
+
+    // 2. Enable requireSecondSigner
+    concord.setRequireSecondSigner(true);
+    expect(concord.requireSecondSigner).toBe(true);
+    expect(concord.settings()).toEqual({ requireSecondSigner: true });
+
+    // Import a new register and reconcile to create a new break
+    const csv2 = `holder_id,account,units\nA,${h1},80\n`;
+    const reg2 = concord.importRegister("FUND", { csv: csv2, asOf: at(45) }, userA);
+    const run2 = await concord.reconcile("FUND", reg2.registerId, userA);
+    const break2 = run2.breaks[0]!;
+
+    // Same user (importer) trying to resolve is rejected
+    expect(() =>
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "attempted resolve by importer",
+      }, userA),
+    ).toThrow(/four-eyes/i);
+
+    // Second user (userB) can acknowledge the break
+    expect(
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "acknowledged",
+        note: "acknowledged by Bob",
+      }, userB),
+    ).toEqual({ ok: true });
+
+    // UserB who acknowledged cannot now resolve it (needs a different second signer)
+    expect(() =>
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "attempted resolve by same acknowledging user",
+      }, userB),
+    ).toThrow(/four-eyes/i);
+
+    // UserC can resolve the acknowledged break
+    const userC = { id: "user_c", label: "Charlie <charlie@example.test>" };
+    expect(
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "verified and resolved by Charlie",
+      }, userC),
+    ).toEqual({ ok: true });
+  });
+
   it("imports journal in merge mode by default, updating and adding entries (#540)", () => {
     // Initial import: J1, J2
     const res1 = concord.importJournal(
@@ -3699,6 +3770,74 @@ describe("streamed events export", () => {
     // Test invalid format returns 400
     const resBad = await client.call(`/api/assets/${watched.code}/export?section=events&format=xml`);
     expect(resBad.status).toBe(400);
+  });
+
+  it("handles requireSecondSigner via API endpoints (#539)", async () => {
+    const h = harness();
+    const owner = await new Client(h.app).signUp("owner@example.test", "FourEyes Org", "Alice");
+    const member = new Client(h.app);
+    // Invite member
+    const inviteRes = await owner.json<{ link: string }>("/api/org/invites", {
+      body: { email: "bob@example.test", role: "member" },
+    });
+    const token = inviteRes.link.split("/#/invite/")[1]!;
+    await member.json("/api/auth/invites/accept", {
+      body: { token, name: "Bob", password: "correct horse battery" },
+    });
+
+    const asset = await owner.json<{ id: string }>("/api/assets", {
+      body: { network: "testnet", asset: `FOUREYES:${key()}`, fromLedger: 1 },
+    });
+    const id = asset.id;
+
+    // Default settings: false
+    expect(await owner.json("/api/org/settings")).toEqual({ requireSecondSigner: false });
+
+    // Enable requireSecondSigner
+    const patched = await owner.json<{ requireSecondSigner: boolean }>("/api/org/settings", {
+      method: "PATCH",
+      body: { requireSecondSigner: true },
+    });
+    expect(patched).toEqual({ requireSecondSigner: true });
+
+    // Alice (owner) imports register
+    const regRes = await owner.json<{ registerId: number; run: { id: number; breaks: Array<{ key: string; fingerprint: string }> } }>(
+      `/api/assets/${id}/registers`,
+      {
+        body: {
+          csv: `holder_id,account,units\nA,${h1},90\n`,
+          asOf: at(40),
+        },
+      },
+    );
+    const breakItem = regRes.run.breaks[0]!;
+
+    // Alice tries to resolve -> 400
+    const failRes = await owner.call(`/api/assets/${id}/notes`, {
+      method: "PUT",
+      body: {
+        scope: "recon",
+        key: breakItem.key,
+        fingerprint: breakItem.fingerprint,
+        status: "resolved",
+        note: "trying to self-resolve",
+      },
+    });
+    expect(failRes.status).toBe(400);
+    expect(await failRes.text()).toContain("four-eyes");
+
+    // Bob resolves -> 200
+    const okRes = await member.call(`/api/assets/${id}/notes`, {
+      method: "PUT",
+      body: {
+        scope: "recon",
+        key: breakItem.key,
+        fingerprint: breakItem.fingerprint,
+        status: "resolved",
+        note: "approved by second signer",
+      },
+    });
+    expect(okRes.status).toBe(200);
   });
 });
 

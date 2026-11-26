@@ -132,6 +132,7 @@ Index `registers_asset (asset_id, as_of)`.
 | `sha256` | TEXT | Hash of the CSV text. The CSV itself is not kept. |
 | `issues` | TEXT (JSON) | Array of `{ "line": number, "message": string }` for rows that could not be read. |
 | `imported_by`, `imported_at` | TEXT | Actor label and time. |
+| `imported_by_id` | TEXT, null | The importer's user id (migration 10). With the workspace's four-eyes setting on, that person cannot resolve the breaks of a run on this register. |
 
 ### `register_positions`
 

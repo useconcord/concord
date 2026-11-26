@@ -118,6 +118,13 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("opens the v10 workspace database and keeps who imported each register", () => {
+    upgraded("org-v10.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v10");
+      expect(db.get<{ imported_by_id: string }>("SELECT imported_by_id FROM registers WHERE id = 1")?.imported_by_id).toBe("u1");
+    });
+  });
+
   it("opens the v1 control database with the current migrations and keeps its rows", () => {
     upgraded("control-v1.db", CONTROL_MIGRATIONS, (db) => {
       expect(db.get<{ name: string }>("SELECT name FROM users WHERE id = 'u1'")?.name).toBe("Alice");

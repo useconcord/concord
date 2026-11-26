@@ -32,6 +32,7 @@ const ORG_MIGRATION_DIGESTS = [
   "41bc0d0c1c9a8c84109f284734b7f2892ddf93606c878a7fe4985355344bc6b2",
   "0182ab60eee2caac4eaf616ae083065f7e05b8e2d68980514545950eb56cd80f",
   "598b1578ce4051f043832d5b91d0df06043afb64e1c6a0fad190a2a733174155",
+  "c4f44d594aab43a45f28af28cd2085455394f0eb77e0bea99bc19aa0456d8b0f",
 ];
 const CONTROL_MIGRATION_DIGESTS = ["ba25bc5419cfcc376d2e7ff027845b2da4b789d9c7e966424b70cdfbbb90a422"];
 
@@ -99,6 +100,8 @@ function probes(s: Seeded): Record<string, Probe> {
     "PATCH /api/org": p("PATCH", "/api/org", { name: "Beta Partners" }),
     "DELETE /api/org": p("DELETE", "/api/org", { confirm: "Alpha Capital" }),
     "GET /api/org/webhook": p("GET", "/api/org/webhook"),
+    "GET /api/org/settings": p("GET", "/api/org/settings"),
+    "PATCH /api/org/settings": p("PATCH", "/api/org/settings", { requireSecondSigner: true }),
     "PUT /api/org/webhook": p("PUT", "/api/org/webhook", { url: "https://hooks.example.com/concord" }),
     "GET /api/overview": p("GET", "/api/overview"),
     "GET /api/lookup": p("GET", "/api/lookup?network=testnet&code=FUND"),
