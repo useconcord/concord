@@ -94,6 +94,10 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
   grows with the length of the history. Results are unchanged. Schema: `ORG_MIGRATIONS` entry 6
   adds the `holdings_checkpoints` table and the `events_asset_ledger` index on `events`.
 - Per-asset register freshness limits (#561): setting `registerMaxAgeDays` makes `assetSummary` report `registerStale: { ageDays }` once the latest register is older than that many days. Off unless set. Schema: `ORG_MIGRATIONS` entry 13 adds `assets.register_max_age_days`.
+- Stored headline figures per asset (#575): the overview and `GET /api/assets/:id` read each
+  asset's supply, holder and event counts and open-break counts from one row, rewritten after
+  every change that moves them, so a poll no longer replays events or rebuilds the controls
+  log. Schema: `ORG_MIGRATIONS` entry 14 adds the `asset_stats` table.
 - CSV templates can include one illustrative example row with `?example=1` or `?example=true` (#200).
 - The accounting core (`feat(core)`, `c402eae`): holdings replay from CAP-67 events, position
   and movement reconciliation with typed breaks, corporate-action entitlements (dividend,
