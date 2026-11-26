@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, basename } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { backup } from "node:sqlite";
@@ -166,7 +166,7 @@ export async function runCli(
       const file = need(b, "file");
       const imported = concord.importRegister(
         asset,
-        { csv: readFileSync(file, "utf8"), asOf: need(values["as-of"], "--as-of"), source: file },
+        { csv: readFileSync(file, "utf8"), asOf: need(values["as-of"], "--as-of"), source: basename(file) },
         actor,
       );
       if (imported.duplicate) {
