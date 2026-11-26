@@ -2132,26 +2132,31 @@ describe("Concord", () => {
     expect((unknown as Error).message).toBe("asset NOPE is not watched");
   });
 
-  it("handles concurrent watchAsset calls gracefully without UNIQUE constraint failure", async () => {
+  it("concurrent watchAsset calls for one asset yield exactly one success and one row", async () => {
     const assetCode = `CONC:${key()}`;
-    const origDescribe = chain.describe?.bind(chain);
+    const origDescribe = chain.describe.bind(chain);
+    // Both calls pass the first "already watched" check, then wait on the chain together.
     chain.describe = async (candidate) => {
-      await new Promise((r) => setTimeout(r, 25));
-      return origDescribe ? origDescribe(candidate) : { decimals: 7, name: "Concurrent Test" };
+      await new Promise((r) => setTimeout(r, 20));
+      return origDescribe(candidate);
     };
 
-    const [r1, r2] = await Promise.allSettled([
+    const results = await Promise.allSettled([
       concord.watchAsset({ network: "testnet", asset: assetCode, fromLedger: 1 }),
       concord.watchAsset({ network: "testnet", asset: assetCode, fromLedger: 1 }),
     ]);
 
-    const successes = [r1, r2].filter((r) => r.status === "fulfilled");
-    const rejections = [r1, r2].filter((r) => r.status === "rejected");
+    const fulfilled = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<Concord["watchAsset"]>>> => r.status === "fulfilled");
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    const reason = rejected[0]!.reason as Error;
+    expect(reason).toBeInstanceOf(Invalid);
+    expect(reason.message).toMatch(/already watched/);
+    expect(reason.message).not.toContain("UNIQUE constraint");
 
-    expect(successes).toHaveLength(1);
-    expect(rejections).toHaveLength(1);
-    expect((rejections[0] as PromiseRejectedResult).reason).toBeInstanceOf(Invalid);
-    expect((rejections[0] as PromiseRejectedResult).reason.message).toContain("is already watched");
+    const watched = fulfilled[0]!.value;
+    expect(concord.assets("testnet").filter((a) => a.id === watched.id)).toHaveLength(1);
   });
 
   it("validates decimals for classic and contract assets", async () => {
