@@ -57,6 +57,9 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 - A per-asset reconciliation `tolerance` (smallest units): a holder whose chain and register
   balances differ by no more than it is treated as matched. Schema: `ORG_MIGRATIONS` v5 adds
   `assets.tolerance` (#564).
+- Void a corporate action entered in error (`POST /api/actions/:id/void`, reason required) (#544).
+  It keeps its place in the audit trail with no open breaks. Schema: `ORG_MIGRATIONS` entry 8 adds
+  `actions.voided_at`, `voided_by` and `void_reason`.
 - The runs list reads summary columns instead of parsing every stored result body (#531).
   Schema: `ORG_MIGRATIONS` entry 7 adds `runs.summary`, `status`, `chain_behind` and `open_breaks`,
   backfilled from existing results.

@@ -229,6 +229,7 @@ Corporate actions. Index `actions_asset (asset_id, record_time)`.
 | `result` | TEXT (JSON), null | Reconciliation of the action, below. |
 | `created_by`, `created_at` | TEXT | |
 | `reconciled_at` | TEXT, null | |
+| `voided_at`, `voided_by`, `void_reason` | TEXT | Set when an action entered in error is voided (migration 8). A voided action is never reconciled again and has no open breaks, but stays in the audit pack with the reason. |
 
 `params` always has `exclude` (array of addresses). A dividend adds `ratePerUnit` (decimal
 string, pay-asset units per whole unit held), `payAsset` (the id of a watched asset, which is

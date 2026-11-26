@@ -2445,6 +2445,8 @@ ul { margin: 6px 0 0; padding-left: 20px; }
   async reconcileAction(id: number, options: { sync?: boolean } = {}) {
     const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
     if (!row) throw new NotFound(`corporate action ${id} not found`);
+    // A voided action is history: it is never read from the chain or reconciled again.
+    if (row.voided_at) return this.action(id);
     const params = JSON.parse(String(row.params)) as Record<string, unknown>;
     const type = String(row.type) as ActionType;
     const warnings: string[] = [];
@@ -2675,6 +2677,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       : null;
     const result = row.result ? (JSON.parse(String(row.result)) as ActionResult) : null;
     const breaks = result ? this.annotate(asset.id, `action:${id}`, result.breaks) : [];
+    const voidedAt = row.voided_at ? String(row.voided_at) : null;
     return {
       id: Number(row.id),
       assetId: asset.id,
@@ -2684,7 +2687,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       params: JSON.parse(String(row.params)) as Record<string, unknown>,
       createdAt: String(row.created_at),
       reconciledAt: row.reconciled_at ? String(row.reconciled_at) : null,
-      state: snapshot ? (result?.status ?? "pending") : "scheduled",
+      state: voidedAt ? "voided" : snapshot ? (result?.status ?? "pending") : "scheduled",
       snapshot: snapshot && {
         ledger: snapshot.ledger,
         takenAt: snapshot.takenAt,
@@ -2695,7 +2698,11 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         })),
       },
       result: result && { ...result, breaks },
-      openBreaks: breaks.filter((b) => b.status === "open").length,
+      // The breaks stay on the record for the audit trail, but a voided action is not open.
+      openBreaks: voidedAt ? 0 : breaks.filter((b) => b.status === "open").length,
+      voidedAt,
+      voidedBy: row.voided_by ? String(row.voided_by) : null,
+      voidReason: row.void_reason ? String(row.void_reason) : null,
     };
   }
 
@@ -2707,20 +2714,47 @@ ul { margin: 6px 0 0; padding-left: 20px; }
   }
 
   /**
+   * Cancel an action entered in error, keeping it in the audit trail. Nothing is deleted: the
+   * record keeps its snapshot, its result and its breaks, gains who voided it and why, and stops
+   * counting as open from then on.
+   */
+  async   async voidAction(id: number, reason: string, actor?: Actor): Promise<Awaited<ReturnType<typeof this.action>>> {
+    const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
+    if (!row) throw new NotFound(`corporate action ${id} not found`);
+    if (typeof reason !== "string" || !reason.trim()) {
+      throw new Invalid("a reason is required to void a corporate action");
+    }
+    const text = reason.trim();
+    if (text.length > 4000) throw new Invalid("reason is too long");
+    if (row.voided_at) throw new Invalid(`corporate action ${id} is already voided`);
+    this.db.write(
+      "UPDATE actions SET voided_at = ?, voided_by = ?, void_reason = ? WHERE id = ?",
+      now(),
+      actor?.label ?? null,
+      text,
+      id,
+    );
+    return this.action(id);
+  }
+
+
+  /**
    * Reconcile the corporate actions whose record time the indexed chain has now passed, and
    * re-run the ones already reconciled whose execution window is still open and whose flow asset
    * has been read further since. Run after a sync, so a scheduled action advances, and a late
-   * payment lands in the stored result, without anyone pressing a button.
+   * payment lands in the stored result, without anyone pressing a button. A voided action is
+   * never due.
    */
   async reconcileDue(): Promise<number> {
     const due = this.db
       .all<{ id: number }>(
         `SELECT a.id FROM actions a JOIN assets s ON s.id = a.asset_id
-         WHERE a.snapshot IS NULL AND s.synced_at IS NOT NULL AND s.synced_at >= a.record_time`,
+         WHERE a.snapshot IS NULL AND s.synced_at IS NOT NULL AND s.synced_at >= a.record_time
+           AND a.voided_at IS NULL`,
       )
       .map(({ id }) => id);
-    const reconciled = this.db.all<{ id: number; params: string; result: string }>(
-      "SELECT id, params, result FROM actions WHERE snapshot IS NOT NULL AND result IS NOT NULL",
+    const reconciled = this.db.all<{ id: number; params: string; result: string; voided_at: string | null }>(
+      "SELECT id, params, result, voided_at FROM actions WHERE snapshot IS NOT NULL AND result IS NOT NULL AND voided_at IS NULL",
     );
     for (const row of reconciled) {
       const result = JSON.parse(row.result) as ActionResult;
@@ -2901,6 +2935,14 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     };
   }
 
+  /**
+   * Returns the voided-flag for breakdowns that read the live result rather than the summary object.
+   * A voided action still carries its breaks in the trail, but they must not read as open anywhere.
+   */
+  isVoided(row: Row): boolean {
+    return row.voided_at !== null && row.voided_at !== undefined;
+  }
+
   /** Everything an auditor needs for a period, with a digest over the content. */
   auditExport(
     ref: string,
@@ -2945,22 +2987,33 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       })(),
       registers,
       reconciliations: runs,
+      // A voided action stays in the pack. The pack's shape is a closed contract, so the void
+      // trail travels in the action's free-form params rather than as new top-level fields.
       corporateActions: this.actions(asset.id)
         .filter((a) => inPeriod(a.recordTime))
-        .map(({ result, ...rest }) => ({
-          ...rest,
-          result: result
-            ? {
-                reconciledThrough: result.reconciledThrough,
-                warnings: result.warnings,
-                status: result.status,
-                flowAsset: result.flowAsset,
-                summary: result.summary,
-                lines: result.lines,
-                breaks: result.breaks,
-              }
-            : null,
-        })),
+        .map(({ result, voidedAt, voidedBy, voidReason, ...rest }) => {
+          const action = {
+            ...rest,
+            result: result
+              ? {
+                  reconciledThrough: result.reconciledThrough,
+                  warnings: result.warnings,
+                  status: result.status,
+                  flowAsset: result.flowAsset,
+                  summary: result.summary,
+                  lines: result.lines,
+                  breaks: result.breaks,
+                }
+              : null,
+          };
+          return voidedAt === null
+            ? action
+            : {
+                ...action,
+                state: result?.status ?? (rest.snapshot ? "pending" : "scheduled"),
+                params: { ...rest.params, voided: { at: voidedAt, by: voidedBy, reason: voidReason } },
+              };
+        }),
       controls,
       // The whole trail, not the period: sign-offs happen in wall-clock time, not chain time.
       signoffHistory: this.noteHistory(asset.id),
@@ -3095,7 +3148,10 @@ ul { margin: 6px 0 0; padding-left: 20px; }
           for (const b of run.breaks) rows.push({ source: `reconciliation ${run.id}`, asOf: run.asOf, ...b });
         }
         for (const a of pack.corporateActions) {
-          for (const b of a.result?.breaks ?? []) rows.push({ source: `${a.type} ${a.id}`, asOf: a.recordTime, ...b });
+          // A voided action is in the trail, but its breaks are not open. The pack's shape is
+          // closed, so a void travels in params rather than as a state of its own.
+          const breaks = a.params.voided ? [] : a.result?.breaks ?? [];
+          for (const b of breaks) rows.push({ source: `${a.type} ${a.id}`, asOf: a.recordTime, ...b });
         }
         for (const b of pack.controls.breaks) rows.push({ source: "controls", asOf: pack.period.to, ...b });
         return toCsv(

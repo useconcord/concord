@@ -132,6 +132,17 @@ build(join(outDir, "org-v7.db"), ORG_MIGRATIONS.slice(0, 7), (db) => {
   );
 });
 
+// v8: an action entered in error is voided rather than deleted, so it keeps its place in the audit trail
+build(join(outDir, "org-v8.db"), ORG_MIGRATIONS.slice(0, 8), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v8')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '2024-01-01T00:00:00Z')`);
+  // One live action and one voided one, so the new columns survive an upgrade in both states.
+  db.exec(`INSERT INTO actions (id, asset_id, type, label, record_time, params, created_by, created_at, voided_at, voided_by, void_reason)
+    VALUES (1, 'usd-mainnet', 'dividend', 'Dividend 10 per unit', '2024-01-03T00:00:00Z', '{"ratePerUnit":"10","rounding":"floor","exclude":[]}', 'alice', '2024-01-03T00:00:00Z', NULL, NULL, NULL),
+           (2, 'usd-mainnet', 'split', 'Split 2:1', '2024-01-04T00:00:00Z', '{"num":"2","den":"1","exclude":[]}', 'alice', '2024-01-04T00:00:00Z', '2024-01-05T00:00:00Z', 'bob', 'typo in the rate')`);
+});
+
 build(join(outDir, "control-v1.db"), CONTROL_MIGRATIONS.slice(0, 1), (db) => {
   db.exec(`INSERT INTO users (id, email, name, email_verified, created_at)
     VALUES ('u1', 'alice@example.org', 'Alice', 1, '2024-01-01T00:00:00Z')`);
