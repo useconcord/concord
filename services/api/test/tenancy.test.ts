@@ -1710,6 +1710,143 @@ describe("chain endpoints", () => {
     expect(singleFull.calls.map((c) => c.url)).toEqual([`https://horizon.example${firstPath}`]);
   });
 
+  it("baseline() skips records without the asset line, leaves authorized undefined when missing, and overwrites duplicate accounts across pages", async () => {
+    const issuer = key();
+    const otherIssuer = key();
+    const wrongIssuerAcc = key();
+    const missingAuthAcc = key();
+    const unauthAcc = key();
+    const zeroBalanceAcc = key();
+    const normalAcc = key();
+
+    const cases = [
+      {
+        name: "wrong issuer is skipped",
+        record: {
+          account_id: wrongIssuerAcc,
+          balances: [{ asset_code: "FUND", asset_issuer: otherIssuer, balance: "10.0000000", is_authorized: true }],
+        },
+        expectedOpening: undefined,
+      },
+      {
+        name: "missing is_authorized leaves authorized undefined/absent",
+        record: {
+          account_id: missingAuthAcc,
+          balances: [{ asset_code: "FUND", asset_issuer: issuer, balance: "25.0000000" }],
+        },
+        expectedOpening: { amount: 250_000_000n, asOfLedger: 150 },
+      },
+      {
+        name: "is_authorized false is kept",
+        record: {
+          account_id: unauthAcc,
+          balances: [{ asset_code: "FUND", asset_issuer: issuer, balance: "5.0000000", is_authorized: false }],
+        },
+        expectedOpening: { amount: 50_000_000n, asOfLedger: 150, authorized: false },
+      },
+      {
+        name: "zero balance is kept as 0n",
+        record: {
+          account_id: zeroBalanceAcc,
+          balances: [{ asset_code: "FUND", asset_issuer: issuer, balance: "0.0000000", is_authorized: true }],
+        },
+        expectedOpening: { amount: 0n, asOfLedger: 150, authorized: true },
+      },
+      {
+        name: "authorized record is kept",
+        record: {
+          account_id: normalAcc,
+          balances: [{ asset_code: "FUND", asset_issuer: issuer, balance: "100.0000000", is_authorized: true }],
+        },
+        expectedOpening: { amount: 1_000_000_000n, asOfLedger: 150, authorized: true },
+      },
+    ];
+
+    const expectedMap = new Map<string, { amount: bigint; asOfLedger: number; authorized?: boolean }>();
+    for (const c of cases) {
+      if (c.expectedOpening) {
+        expectedMap.set(c.record.account_id, c.expectedOpening);
+      }
+    }
+
+    const first = `https://horizon.example/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`;
+    const singlePage = scripted({
+      [first]: [
+        () =>
+          new Response(
+            JSON.stringify({
+              _links: {},
+              _embedded: { records: cases.map((c) => c.record) },
+            }),
+            { headers: { "latest-ledger": "150" } },
+          ),
+      ],
+    });
+
+    const source = new StellarSource(network(["https://rpc.example"]), singlePage.deps);
+    const baseline = await source.baseline("FUND", issuer, 7);
+
+    expect(baseline.ledger).toBe(150);
+    // Deep-equals the resulting Opening map
+    expect(baseline.openings).toEqual(expectedMap);
+    expect(baseline.openings).toStrictEqual(expectedMap);
+
+    // Explicitly verify acceptance criteria
+    expect(baseline.openings.has(wrongIssuerAcc)).toBe(false);
+    expect("authorized" in baseline.openings.get(missingAuthAcc)!).toBe(false);
+    expect(baseline.openings.get(missingAuthAcc)!.authorized).toBeUndefined();
+    expect(baseline.openings.get(unauthAcc)!.authorized).toBe(false);
+    expect(baseline.openings.get(zeroBalanceAcc)!.amount).toBe(0n);
+
+    // Two-page variant for the duplicate account (200 records on page 1 so the next link is followed)
+    const dupAccount = key();
+    const line = (balance: string, authorized = true) => ({
+      asset_code: "FUND",
+      asset_issuer: issuer,
+      balance,
+      is_authorized: authorized,
+    });
+    const record = (id: string, balance: string, authorized = true) => ({
+      account_id: id,
+      balances: [line(balance, authorized)],
+    });
+    const many = Array.from({ length: 199 }, () => record(key(), "1.0000000"));
+    const second = "https://horizon.example/accounts?cursor=page2&limit=200";
+
+    const twoPage = scripted({
+      [first]: [
+        () =>
+          new Response(
+            JSON.stringify({
+              _links: { next: { href: second } },
+              _embedded: { records: [record(dupAccount, "10.0000000", true), ...many] },
+            }),
+            { headers: { "latest-ledger": "150" } },
+          ),
+      ],
+      [second]: [
+        () =>
+          new Response(
+            JSON.stringify({
+              _links: {},
+              _embedded: { records: [record(dupAccount, "99.0000000", false)] },
+            }),
+            { headers: { "latest-ledger": "155" } },
+          ),
+      ],
+    });
+
+    const sourceTwoPage = new StellarSource(network(["https://rpc.example"]), twoPage.deps);
+    const resTwoPage = await sourceTwoPage.baseline("FUND", issuer, 7);
+    expect(resTwoPage.ledger).toBe(150);
+    expect(resTwoPage.openings.size).toBe(200); // 199 other accounts + 1 duplicate overwritten
+    expect(resTwoPage.openings.get(dupAccount)).toEqual({
+      amount: 990_000_000n,
+      asOfLedger: 155,
+      authorized: false,
+    });
+  });
+
   it("finds classic assets by code, most widely held first", async () => {
     const [i1, i2] = [key(), key()];
     const asset = (issuer: string, authorized: number, flags: boolean) => ({
