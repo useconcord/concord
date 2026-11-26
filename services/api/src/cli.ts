@@ -366,6 +366,35 @@ export async function runCli(
       if (values["fail-on-breaks"] && run.openBreaks > 0) process.exitCode = 2;
       break;
     }
+    case "reconcile-all": {
+      const concord = workspace();
+      if (values.network !== undefined && !isNetworkName(values.network)) {
+        throw new Error("--network must be mainnet or testnet");
+      }
+      // Only assets with a register can reconcile; the rest have nothing to compare against.
+      const targets = concord.assets(values.network).filter((asset) => concord.registers(asset.id).length > 0);
+      const rows: Array<{ asset: string; status: string; openBreaks: number | null; error: string | null }> = [];
+      for (const asset of targets) {
+        try {
+          const run = await concord.reconcile(asset.id, undefined, actor);
+          rows.push({ asset: asset.code, status: run.status, openBreaks: run.openBreaks, error: null });
+        } catch (err) {
+          // One asset's failure must not stop the rest of the run.
+          rows.push({ asset: asset.code, status: "error", openBreaks: null, error: (err as Error).message });
+        }
+      }
+      if (values.json) out(rows);
+      else {
+        table(rows);
+        const withBreaks = rows.filter((r) => (r.openBreaks ?? 0) > 0).length;
+        const failed = rows.filter((r) => r.error !== null).length;
+        console.log(`${rows.length} assets reconciled · ${withBreaks} with open breaks · ${failed} failed`);
+      }
+      // Same exit codes as reconcile: 1 when any asset failed, 2 for open breaks with --fail-on-breaks.
+      if (rows.some((r) => r.error !== null)) process.exitCode = 1;
+      else if (values["fail-on-breaks"] && rows.some((r) => (r.openBreaks ?? 0) > 0)) process.exitCode = 2;
+      break;
+    }
     case "runs": {
       const limit = values.limit ? Number(values.limit) : undefined;
       if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {

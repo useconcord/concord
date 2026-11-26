@@ -68,6 +68,7 @@ export CONCORD_ORG="Harbourline Transfer"     # or pass --org to each command
 pnpm concord watch FUND:GISSUER... --name "Example Fund" --ignore GTREASURY...
 pnpm concord register FUND ./register.csv --as-of 2026-10-06T21:00:00Z
 pnpm concord action FUND split --record 2026-10-01T21:00:00Z --ratio 2:1
+pnpm concord reconcile-all --fail-on-breaks
 pnpm concord export FUND --out audit.json
 pnpm concord --help
 ```
