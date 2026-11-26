@@ -116,7 +116,11 @@ On success it prints
 ### `unwatch ASSET`
 
 Stops watching and **deletes the asset and its books** (registers, journal, instructions,
-reconciliation runs, corporate actions, sign-offs). There is no confirmation prompt.
+reconciliation runs, corporate actions, sign-offs). It first prints how many assets, events,
+registers, runs and sign-offs would go (`Concord.deletionCounts`), and deletes nothing until
+`--yes` is given, or the prompt is answered `yes` on a terminal. Without `--yes` on a
+non-interactive stdin it exits `1` and changes nothing. `--dry-run` prints only the counts and
+exits `0`.
 
 ### `rebuild ASSET`
 
@@ -256,7 +260,9 @@ one day and works once. It fails with `no account for EMAIL` if there is no such
 
 Deletes a workspace, named by id or exact name: its row in `control.db` (and with it its
 memberships and invitations), its database file under `orgs/`, and any account left with no
-workspace. There is no confirmation prompt.
+workspace. It first prints the assets, events, registers, runs and sign-offs it would remove,
+and deletes nothing until `--yes` is given, or the prompt is answered `yes` on a terminal;
+otherwise it exits `1` unchanged. `--dry-run` prints only the counts and exits `0`.
 
 ### `backup DIR`
 
@@ -278,13 +284,15 @@ Runs the API and dashboard, the same as `pnpm start` does for the built output.
 | `sync`, `journal`, `instructions` | Always JSON; the flag changes nothing. |
 | `export` | Always JSON unless `--csv`; the flag changes nothing. |
 | `orgs`, `assets`, `actions` | Always a table. |
-| `watch`, `unwatch`, `rebuild`, `signup-code`, `reset-link`, `org-delete`, `backup` | Always text. |
+| `unwatch`, `org-delete` | The deletion counts as JSON, before the confirmation decision. |
+| `watch`, `rebuild`, `signup-code`, `reset-link`, `backup` | Always text. |
 
 ## Exit codes
 
 There are two. `0` is success; `1` is any error, with the message on standard error. Errors
 include a missing argument or option, an unknown command (the usage text follows the message), a
-workspace or asset that does not exist, a CSV that cannot be read at all, and a Stellar RPC
+workspace or asset that does not exist, a CSV that cannot be read at all, a destructive command
+(`unwatch`, `org-delete`) run without `--yes` on a non-interactive stdin, and a Stellar RPC
 failure that stops the command. A command that finds reconciliation breaks still exits `0`, so a
 script that cares has to read the result (`status` in the `--json` output of `reconcile`).
 

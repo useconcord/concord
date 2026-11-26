@@ -169,7 +169,7 @@ Two details worth understanding rather than copying:
   never names; that is what the printed hint is protecting you from.
 
 If reconciliation on the asset page complains about an "incomplete history" or the numbers look
-twice-counted, you did not pass `--from`; delete the asset (`pnpm concord unwatch ACMEF` — books
+twice-counted, you did not pass `--from`; delete the asset (`pnpm concord unwatch ACMEF --yes` — books
 and all, or under settings in the dashboard) and watch again with a ledger number.
 
 ## 4 · Load the practice books
@@ -323,7 +323,7 @@ figures it was written against ([`docs/ARCHITECTURE.md`](./ARCHITECTURE.md)). Pr
   command), then import a changed register at the same as-of and re-run: a sign-off holds only
   while the figures it was written against are unchanged, so it reopens.
 
-To reset the whole workspace exercise, `pnpm concord unwatch ACMEF` (and `USDX`) deletes the
+To reset the whole workspace exercise, `pnpm concord unwatch ACMEF --yes` (and `USDX`) deletes the
 asset, its index and all its books; the testnet asset itself stays where it is, yours to re-watch
 from the same first ledger.
 
