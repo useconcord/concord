@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   buildControlsLog,
   dividendBreakdown,
@@ -479,7 +480,7 @@ export class Concord {
   constructor(
     readonly db: Db,
     readonly networks: Networks,
-    options: { checkpointEvery?: number } = {},
+    readonly options: { checkpointEvery?: number; signingKey?: string } = {},
   ) {
     this.seenVersion = db.dataVersion();
     const every = options.checkpointEvery ?? CHECKPOINT_EVERY;
@@ -2653,7 +2654,11 @@ ul { margin: 6px 0 0; padding-left: 20px; }
   }
 
   /** Everything an auditor needs for a period, with a digest over the content. */
-  auditExport(ref: string, period: { from?: string; to?: string } = {}) {
+  auditExport(
+    ref: string,
+    period: { from?: string; to?: string } = {},
+    options: { signingKey?: string } = {},
+  ) {
     const asset = this.asset(ref);
     const to = period.to ? isoTime(period.to, "to") : (asset.syncedAt ?? now());
     const from = period.from ? isoTime(period.from, "from") : "1970-01-01T00:00:00.000Z";
@@ -2715,7 +2720,27 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         .filter((e) => inPeriod(e.closedAt))
         .map((e) => this.eventJson(e, asset.decimals)),
     };
-    return { generatedAt: now(), generator: "concord/0.1.0", sha256: sha256(JSON.stringify(content)), ...content };
+    const digest = sha256(JSON.stringify(content));
+    const signingKey = options.signingKey ?? this.options.signingKey ?? process.env.CONCORD_SIGNING_KEY;
+    let signature: string | undefined;
+    let keyId: string | undefined;
+    if (signingKey) {
+      const pem = signingKey.includes("-----BEGIN") ? signingKey : readFileSync(signingKey, "utf8");
+      const priv = createPrivateKey(pem);
+      if (priv.asymmetricKeyType !== "ed25519") {
+        throw new Invalid("signing key must be an ed25519 private key");
+      }
+      const pub = createPublicKey(priv);
+      keyId = createHash("sha256").update(pub.export({ type: "spki", format: "der" })).digest("hex");
+      signature = sign(null, Buffer.from(digest), priv).toString("base64");
+    }
+    return {
+      generatedAt: now(),
+      generator: "concord/0.1.0",
+      sha256: digest,
+      ...(signature ? { keyId, signature } : {}),
+      ...content,
+    };
   }
 
   /** One section of the audit pack, or one corporate action's entitlement table, as CSV. */
@@ -2926,4 +2951,71 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         throw new Invalid(EXPORT_CSV_SECTION_ERROR);
     }
   }
+}
+
+export interface VerifyPackResult {
+  digestValid: boolean;
+  digest: string;
+  expectedDigest: string;
+  signed: boolean;
+  keyId: string | null;
+  signatureChecked: boolean;
+  signatureValid?: boolean;
+  error?: string;
+}
+
+export function verifyPack(pack: unknown, publicKeyPemOrPath?: string): VerifyPackResult {
+  if (!pack || typeof pack !== "object") {
+    throw new Invalid("audit pack must be a JSON object");
+  }
+  const p = pack as Record<string, unknown>;
+  const { generatedAt: _generatedAt, generator: _generator, sha256: packSha256, keyId, signature, ...content } = p;
+  if (typeof packSha256 !== "string") {
+    throw new Invalid("audit pack is missing sha256 digest");
+  }
+  const expectedDigest = sha256(JSON.stringify(content));
+  const digestValid = packSha256 === expectedDigest;
+  const signed = typeof signature === "string";
+
+  let signatureChecked = false;
+  let signatureValid: boolean | undefined = undefined;
+  let error: string | undefined = undefined;
+
+  if (publicKeyPemOrPath) {
+    signatureChecked = true;
+    if (!signed) {
+      signatureValid = false;
+      error = "pack is not signed";
+    } else {
+      try {
+        const pem = publicKeyPemOrPath.includes("-----BEGIN") ? publicKeyPemOrPath : readFileSync(publicKeyPemOrPath, "utf8");
+        const pub = createPublicKey(pem);
+        if (pub.asymmetricKeyType !== "ed25519") {
+          throw new Invalid("public key must be an ed25519 public key");
+        }
+        const computedKeyId = createHash("sha256").update(pub.export({ type: "spki", format: "der" })).digest("hex");
+        if (typeof keyId === "string" && keyId !== computedKeyId) {
+          signatureValid = false;
+          error = `keyId mismatch (pack: ${keyId}, public key: ${computedKeyId})`;
+        } else {
+          signatureValid = verify(null, Buffer.from(packSha256), pub, Buffer.from(signature as string, "base64"));
+          if (!signatureValid) error = "invalid signature";
+        }
+      } catch (err) {
+        signatureValid = false;
+        error = err instanceof Error ? err.message : String(err);
+      }
+    }
+  }
+
+  return {
+    digestValid,
+    digest: packSha256,
+    expectedDigest,
+    signed,
+    keyId: typeof keyId === "string" ? keyId : null,
+    signatureChecked,
+    signatureValid,
+    ...(error ? { error } : {}),
+  };
 }

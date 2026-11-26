@@ -53,6 +53,7 @@ value.
 | `CONCORD_RPC_HEADERS_FILE` | Unset | Path to a file holding the `CONCORD_RPC_HEADERS` JSON; one trailing newline is dropped | Set together with `CONCORD_RPC_HEADERS`, empty, the file cannot be read, or its contents fail the checks above |
 | `CONCORD_USER_AGENT_SUFFIX` | Unset (no suffix) | A contact string, at most 120 printable ASCII characters, e.g. an email address. Appended to the User-Agent on RPC and Horizon requests | Longer than 120 characters, or a character outside printable ASCII |
 | `CONCORD_SYNC_INTERVAL` | `30` | Seconds between indexer passes. `0` turns the indexer off | Not a whole number, or below 0 |
+| `CONCORD_SIGNING_KEY` | Unset (packs are not signed) | Path to an ed25519 private key in PEM format (relative to the repository root), or the PEM itself. Audit packs then carry `keyId` and `signature`; check them with `concord verify-pack FILE --key PUBLIC.pem` | Not an ed25519 private key, or the file cannot be read (reported when a pack is exported) |
 | `CONCORD_ORG` | None | A workspace id, or a workspace's exact name | When a command needs a workspace and the value matches none, or matches more than one by name |
 
 Whole numbers are parsed with `Number()`, so `" 5 "` is read as `5` and `5.5` is refused

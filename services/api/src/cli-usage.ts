@@ -149,6 +149,7 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
   export ASSET [--from ISO] [--to ISO] [--csv SECTION] [--out FILE]
   signoff ASSET --scope recon|controls|action:N --key KEY --status open|acknowledged|resolved
         [--note TEXT] [--run N]
+  verify-pack FILE [--key PEM]
 
 Operator commands.
 
