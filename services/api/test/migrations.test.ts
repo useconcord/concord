@@ -143,6 +143,13 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("opens the v13 workspace database and keeps each asset's register freshness limit", () => {
+    upgraded("org-v13.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v13");
+      expect(db.get<{ register_max_age_days: number }>("SELECT register_max_age_days FROM assets")?.register_max_age_days).toBe(35);
+    });
+  });
+
   it("opens the v1 control database with the current migrations and keeps its rows", () => {
     upgraded("control-v1.db", CONTROL_MIGRATIONS, (db) => {
       expect(db.get<{ name: string }>("SELECT name FROM users WHERE id = 'u1'")?.name).toBe("Alice");

@@ -226,6 +226,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
       fromLedger?: number;
       instructionWindowHours?: number;
       movementWindowHours?: number;
+      registerMaxAgeDays?: number;
     }>(c);
     if (!isNetworkName(input.network)) throw new Invalid("network must be mainnet or testnet");
     // Without fromLedger the service works out where to start. With one it replays from there, as
@@ -240,6 +241,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
         ...(input.fromLedger !== undefined ? { fromLedger: input.fromLedger } : {}),
         ...(input.instructionWindowHours !== undefined ? { instructionWindowHours: input.instructionWindowHours } : {}),
         ...(input.movementWindowHours !== undefined ? { movementWindowHours: input.movementWindowHours } : {}),
+        ...(input.registerMaxAgeDays !== undefined ? { registerMaxAgeDays: input.registerMaxAgeDays } : {}),
       },
       { defer: true, actor },
     );
@@ -247,7 +249,18 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
   });
   priv.get("/assets/:id", (c) => c.json(c.var.ws.assetSummary(c.var.ws.asset(id(c)))));
   priv.patch("/assets/:id", async (c) =>
-    c.json(c.var.ws.updateAsset(id(c), await jsonBody<{ name?: string; ignore?: string[]; instructionWindowHours?: number; movementWindowHours?: number }>(c))),
+    c.json(
+      c.var.ws.updateAsset(
+        id(c),
+        await jsonBody<{
+          name?: string;
+          ignore?: string[];
+          instructionWindowHours?: number;
+          movementWindowHours?: number;
+          registerMaxAgeDays?: number | null;
+        }>(c),
+      ),
+    ),
   );
   priv.delete("/assets/:id", async (c) => {
     owner(c);

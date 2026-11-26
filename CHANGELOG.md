@@ -93,6 +93,7 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
   current holdings replay from the nearest stored checkpoint, so their cost near the tip no longer
   grows with the length of the history. Results are unchanged. Schema: `ORG_MIGRATIONS` entry 6
   adds the `holdings_checkpoints` table and the `events_asset_ledger` index on `events`.
+- Per-asset register freshness limits (#561): setting `registerMaxAgeDays` makes `assetSummary` report `registerStale: { ageDays }` once the latest register is older than that many days. Off unless set. Schema: `ORG_MIGRATIONS` entry 13 adds `assets.register_max_age_days`.
 - CSV templates can include one illustrative example row with `?example=1` or `?example=true` (#200).
 - The accounting core (`feat(core)`, `c402eae`): holdings replay from CAP-67 events, position
   and movement reconciliation with typed breaks, corporate-action entitlements (dividend,

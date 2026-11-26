@@ -688,6 +688,55 @@ describe("Concord", () => {
     expect(() => concord.diffRegisters("FUND", mine.registerId, 99_999)).toThrow(new NotFound("no register 99999"));
   });
 
+  it("flags a register only once it is older than the asset's registerMaxAgeDays", async () => {
+    const clock = { value: Date.parse("2026-10-10T00:00:00Z") };
+    const ws = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain } }, { now: () => clock.value });
+    const asset = await ws.watchAsset({ network: "testnet", asset: `AGE:${issuer}`, fromLedger: 1, registerMaxAgeDays: 5 });
+    expect(asset.registerMaxAgeDays).toBe(5);
+
+    ws.importRegister("AGE", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: "2026-10-05T00:00:00Z" });
+
+    // Exactly five days old: the limit has not been exceeded, so there is nothing to flag.
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toBeNull();
+
+    // One millisecond more is enough, and the injected clock is what decides it.
+    clock.value += 1;
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toEqual({ ageDays: 5 });
+
+    clock.value = Date.parse("2026-10-12T00:00:00Z");
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toEqual({ ageDays: 7 });
+    expect(ws.overview().assets.find((a) => a.code === "AGE")!.registerStale).toEqual({ ageDays: 7 });
+  });
+
+  it("leaves the stale-register check off by default and lets the limit be changed or cleared", async () => {
+    const clock = { value: Date.parse("2027-01-01T00:00:00Z") };
+    const ws = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain } }, { now: () => clock.value });
+    const asset = await ws.watchAsset({ network: "testnet", asset: `AGE:${issuer}`, fromLedger: 1 });
+    expect(asset.registerMaxAgeDays).toBeUndefined();
+    // No register at all cannot be stale, and the check is off besides.
+    expect(ws.assetSummary(asset).registerStale).toBeNull();
+
+    ws.importRegister("AGE", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: "2026-10-05T00:00:00Z" });
+    // Default off: an old register is not flagged until a limit is set.
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toBeNull();
+
+    expect(ws.updateAsset("AGE", { registerMaxAgeDays: 30 }).registerMaxAgeDays).toBe(30);
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toEqual({ ageDays: 88 });
+
+    // null turns the check back off; the stored value stops being reported.
+    expect(ws.updateAsset("AGE", { registerMaxAgeDays: null }).registerMaxAgeDays).toBeUndefined();
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toBeNull();
+
+    for (const bad of [0, -1, 1.5, 3651]) {
+      expect(() => ws.updateAsset("AGE", { registerMaxAgeDays: bad }), `limit ${bad}`).toThrow(Invalid);
+    }
+    await expect(
+      ws.watchAsset({ network: "testnet", asset: `BAD:${issuer}`, fromLedger: 1, registerMaxAgeDays: 0 }),
+    ).rejects.toThrow(new Invalid("registerMaxAgeDays must be a whole number of days from 1 to 3650"));
+    // A refused setting leaves no asset behind.
+    expect(ws.assets().map((a) => a.code)).toEqual(["AGE"]);
+  });
+
   it("rounds holder shares half up to four decimals so two thirds and one third add to 100", async () => {
     const asset = await concord.watchAsset({ network: "testnet", asset: `THIRDS:${key()}`, fromLedger: 1 });
     chain.push(asset.id, "mint", 3, { to: h1, amount: u(2) });
