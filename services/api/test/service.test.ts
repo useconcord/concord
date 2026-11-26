@@ -343,6 +343,100 @@ describe("Concord", () => {
     expect(concord.asset("FUND").syncedLedger).toBe(100);
   });
 
+  describe("holdings paging", () => {
+    async function many(count: number) {
+      const asset = await concord.watchAsset({ network: "testnet", asset: `MANY:${key()}`, fromLedger: 1 });
+      // Repeated amounts make ties, which only the address can order.
+      for (let i = 0; i < count; i++) chain.push(asset.id, "mint", 5, { to: key(), amount: u(1 + (i % 4)) });
+      await concord.sync(asset.id);
+      return asset.id;
+    }
+
+    it("returns every holder without paging options, and the same rows page by page with stable totals", async () => {
+      const id = await many(25);
+      const all = concord.holdings(id);
+      expect(all.holders).toHaveLength(25);
+      expect(all).not.toHaveProperty("page");
+
+      const byAfter: typeof all.holders = [];
+      let after: string | undefined;
+      for (;;) {
+        const page = concord.holdings(id, undefined, { limit: 7, ...(after ? { after } : {}) });
+        expect(page.holderCount).toBe(25);
+        expect(page.supply).toBe(all.supply);
+        expect(page.page!.matched).toBe(25);
+        // The same request gives the same page.
+        expect(concord.holdings(id, undefined, { limit: 7, ...(after ? { after } : {}) }).holders).toEqual(page.holders);
+        byAfter.push(...page.holders);
+        if (!page.page!.next) break;
+        after = page.page!.next;
+      }
+      expect(byAfter).toEqual(all.holders);
+
+      const byOffset = [0, 7, 14, 21].flatMap((offset) => concord.holdings(id, undefined, { limit: 7, offset }).holders);
+      expect(byOffset).toEqual(all.holders);
+      expect(concord.holdings(id, undefined, { limit: 7, offset: 21 }).page).toEqual({ matched: 25, offset: 21, limit: 7, next: null });
+    });
+
+    it("sorts by address, searches by address prefix, and rejects bad options", async () => {
+      const id = await many(12);
+      const all = concord.holdings(id).holders;
+
+      const byAddress = concord.holdings(id, undefined, { sort: "address", limit: 1000 }).holders.map((h) => h.address);
+      expect(byAddress).toEqual(all.map((h) => h.address).sort());
+      // A holder gone since the last page still resumes in address order.
+      const gone = byAddress[4]!.slice(0, -1) + (byAddress[4]!.endsWith("A") ? "B" : "A");
+      const resumed = concord.holdings(id, undefined, { sort: "address", after: gone, limit: 1000 }).holders.map((h) => h.address);
+      expect(resumed).toEqual(byAddress.filter((a) => a > gone));
+
+      const target = all[5]!.address;
+      const prefix = target.slice(0, 4);
+      const found = concord.holdings(id, undefined, { q: prefix.toLowerCase() });
+      expect(found.holders.map((h) => h.address)).toEqual(all.map((h) => h.address).filter((a) => a.startsWith(prefix)));
+      expect(found.holders.map((h) => h.address)).toContain(target);
+      expect(found.page!.matched).toBe(found.holders.length);
+      expect(found.holderCount).toBe(12);
+      expect(concord.holdings(id, undefined, { q: "GZZZZZZZZZZZZZ" })).toMatchObject({ holderCount: 12, page: { matched: 0, next: null }, holders: [] });
+
+      for (const [page, message] of [
+        [{ limit: 0 }, /limit must be/],
+        [{ limit: 1001 }, /limit must be/],
+        [{ limit: 1.5 }, /limit must be/],
+        [{ offset: -1 }, /offset must be/],
+        [{ offset: 1, after: target }, /offset or after/],
+        [{ sort: "share" as "units" }, /sort must be units or address/],
+        [{ after: key() }, /after must name a holder/],
+      ] as const) {
+        expect(() => concord.holdings(id, undefined, page)).toThrow(message);
+      }
+    });
+
+    it("pages over HTTP and keeps the unpaged form", async () => {
+      const h = harness();
+      const client = await new Client(h.app).signUp("pager@example.test", "Pager");
+      const ws = h.tenants.forOrg(client.orgId);
+      const asset = await ws.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+      for (let i = 0; i < 5; i++) h.chain.push(asset.id, "mint", 3, { to: key(), amount: u(10 - i) });
+      await ws.sync("FUND");
+
+      type Holdings = { holderCount: number; supply: string; page?: { matched: number; next: string | null }; holders: Array<{ address: string }> };
+      const all = await client.json<Holdings>("/api/assets/FUND/holdings");
+      expect(all.holders).toHaveLength(5);
+      expect(all.page).toBeUndefined();
+
+      const first = await client.json<Holdings>("/api/assets/FUND/holdings?limit=2");
+      expect(first).toMatchObject({ holderCount: 5, supply: all.supply, page: { matched: 5, next: all.holders[1]!.address } });
+      const second = await client.json<Holdings>(`/api/assets/FUND/holdings?limit=2&after=${first.page!.next}`);
+      expect(second.holders).toEqual(all.holders.slice(2, 4));
+      const third = await client.json<Holdings>("/api/assets/FUND/holdings?limit=2&offset=4&sort=units");
+      expect(third.holders).toEqual(all.holders.slice(4));
+      expect(third.page!.next).toBeNull();
+
+      expect((await client.call("/api/assets/FUND/holdings?limit=abc")).status).toBe(400);
+      expect((await client.call("/api/assets/FUND/holdings?sort=share")).status).toBe(400);
+    });
+  });
+
   it("pages across a boundary that splits several events of the same ledger without losing or duplicating any", async () => {
     await expectPagedSync(999, 1);
     await expectPagedSync(1000, 2);

@@ -8,7 +8,7 @@ import { Auth, Conflict, Forbidden, Rejected, Unauthorized, type SessionInfo } f
 import { authRoutes, clientIp, jsonBody, me, sessions, type ApiOptions } from "./auth-api.js";
 import { ChainError } from "./chain.js";
 import { isNetworkName } from "./config.js";
-import { Concord, Invalid, NotFound, type ActionInput, type Actor, type NoteInput } from "./concord.js";
+import { Concord, Invalid, NotFound, type ActionInput, type Actor, type HoldingsPage, type NoteInput } from "./concord.js";
 import { RateLimiter, TooMany } from "./security.js";
 import type { Tenants } from "./tenants.js";
 
@@ -20,6 +20,8 @@ const KB = 1024;
 
 /** Keeps a download's name to characters every browser and header parser accepts. */
 const fileSafe = (text: string) => text.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "asset";
+/** A whole number from a query string; anything else becomes NaN, which the caller rejects by name. */
+const queryInt = (value: string) => (/^-?\d+$/.test(value) ? Number(value) : Number.NaN);
 
 export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Hono {
   const app = new Hono();
@@ -243,7 +245,18 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json(ws.assetSummary(await ws.rebuild(id(c), { defer: true })));
   });
 
-  priv.get("/assets/:id/holdings", (c) => c.json(c.var.ws.holdings(id(c), c.req.query("asOf"))));
+  priv.get("/assets/:id/holdings", (c) => {
+    const { asOf, limit, offset, after, q, sort } = c.req.query();
+    // Any paging parameter asks for one page; with none the full list comes back as before.
+    const paged = [limit, offset, after, q, sort].some((v) => v !== undefined);
+    const page: HoldingsPage = {};
+    if (limit !== undefined) page.limit = queryInt(limit);
+    if (offset !== undefined) page.offset = queryInt(offset);
+    if (after !== undefined) page.after = after;
+    if (q !== undefined) page.q = q;
+    if (sort !== undefined) page.sort = sort as HoldingsPage["sort"];
+    return c.json(c.var.ws.holdings(id(c), asOf, paged ? page : undefined));
+  });
   priv.get("/assets/:id/events", (c) => {
     const filter: { kind?: string; address?: string; limit?: number; before?: string } = {};
     const { kind, address, limit, before } = c.req.query();

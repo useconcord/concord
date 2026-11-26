@@ -276,6 +276,34 @@ function windowHours(value: number | undefined, field: string, fallback: number)
   return value;
 }
 
+/** Options for one page of `holdings()`. `after` is the last address of the previous page. */
+export interface HoldingsPage {
+  limit?: number;
+  offset?: number;
+  after?: string;
+  /** Address prefix; case does not matter. */
+  q?: string;
+  sort?: "units" | "address";
+}
+
+const DEFAULT_HOLDINGS_LIMIT = 100;
+const MAX_HOLDINGS_LIMIT = 1000;
+
+function holdingsPage(page: HoldingsPage): Required<Pick<HoldingsPage, "limit" | "offset" | "sort">> & Pick<HoldingsPage, "after" | "q"> {
+  const limit = page.limit ?? DEFAULT_HOLDINGS_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_HOLDINGS_LIMIT) {
+    throw new Invalid(`limit must be an integer between 1 and ${MAX_HOLDINGS_LIMIT}`);
+  }
+  const offset = page.offset ?? 0;
+  if (!Number.isInteger(offset) || offset < 0) throw new Invalid("offset must be a whole number");
+  if (page.after !== undefined && page.offset !== undefined) throw new Invalid("give offset or after, not both");
+  if (page.after !== undefined && !page.after) throw new Invalid("after must be an address");
+  const sort = page.sort ?? "units";
+  if (sort !== "units" && sort !== "address") throw new Invalid("sort must be units or address");
+  const q = page.q?.trim().toUpperCase();
+  return { limit, offset, sort, ...(page.after !== undefined ? { after: page.after } : {}), ...(q ? { q } : {}) };
+}
+
 const HTML_ESCAPES: Record<string, string> = {
   "&": "&amp;",
   "<": "&lt;",
@@ -1126,13 +1154,44 @@ export class Concord {
     });
   }
 
-  holdings(ref: string, asOf?: string) {
+  /**
+   * Holders of an asset at a moment. Without `page` every holder is returned (exports rely on
+   * this). With `page` the list is filtered, sorted and cut to one page; `supply` and
+   * `holderCount` always describe the whole asset, and `matched` counts holders matching `q`.
+   * Every sort ends on the address, so the order is total and pages are stable across calls.
+   */
+  holdings(ref: string, asOf?: string, page?: HoldingsPage) {
     const asset = this.asset(ref);
     const upTo = asOf ? isoTime(asOf, "asOf") : undefined;
+    const paging = page ? holdingsPage(page) : undefined;
     const state = this.state(asset, upTo);
     const ignored = new Set(asset.ignore);
-    const holders = [...state.balances]
-      .sort((a, b) => (a[1] === b[1] ? a[0].localeCompare(b[0]) : a[1] > b[1] ? -1 : 1))
+    let rows = [...state.balances].sort(
+      paging?.sort === "address"
+        ? (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+        : (a, b) => (a[1] === b[1] ? (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0) : a[1] > b[1] ? -1 : 1),
+    );
+    const holderCount = rows.length;
+    let pageInfo: { matched: number; offset: number; limit: number; next: string | null } | undefined;
+    if (paging) {
+      if (paging.q) rows = rows.filter(([address]) => address.startsWith(paging.q!));
+      const matched = rows.length;
+      let offset = paging.offset;
+      if (paging.after !== undefined) {
+        const after = paging.after;
+        const at = rows.findIndex(([address]) => address === after);
+        if (at >= 0) offset = at + 1;
+        else if (paging.sort === "address") {
+          // The holder may have left since the last page; resume at the next address instead.
+          const next = rows.findIndex(([address]) => address > after);
+          offset = next < 0 ? rows.length : next;
+        } else throw new Invalid("after must name a holder on this list; it may have sold out, so start again");
+      }
+      rows = rows.slice(offset, offset + paging.limit);
+      const end = offset + rows.length;
+      pageInfo = { matched, offset, limit: paging.limit, next: end < matched && rows.length > 0 ? rows[rows.length - 1]![0] : null };
+    }
+    const holders = rows
       .map(([address, units]) => ({
         address,
         units: formatUnits(units, asset.decimals),
@@ -1153,10 +1212,11 @@ export class Concord {
       asOf: upTo ?? asset.syncedAt ?? null,
       ledger: state.ledger,
       supply: formatUnits(state.supply, asset.decimals),
-      holderCount: holders.length,
+      holderCount,
       incomplete: state.incomplete,
       beforeHistory,
       warnings,
+      ...(pageInfo ? { page: pageInfo } : {}),
       holders,
     };
   }
