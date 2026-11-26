@@ -381,6 +381,28 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json(c.var.ws.setNote(id(c), input.scope, input.key, note, c.var.actor));
   });
 
+  // Current breaks from every scope, with their sign-off and owner. `assignee` takes a member id,
+  // or "none" for the breaks nobody owns.
+  priv.get("/assets/:id/breaks", (c) => c.json(c.var.ws.breaks(id(c), c.req.query("assignee") || undefined)));
+
+  priv.put("/assets/:id/notes/assignee", async (c) => {
+    const { ws, session } = c.var;
+    // Resolve the asset first: another workspace's id is a 404, never a hint about its members.
+    const asset = ws.asset(id(c));
+    const input = await jsonBody<{ scope: string; key: string; assigneeId?: string | null }>(c);
+    if (!input.scope || typeof input.key !== "string" || !input.key) throw new Invalid("scope and key are required");
+    // The assignee is a member of this workspace or nobody: the route never trusts a label or a
+    // user from elsewhere, and null clears the assignment.
+    let assignee: Actor | null = null;
+    if (input.assigneeId !== undefined && input.assigneeId !== null) {
+      const member =
+        typeof input.assigneeId === "string" ? auth.members(session.org.id).find((m) => m.id === input.assigneeId) : undefined;
+      if (!member) throw new Invalid("assignee must be a member of this workspace");
+      assignee = { id: member.id, label: `${member.name} <${member.email}>` };
+    }
+    return c.json(ws.assignBreak(asset.id, input.scope, input.key, assignee));
+  });
+
   priv.get("/assets/:id/notes/history", (c) => {
     return c.json(c.var.ws.noteHistory(id(c), c.req.query("scope") || undefined, c.req.query("key") || undefined));
   });

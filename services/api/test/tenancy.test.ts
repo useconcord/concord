@@ -31,6 +31,7 @@ const ORG_MIGRATION_DIGESTS = [
   "a4ad7e98aa4e92355d44afc19bae0ab7a8ea76063398f5f4f56eadc7b7690073",
   "41bc0d0c1c9a8c84109f284734b7f2892ddf93606c878a7fe4985355344bc6b2",
   "0182ab60eee2caac4eaf616ae083065f7e05b8e2d68980514545950eb56cd80f",
+  "598b1578ce4051f043832d5b91d0df06043afb64e1c6a0fad190a2a733174155",
 ];
 const CONTROL_MIGRATION_DIGESTS = ["ba25bc5419cfcc376d2e7ff027845b2da4b789d9c7e966424b70cdfbbb90a422"];
 
@@ -129,6 +130,8 @@ function probes(s: Seeded): Record<string, Probe> {
     "GET /api/assets/:id/controls": p("GET", `/api/assets/${id}/controls`),
     "PUT /api/assets/:id/notes": p("PUT", `/api/assets/${id}/notes`, { scope: "recon", key: "k", fingerprint: "f", status: "resolved", note: "n" }),
     "GET /api/assets/:id/notes/history": p("GET", `/api/assets/${id}/notes/history`),
+    "PUT /api/assets/:id/notes/assignee": p("PUT", `/api/assets/${id}/notes/assignee`, { scope: "recon", key: "k", assigneeId: s.a.userId }),
+    "GET /api/assets/:id/breaks": p("GET", `/api/assets/${id}/breaks`),
     "GET /api/assets/:id/export": p("GET", `/api/assets/${id}/export`),
   };
 }
