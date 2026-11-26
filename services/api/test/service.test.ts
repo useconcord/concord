@@ -58,18 +58,32 @@ describe("decodeEvent", () => {
     });
     expect(decodeEvent(raw([sym("mint"), addr(b), str(`FUND:${a}`)], i128(7n)))).toMatchObject({ to: b, amount: 7n });
     expect(decodeEvent(raw([sym("clawback"), addr(b), str(`FUND:${a}`)], i128(7n)))).toMatchObject({ from: b });
-    const authFalse = decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(false).toXDR("base64")));
+    const authFalse = decodeEvent(
+      raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(false).toXDR("base64")),
+    );
     expect(authFalse).toMatchObject({ kind: "set_authorized", from: b, authorized: false, amount: 0n });
-    const authTrue = decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(true).toXDR("base64")));
+    const authTrue = decodeEvent(
+      raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(true).toXDR("base64")),
+    );
     expect(authTrue).toMatchObject({ kind: "set_authorized", from: b, authorized: true, amount: 0n });
     expect(decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], str("false")))).toBeUndefined();
     expect(decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], i128(1n)))).toBeUndefined();
-    expect(decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(undefined, { type: "void" }).toXDR("base64")))).toBeUndefined();
+    expect(
+      decodeEvent(
+        raw(
+          [sym("set_authorized"), addr(b), str(`FUND:${a}`)],
+          nativeToScVal(undefined, { type: "void" }).toXDR("base64"),
+        ),
+      ),
+    ).toBeUndefined();
   });
 
   it("takes the subject from the last address when an admin leads, and reads muxed values", () => {
     expect(decodeEvent(raw([sym("mint"), addr(a), addr(b), str(`FUND:${a}`)], i128(7n)))).toMatchObject({ to: b });
-    const muxed = nativeToScVal({ amount: 9n, to_muxed_id: 42n }, { type: { amount: ["symbol", "i128"], to_muxed_id: ["symbol", "u64"] } });
+    const muxed = nativeToScVal(
+      { amount: 9n, to_muxed_id: 42n },
+      { type: { amount: ["symbol", "i128"], to_muxed_id: ["symbol", "u64"] } },
+    );
     expect(decodeEvent(raw([sym("transfer"), addr(a), addr(b)], muxed.toXDR("base64")))).toMatchObject({ amount: 9n });
   });
 
@@ -307,7 +321,12 @@ describe("Concord", () => {
   beforeEach(async () => {
     chain = new FakeChain();
     concord = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain } });
-    const asset = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1, ignore: [treasury] });
+    const asset = await concord.watchAsset({
+      network: "testnet",
+      asset: `FUND:${issuer}`,
+      fromLedger: 1,
+      ignore: [treasury],
+    });
     assetId = asset.id;
     chain.push(assetId, "set_authorized", 2, { from: h1, authorized: true });
     chain.push(assetId, "mint", 3, { to: h1, amount: u(100) });
@@ -321,9 +340,7 @@ describe("Concord", () => {
   async function expectPagedSync(count: number, calls: number) {
     const code = `PAGE${count}`;
     const asset = await concord.watchAsset({ network: "testnet", asset: `${code}:${issuer}`, fromLedger: 1 });
-    const pushed = Array.from({ length: count }, () =>
-      chain.push(asset.id, "mint", 40, { to: h3, amount: 1n }).id,
-    );
+    const pushed = Array.from({ length: count }, () => chain.push(asset.id, "mint", 40, { to: h3, amount: 1n }).id);
 
     chain.calls = 0;
     expect(await concord.sync(code)).toEqual({ added: count });
@@ -699,11 +716,21 @@ describe("Concord", () => {
     await concord.sync("FUND");
     const brk = concord.controls("FUND").breaks.find((b) => b.key === "UNEXECUTED_INSTRUCTION:I7")!;
     expect(brk.status).toBe("open");
-    concord.setNote("FUND", "controls", brk.key, { fingerprint: brk.fingerprint, status: "resolved", note: "cancelled off-chain" });
-    expect(concord.controls("FUND").breaks.find((b) => b.key === brk.key)).toMatchObject({ status: "resolved", noteStale: false });
+    concord.setNote("FUND", "controls", brk.key, {
+      fingerprint: brk.fingerprint,
+      status: "resolved",
+      note: "cancelled off-chain",
+    });
+    expect(concord.controls("FUND").breaks.find((b) => b.key === brk.key)).toMatchObject({
+      status: "resolved",
+      noteStale: false,
+    });
     // The same ref is re-imported for a different account: a different instruction, so open again.
     concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI7,freeze,${h1},,${at(19)}\n`);
-    expect(concord.controls("FUND").breaks.find((b) => b.key === brk.key)).toMatchObject({ status: "open", noteStale: true });
+    expect(concord.controls("FUND").breaks.find((b) => b.key === brk.key)).toMatchObject({
+      status: "open",
+      noteStale: true,
+    });
   });
 
   it("keeps every sign-off change, with who and when, and puts it in the audit pack", async () => {
@@ -958,7 +985,9 @@ describe("Concord", () => {
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
     await concord.watchAsset({ network: "testnet", asset: `OTHER:${issuer}`, fromLedger: 1 });
 
-    await expect(concord.reconcile("OTHER", reg.registerId)).rejects.toThrow(new NotFound("no register imported for this asset"));
+    await expect(concord.reconcile("OTHER", reg.registerId)).rejects.toThrow(
+      new NotFound("no register imported for this asset"),
+    );
     await expect(concord.reconcile("FUND", 999)).rejects.toThrow(new NotFound("no register imported for this asset"));
   });
 
@@ -971,21 +1000,45 @@ describe("Concord", () => {
 
     const day2 = concord.importRegister("FUND", { csv, asOf: at(25) });
     const run2 = await concord.reconcile("FUND", day2.registerId);
-    expect(run2.breaks.map((b) => b.type).sort()).toEqual(["QUANTITY_MISMATCH", "QUANTITY_MISMATCH", "STATUS_MISMATCH"]);
+    expect(run2.breaks.map((b) => b.type).sort()).toEqual([
+      "QUANTITY_MISMATCH",
+      "QUANTITY_MISMATCH",
+      "STATUS_MISMATCH",
+    ]);
     const b1 = run2.breaks.find((b) => b.address === h1)!;
-    expect(b1).toMatchObject({ chainUnits: "90", registerUnits: "100", difference: "-10", firstSeen: at(25), status: "open" });
+    expect(b1).toMatchObject({
+      chainUnits: "90",
+      registerUnits: "100",
+      difference: "-10",
+      firstSeen: at(25),
+      status: "open",
+    });
 
     // Signed off, the break stays signed off while the numbers hold…
-    concord.setNote("FUND", "recon", b1.key, { fingerprint: b1.fingerprint, status: "acknowledged", note: "T+1 timing" }, { id: "u1", label: "ops" });
+    concord.setNote(
+      "FUND",
+      "recon",
+      b1.key,
+      { fingerprint: b1.fingerprint, status: "acknowledged", note: "T+1 timing" },
+      { id: "u1", label: "ops" },
+    );
     const day3 = concord.importRegister("FUND", { csv, asOf: at(26) });
     const run3 = await concord.reconcile("FUND", day3.registerId);
-    expect(run3.breaks.find((b) => b.address === h1)).toMatchObject({ status: "acknowledged", firstSeen: at(25), note: "T+1 timing", noteAuthor: "ops" });
+    expect(run3.breaks.find((b) => b.address === h1)).toMatchObject({
+      status: "acknowledged",
+      firstSeen: at(25),
+      note: "T+1 timing",
+      noteAuthor: "ops",
+    });
     expect(run3.openBreaks).toBe(2);
 
     // …and reopens when they move.
     const day4 = concord.importRegister("FUND", { csv, asOf: at(40) });
     const run4 = await concord.reconcile("FUND", day4.registerId);
-    expect(run4.breaks.find((b) => b.address === h2 && b.type === "QUANTITY_MISMATCH")).toMatchObject({ chainUnits: "55", firstSeen: at(25) });
+    expect(run4.breaks.find((b) => b.address === h2 && b.type === "QUANTITY_MISMATCH")).toMatchObject({
+      chainUnits: "55",
+      firstSeen: at(25),
+    });
     chain.latest = 200;
     chain.push(assetId, "transfer", 150, { from: h1, to: h2, amount: u(1) });
     const day5 = concord.importRegister("FUND", { csv, asOf: at(160) });
@@ -1253,7 +1306,10 @@ describe("Concord", () => {
       expect(assetRows()).toBe(before);
     }
     // It is the request for opening balances that is refused, not the token.
-    expect(await concord.watchAsset({ ...watch, baseline: false })).toMatchObject({ id: contractId, startMode: "window" });
+    expect(await concord.watchAsset({ ...watch, baseline: false })).toMatchObject({
+      id: contractId,
+      startMode: "window",
+    });
 
     // The suite sets no baselineResult, so an opt-out that still asked for opening balances would
     // fail with "no baseline" instead of landing in window mode.
@@ -1266,7 +1322,10 @@ describe("Concord", () => {
   it("does not flag an instruction from before a baseline asset's indexed history as never executed", async () => {
     const other = key();
     chain.latest = 200;
-    chain.baselineResult = { ledger: 150, openings: new Map([[h1, { amount: u(70), authorized: true, asOfLedger: 150 }]]) };
+    chain.baselineResult = {
+      ledger: 150,
+      openings: new Map([[h1, { amount: u(70), authorized: true, asOfLedger: 150 }]]),
+    };
     await concord.watchAsset({ network: "testnet", asset: `OLD:${other}` });
     // Issued long before the watch started: its window ended before Concord could have seen it.
     concord.importInstructions("OLD", `ref,type,account,issued_at\nI-OLD,freeze,${h1},2025-01-01T00:00:00Z\n`);
@@ -1511,7 +1570,9 @@ describe("Concord", () => {
       payer: silentPayer,
     });
     expect(action.result!.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining(`Payer ${silentPayer} has no recorded flows in the action window`)]),
+      expect.arrayContaining([
+        expect.stringContaining(`Payer ${silentPayer} has no recorded flows in the action window`),
+      ]),
     );
   });
 
@@ -1547,9 +1608,7 @@ describe("Concord", () => {
     expect(action.snapshot).toBeNull();
     expect(action.state).toBe("scheduled");
     expect(action.result).not.toBeNull();
-    expect(action.result!.warnings).toEqual([
-      expect.stringContaining("earlier than history start"),
-    ]);
+    expect(action.result!.warnings).toEqual([expect.stringContaining("earlier than history start")]);
 
     // reconcile() on OLD with asOf earlier than history start (e.g. at(5)) carries warning
     const regEarly = concord.importRegister("OLD", {
@@ -1557,16 +1616,12 @@ describe("Concord", () => {
       asOf: at(5),
     });
     const runEarly = await concord.reconcile("OLD", regEarly.registerId);
-    expect(runEarly.warnings).toEqual([
-      expect.stringContaining("earlier than history start"),
-    ]);
+    expect(runEarly.warnings).toEqual([expect.stringContaining("earlier than history start")]);
 
     // holdings() on OLD with asOf earlier than history start carries beforeHistory flag and warning
     const holdingsEarly = concord.holdings("OLD", at(5));
     expect(holdingsEarly.beforeHistory).toBe(true);
-    expect(holdingsEarly.warnings).toEqual([
-      expect.stringContaining("earlier than history start"),
-    ]);
+    expect(holdingsEarly.warnings).toEqual([expect.stringContaining("earlier than history start")]);
 
     // holdings() with asOf after history start has beforeHistory: false and empty warnings
     const holdingsNormal = concord.holdings("OLD", at(160));
@@ -2205,16 +2260,30 @@ describe("Concord", () => {
 
   it("maps SQLite busy and full errors to distinct user-facing messages (#534)", () => {
     const errBusyCode = Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
-    const errBusyNum = Object.assign(new Error("database is locked"), { code: "ERR_SQLITE_ERROR", errcode: 5, errstr: "busy" });
-    const errLocked = Object.assign(new Error("database table is locked"), { code: "ERR_SQLITE_ERROR", errcode: 6, errstr: "database table is locked" });
+    const errBusyNum = Object.assign(new Error("database is locked"), {
+      code: "ERR_SQLITE_ERROR",
+      errcode: 5,
+      errstr: "busy",
+    });
+    const errLocked = Object.assign(new Error("database table is locked"), {
+      code: "ERR_SQLITE_ERROR",
+      errcode: 6,
+      errstr: "database table is locked",
+    });
     const errFullCode = Object.assign(new Error("SQLITE_FULL: database or disk is full"), { code: "SQLITE_FULL" });
-    const errFullNum = Object.assign(new Error("database or disk is full"), { code: "ERR_SQLITE_ERROR", errcode: 13, errstr: "database or disk is full" });
+    const errFullNum = Object.assign(new Error("database or disk is full"), {
+      code: "ERR_SQLITE_ERROR",
+      errcode: 13,
+      errstr: "database or disk is full",
+    });
     const errEnospc = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
     const errGeneric = new Error("something unexpected failed");
 
     const logged: unknown[] = [];
     const origError = console.error;
-    console.error = (...args: unknown[]) => { logged.push(args[0]); };
+    console.error = (...args: unknown[]) => {
+      logged.push(args[0]);
+    };
     try {
       expect(describeFailure(errBusyCode)).toBe("[db_locked] Database is locked.");
       expect(describeFailure(errBusyNum)).toBe("[db_locked] Database is locked.");
@@ -2255,9 +2324,9 @@ describe("Concord", () => {
   it("rejects watching an asset outside known when known is set (#509)", async () => {
     chain.known = new Set();
     const badIssuer = key();
-    await expect(
-      concord.watchAsset({ network: "testnet", asset: `FUND:${badIssuer}`, fromLedger: 1 }),
-    ).rejects.toThrow("testnet has no asset FUND from that issuer");
+    await expect(concord.watchAsset({ network: "testnet", asset: `FUND:${badIssuer}`, fromLedger: 1 })).rejects.toThrow(
+      "testnet has no asset FUND from that issuer",
+    );
     chain.known = undefined;
   });
 
@@ -2295,10 +2364,20 @@ describe("Concord", () => {
     concord.importJournal("FUND", `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\n`);
     concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI1,freeze,${h2},,${at(19)}\n`);
     const action = await concord.createAction("FUND", { type: "split", recordTime: at(35), num: "2", den: "1" });
-    concord.setNote("FUND", "recon", run.breaks[0]!.key, { fingerprint: run.breaks[0]!.fingerprint, status: "resolved", note: "x" });
+    concord.setNote("FUND", "recon", run.breaks[0]!.key, {
+      fingerprint: run.breaks[0]!.fingerprint,
+      status: "resolved",
+      note: "x",
+    });
     const actionBreak = action.result!.breaks[0]!;
-    concord.setNote("FUND", `action:${action.id}`, actionBreak.key, { fingerprint: actionBreak.fingerprint, status: "resolved", note: "x" });
-    expect(() => concord.setNote("FUND", "action:999", "k", { fingerprint: "f", status: "resolved", note: "x" })).toThrow(/scope/);
+    concord.setNote("FUND", `action:${action.id}`, actionBreak.key, {
+      fingerprint: actionBreak.fingerprint,
+      status: "resolved",
+      note: "x",
+    });
+    expect(() =>
+      concord.setNote("FUND", "action:999", "k", { fingerprint: "f", status: "resolved", note: "x" }),
+    ).toThrow(/scope/);
 
     concord.deleteRegister("FUND", reg.registerId);
     expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM register_positions")!.n).toBe(0);
@@ -2306,11 +2385,27 @@ describe("Concord", () => {
 
     await concord.unwatchAsset("FUND");
     const tables = concord.db
-      .all<{ name: string }>("SELECT m.name FROM sqlite_master m JOIN pragma_table_info(m.name) c ON c.name = 'asset_id' WHERE m.type = 'table'")
+      .all<{ name: string }>(
+        "SELECT m.name FROM sqlite_master m JOIN pragma_table_info(m.name) c ON c.name = 'asset_id' WHERE m.type = 'table'",
+      )
       .map((t) => t.name);
-    expect(tables).toEqual(expect.arrayContaining(["events", "openings", "registers", "journal", "instructions", "runs", "actions", "break_notes"]));
+    expect(tables).toEqual(
+      expect.arrayContaining([
+        "events",
+        "openings",
+        "registers",
+        "journal",
+        "instructions",
+        "runs",
+        "actions",
+        "break_notes",
+      ]),
+    );
     for (const table of tables) {
-      expect(concord.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE asset_id = ?`, assetId)!.n, table).toBe(0);
+      expect(
+        concord.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE asset_id = ?`, assetId)!.n,
+        table,
+      ).toBe(0);
     }
     expect(() => concord.asset("FUND")).toThrow(/not watched/);
     // The same asset can be watched again from scratch.
@@ -2393,7 +2488,12 @@ describe("Concord", () => {
   });
 
   it("rebuild moves an asset watched from a named ledger over to opening balances", async () => {
-    expect(startColumns(assetId)).toEqual({ start_mode: "ledger", start_ledger: 1, baseline_ledger: null, state: "ready" });
+    expect(startColumns(assetId)).toEqual({
+      start_mode: "ledger",
+      start_ledger: 1,
+      baseline_ledger: null,
+      state: "ready",
+    });
     chain.latest = 300;
     chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
     await concord.rebuild("FUND");
@@ -2408,7 +2508,12 @@ describe("Concord", () => {
   it("rebuild gives a contract token a fresh window, and never opening balances", async () => {
     const contractId = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
     await concord.watchAsset({ network: "testnet", asset: contractId, decimals: 7, fromLedger: 5 });
-    expect(startColumns(contractId)).toEqual({ start_mode: "ledger", start_ledger: 5, baseline_ledger: null, state: "ready" });
+    expect(startColumns(contractId)).toEqual({
+      start_mode: "ledger",
+      start_ledger: 5,
+      baseline_ledger: null,
+      state: "ready",
+    });
     // Opening balances are on offer, and are not for this asset: it has no issuer to ask about.
     chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
     chain.oldest = 100;
@@ -2421,7 +2526,9 @@ describe("Concord", () => {
       baseline_ledger: null,
       state: "ready",
     });
-    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM openings WHERE asset_id = ?", contractId)!.n).toBe(0);
+    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM openings WHERE asset_id = ?", contractId)!.n).toBe(
+      0,
+    );
   });
 
   it("a deferred rebuild clears the indexed history and its error at once, and keeps every book", async () => {
@@ -2434,18 +2541,38 @@ describe("Concord", () => {
     // Every kind of book against it (reconciling indexes the transfer), and a failure on record.
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(315) });
     const run = await concord.reconcile("FUND", reg.registerId);
-    concord.importJournal("FUND", `ref,date,type,from_account,to_account,units\nJ1,${at(310)},transfer,${h1},${h2},2\n`);
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(310)},transfer,${h1},${h2},2\n`,
+    );
     concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI1,freeze,${h2},,${at(312)}\n`);
     await concord.createAction("FUND", { type: "split", recordTime: at(312), num: "2", den: "1" });
     const brk = run.breaks[0]!;
     concord.setNote("FUND", "recon", brk.key, { fingerprint: brk.fingerprint, status: "resolved", note: "x" });
-    concord.db.write("UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?", "connection reset", at(316), assetId);
+    concord.db.write(
+      "UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?",
+      "connection reset",
+      at(316),
+      assetId,
+    );
 
     const rows = (table: string) => concord.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`)!.n;
-    const books = ["registers", "register_positions", "journal", "instructions", "runs", "actions", "break_notes", "break_note_history"];
+    const books = [
+      "registers",
+      "register_positions",
+      "journal",
+      "instructions",
+      "runs",
+      "actions",
+      "break_notes",
+      "break_note_history",
+    ];
     const bookRows = () => Object.fromEntries(books.map((table) => [table, rows(table)]));
     const before = bookRows();
-    expect(Object.values(before).every((n) => n > 0), JSON.stringify(before)).toBe(true);
+    expect(
+      Object.values(before).every((n) => n > 0),
+      JSON.stringify(before),
+    ).toBe(true);
     expect([rows("events"), rows("openings")]).toEqual([1, 1]);
     expect(concord.asset("FUND")).toMatchObject({
       cursor: expect.any(String),
@@ -2498,7 +2625,12 @@ describe("Concord", () => {
     // Let the deferred pass go and wait for it: sync() hands back the pass already in flight.
     release();
     await concord.sync("FUND");
-    expect(startColumns(assetId)).toEqual({ start_mode: "baseline", start_ledger: 319, baseline_ledger: 318, state: "ready" });
+    expect(startColumns(assetId)).toEqual({
+      start_mode: "baseline",
+      start_ledger: 319,
+      baseline_ledger: 318,
+      state: "ready",
+    });
     expect(concord.asset("FUND")).toMatchObject({ syncedLedger: 320, cursor: expect.any(String) });
     expect(concord.asset("FUND").syncError).toBeUndefined();
     expect([rows("events"), rows("openings")]).toEqual([0, 2]);
@@ -2686,6 +2818,183 @@ describe("Concord", () => {
     expect(text.split("\n").filter((line: string) => line.includes(`split ${actionId}`))).toEqual([]);
   });
 
+  it("edits the terms of a scheduled corporate action before its snapshot is taken", async () => {
+    const actor = { id: "user_123", label: "operator@example.com" };
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(500),
+      ratePerUnit: "0.1",
+    });
+    expect(action.state).toBe("scheduled");
+    expect(action.snapshot).toBeNull();
+    expect(action.label).toBe("Dividend 0.1 per unit");
+
+    // Update rate and execution window
+    const updated = await concord.updateAction(
+      action.id,
+      {
+        ratePerUnit: "0.25",
+        windowTo: at(600),
+        windowFromLedger: 450,
+        windowToLedger: 550,
+      },
+      actor,
+    );
+
+    expect(updated.state).toBe("scheduled");
+    expect(updated.label).toBe("Dividend 0.25 per unit");
+    expect(updated.params).toMatchObject({
+      ratePerUnit: "0.25",
+      windowTo: at(600),
+      windowFromLedger: 450,
+      windowToLedger: 550,
+    });
+
+    // Change log verification
+    const history = concord.actionHistory(action.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({
+      actionId: action.id,
+      author: actor.label,
+      authorId: actor.id,
+      label: "Dividend 0.25 per unit",
+    });
+    expect(concord.actionChanges(action.id)).toEqual(history);
+
+    // Update with custom label
+    const custom = await concord.updateAction(action.id, { label: "Special Interim Dividend" }, actor);
+    expect(custom.label).toBe("Special Interim Dividend");
+
+    // Subsequent term update preserves custom label
+    const preserved = await concord.updateAction(action.id, { ratePerUnit: "0.35" });
+    expect(preserved.label).toBe("Special Interim Dividend");
+    expect(preserved.params).toMatchObject({ ratePerUnit: "0.35" });
+
+    const updatedHistory = concord.actionHistory(action.id);
+    expect(updatedHistory).toHaveLength(3);
+  });
+
+  it("edits the ratio of a scheduled split or redemption", async () => {
+    const split = await concord.createAction("FUND", {
+      type: "split",
+      recordTime: at(500),
+      num: "2",
+      den: "1",
+    });
+    expect(split.state).toBe("scheduled");
+    expect(split.label).toBe("Split 2:1");
+
+    const updatedSplit = await concord.updateAction(split.id, { num: "3", den: "2" });
+    expect(updatedSplit.label).toBe("Split 3:2");
+    expect(updatedSplit.params).toMatchObject({ num: "3", den: "2" });
+
+    const redemption = await concord.createAction("FUND", {
+      type: "redemption",
+      recordTime: at(500),
+      num: "1",
+      den: "5",
+    });
+    expect(redemption.state).toBe("scheduled");
+    expect(redemption.label).toBe("Redemption 1/5");
+
+    const updatedRedemption = await concord.updateAction(redemption.id, { num: "2", den: "5" });
+    expect(updatedRedemption.label).toBe("Redemption 2/5");
+    expect(updatedRedemption.params).toMatchObject({ num: "2", den: "5" });
+  });
+
+  it("throws Invalid('already snapshotted') when updating an action whose snapshot has been taken", async () => {
+    // Action created with recordTime in the past is snapshotted immediately
+    const pastAction = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(5),
+      ratePerUnit: "0.1",
+    });
+    expect(pastAction.snapshot).not.toBeNull();
+
+    await expect(concord.updateAction(pastAction.id, { ratePerUnit: "0.2" })).rejects.toThrow(
+      new Invalid("already snapshotted"),
+    );
+
+    // Action scheduled in future gets snapshotted once chain passes its recordTime
+    const scheduled = await concord.createAction("FUND", {
+      type: "split",
+      recordTime: at(500),
+      num: "2",
+      den: "1",
+    });
+    expect(scheduled.snapshot).toBeNull();
+
+    // Editable before snapshot
+    await expect(concord.updateAction(scheduled.id, { num: "3", den: "1" })).resolves.toBeDefined();
+
+    // Advance chain past recordTime and reconcile
+    chain.latest = 600;
+    await concord.sync("FUND");
+    await concord.reconcileDue();
+
+    const checked = concord.action(scheduled.id);
+    expect(checked.snapshot).not.toBeNull();
+
+    // After snapshot, update throws Invalid('already snapshotted')
+    await expect(concord.updateAction(scheduled.id, { num: "4", den: "1" })).rejects.toThrow(
+      new Invalid("already snapshotted"),
+    );
+  });
+
+  it("enforces the same validation rules on updateAction as createAction", async () => {
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(500),
+      ratePerUnit: "0.1",
+    });
+
+    await expect(concord.updateAction(action.id, { ratePerUnit: "abc" })).rejects.toThrow(
+      new Invalid("dividend needs ratePerUnit as a decimal"),
+    );
+    await expect(concord.updateAction(action.id, { windowFromLedger: 0 })).rejects.toThrow(
+      new Invalid("windowFromLedger must be a positive ledger sequence number"),
+    );
+    await expect(concord.updateAction(action.id, { windowToLedger: -1 })).rejects.toThrow(
+      new Invalid("windowToLedger must be a positive ledger sequence number"),
+    );
+    await expect(concord.updateAction(action.id, { windowTo: "garbage" })).rejects.toThrow(
+      /windowTo is not a valid date/,
+    );
+    await expect(concord.updateAction(action.id, { exclude: ["not-an-address"] })).rejects.toThrow(
+      /exclude contains an invalid Stellar address/,
+    );
+    await expect(concord.updateAction(action.id, { rounding: "random" as unknown as "floor" })).rejects.toThrow(
+      new Invalid("rounding must be floor or half-up"),
+    );
+
+    const split = await concord.createAction("FUND", {
+      type: "split",
+      recordTime: at(500),
+      num: "2",
+      den: "1",
+    });
+    await expect(concord.updateAction(split.id, { num: "0" })).rejects.toThrow(
+      new Invalid("num and den must be positive"),
+    );
+    await expect(concord.updateAction(split.id, { num: "abc" })).rejects.toThrow(
+      new Invalid("split needs whole-number num and den"),
+    );
+
+    const redemption = await concord.createAction("FUND", {
+      type: "redemption",
+      recordTime: at(500),
+      num: "1",
+      den: "5",
+    });
+    await expect(concord.updateAction(redemption.id, { num: "10", den: "5" })).rejects.toThrow(
+      new Invalid("a redemption cannot exceed the holding"),
+    );
+
+    await expect(concord.updateAction(999999, { ratePerUnit: "0.5" })).rejects.toThrow(
+      new NotFound("corporate action 999999 not found"),
+    );
+  });
+
   it("refuses a code shared by two watched assets and a pay asset from another network", async () => {
     await concord.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
     expect(() => concord.asset("FUND")).toThrow(/more than one/);
@@ -2758,7 +3067,12 @@ describe("Concord", () => {
     ).rejects.toThrow(new Invalid("classic assets always carry 7 decimals"));
 
     // Classic asset accepts decimals === 7 and undefined
-    const c1 = await concord.watchAsset({ network: "testnet", asset: `OK1:${classicIssuer}`, decimals: 7, fromLedger: 1 });
+    const c1 = await concord.watchAsset({
+      network: "testnet",
+      asset: `OK1:${classicIssuer}`,
+      decimals: 7,
+      fromLedger: 1,
+    });
     expect(c1.decimals).toBe(7);
     const c2 = await concord.watchAsset({ network: "testnet", asset: `OK2:${classicIssuer}`, fromLedger: 1 });
     expect(c2.decimals).toBe(7);
@@ -2837,7 +3151,12 @@ describe("Concord", () => {
     ).rejects.toThrow(`ignore contains an invalid Stellar address: "${invalidAddr}"`);
 
     // watchAsset accepts valid G and C addresses
-    const watched = await concord.watchAsset({ network: "testnet", asset: `GOOD:${key()}`, fromLedger: 1, ignore: [validG, validC] });
+    const watched = await concord.watchAsset({
+      network: "testnet",
+      asset: `GOOD:${key()}`,
+      fromLedger: 1,
+      ignore: [validG, validC],
+    });
     expect(watched.ignore).toEqual([validG, validC]);
 
     // updateAsset rejects invalid address and names it
@@ -2923,7 +3242,12 @@ describe("Concord", () => {
     await ws.sync("FUND");
     expect(ws.asset("FUND")).toMatchObject({ state: "ready", baselineLedger: 50 });
     await ws.unwatchAsset("FUND");
-    const asset = await ws.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1, ignore: [treasury] });
+    const asset = await ws.watchAsset({
+      network: "testnet",
+      asset: `FUND:${issuer}`,
+      fromLedger: 1,
+      ignore: [treasury],
+    });
     h.chain.push(asset.id, "mint", 3, { to: h1, amount: u(100) });
     h.chain.push(asset.id, "mint", 3, { to: h2, amount: u(50) });
 
@@ -2941,7 +3265,14 @@ describe("Concord", () => {
 
     const noted = await client.call("/api/assets/FUND/notes", {
       method: "PUT",
-      body: { scope: "recon", key: run.breaks[0]!.key, fingerprint: run.breaks[0]!.fingerprint, status: "resolved", note: "register corrected", author: "CEO" },
+      body: {
+        scope: "recon",
+        key: run.breaks[0]!.key,
+        fingerprint: run.breaks[0]!.fingerprint,
+        status: "resolved",
+        note: "register corrected",
+        author: "CEO",
+      },
     });
     expect(noted.status).toBe(200);
     const trail = await client.json<Array<{ key: string; status: string; note: string }>>(
@@ -3096,7 +3427,10 @@ describe("Concord", () => {
     );
     expect(res2).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 0 });
 
-    const rows = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    const rows = concord.db.all<{ ref: string; units: string }>(
+      "SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref",
+      assetId,
+    );
     expect(rows).toEqual([
       { ref: "J1", units: "1000000000" },
       { ref: "J2", units: "700000000" },
@@ -3119,7 +3453,10 @@ describe("Concord", () => {
     );
     expect(res).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 2 });
 
-    const rows = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    const rows = concord.db.all<{ ref: string; units: string }>(
+      "SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref",
+      assetId,
+    );
     expect(rows).toEqual([
       { ref: "J2", units: "800000000" },
       { ref: "J4", units: "300000000" },
@@ -3138,7 +3475,10 @@ describe("Concord", () => {
     // Without allowPartial: throws and does NOT wipe existing rows
     expect(() => concord.importJournal("FUND", badCsv, { mode: "replace" })).toThrow(/parse error/i);
 
-    const rowsAfterFail = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    const rowsAfterFail = concord.db.all<{ ref: string; units: string }>(
+      "SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref",
+      assetId,
+    );
     expect(rowsAfterFail).toEqual([
       { ref: "J2", units: "800000000" },
       { ref: "J4", units: "300000000" },
@@ -3151,10 +3491,11 @@ describe("Concord", () => {
     expect(resPartial.replaced).toBe(1);
     expect(resPartial.removed).toBe(1);
 
-    const rowsAfterPartial = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
-    expect(rowsAfterPartial).toEqual([
-      { ref: "J2", units: "990000000" },
-    ]);
+    const rowsAfterPartial = concord.db.all<{ ref: string; units: string }>(
+      "SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref",
+      assetId,
+    );
+    expect(rowsAfterPartial).toEqual([{ ref: "J2", units: "990000000" }]);
   });
 
   it("handles replace via API endpoint /assets/:id/journal (#540)", async () => {
@@ -3165,20 +3506,26 @@ describe("Concord", () => {
     const id = asset.id;
 
     // Initial import
-    const res1 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(`/api/assets/${id}/journal`, {
-      body: {
-        csv: `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},10\nJ2,${at(3)},issue,,${h2},20\n`,
+    const res1 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(
+      `/api/assets/${id}/journal`,
+      {
+        body: {
+          csv: `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},10\nJ2,${at(3)},issue,,${h2},20\n`,
+        },
       },
-    });
+    );
     expect(res1).toMatchObject({ entries: 2, added: 2, replaced: 0, removed: 0 });
 
     // Replace via API
-    const res2 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(`/api/assets/${id}/journal`, {
-      body: {
-        csv: `ref,date,type,from_account,to_account,units\nJ2,${at(3)},issue,,${h2},25\nJ3,${at(4)},issue,,${h1},30\n`,
-        mode: "replace",
+    const res2 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(
+      `/api/assets/${id}/journal`,
+      {
+        body: {
+          csv: `ref,date,type,from_account,to_account,units\nJ2,${at(3)},issue,,${h2},25\nJ3,${at(4)},issue,,${h1},30\n`,
+          mode: "replace",
+        },
       },
-    });
+    );
     expect(res2).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 1 });
   });
 
@@ -3995,7 +4342,9 @@ describe("README CLI examples", () => {
   it("names every flag the README examples pass", () => {
     for (const line of examples) {
       for (const flag of line.match(/--[\w-]+/g) ?? []) {
-        expect(usageFlags.has(flag), `README example passes "${flag}", but the CLI usage text does not name it`).toBe(true);
+        expect(usageFlags.has(flag), `README example passes "${flag}", but the CLI usage text does not name it`).toBe(
+          true,
+        );
       }
     }
   });

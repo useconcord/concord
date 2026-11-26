@@ -77,6 +77,10 @@ describe("schema cascade deletion", () => {
       VALUES (1, 'A', 'type', 'label', '2026-01-01', '{}', '2026-01-01'),
              (2, 'B', 'type', 'label', '2026-01-01', '{}', '2026-01-01');
 
+      INSERT INTO action_history (id, action_id, asset_id, label, record_time, params, at)
+      VALUES (1, 1, 'A', 'label', '2026-01-01', '{}', '2026-01-01'),
+             (2, 2, 'B', 'label', '2026-01-01', '{}', '2026-01-01');
+
       INSERT INTO break_notes (asset_id, scope, key, fingerprint, status, note, updated_at)
       VALUES ('A', 'scope', 'kA', 'fp', 'open', 'note', '2026-01-01'),
              ('B', 'scope', 'kB', 'fp', 'open', 'note', '2026-01-01');

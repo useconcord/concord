@@ -144,6 +144,8 @@ export interface ActionInput {
   };
 }
 
+export type ActionPatch = Partial<ActionInput>;
+
 export interface NoteInput {
   fingerprint: string;
   status: "open" | "acknowledged" | "resolved";
@@ -1455,7 +1457,13 @@ export class Concord {
       sha256(input.csv),
     );
     if (existing) {
-      return { registerId: existing.id, asOf, positions: parsed.positions.length, issues: parsed.issues, duplicate: true };
+      return {
+        registerId: existing.id,
+        asOf,
+        positions: parsed.positions.length,
+        issues: parsed.issues,
+        duplicate: true,
+      };
     }
     const registerId = this.db.tx(() => {
       const id = this.db.insert(
@@ -1608,11 +1616,7 @@ export class Concord {
     });
   }
 
-  importJournal(
-    ref: string,
-    csv: string,
-    options?: { mode?: "merge" | "replace"; allowPartial?: boolean },
-  ) {
+  importJournal(ref: string, csv: string, options?: { mode?: "merge" | "replace"; allowPartial?: boolean }) {
     const mode = options?.mode ?? "merge";
     const allowPartial = options?.allowPartial ?? false;
     if (mode !== "merge" && mode !== "replace") {
@@ -1626,7 +1630,9 @@ export class Concord {
       throw new Invalid((err as Error).message);
     }
     if (mode === "replace" && parsed.issues.length > 0 && !allowPartial) {
-      throw new Invalid(`cannot replace journal: CSV contains ${parsed.issues.length} parse errors and allowPartial is false`);
+      throw new Invalid(
+        `cannot replace journal: CSV contains ${parsed.issues.length} parse errors and allowPartial is false`,
+      );
     }
 
     const existing = this.db.all<{ ref: string }>("SELECT ref FROM journal WHERE asset_id = ?", asset.id);
@@ -2276,7 +2282,10 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   /** The newest reconciliation of one register, if it has been reconciled. */
   latestRunForRegister(registerId: number) {
-    const row = this.db.get<{ id: number }>("SELECT id FROM runs WHERE register_id = ? ORDER BY id DESC LIMIT 1", registerId);
+    const row = this.db.get<{ id: number }>(
+      "SELECT id FROM runs WHERE register_id = ? ORDER BY id DESC LIMIT 1",
+      registerId,
+    );
     return row ? this.run(row.id) : null;
   }
 
@@ -2543,8 +2552,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   // ── corporate actions ─────────────────────────────────────────────────────
 
-  async createAction(ref: string, input: ActionInput, actor?: Actor) {
-    const asset = this.asset(ref);
+  private validateAction(asset: AssetRecord, input: ActionInput) {
     const recordTime = isoTime(String(input.recordTime ?? ""), "recordTime");
     const params: Record<string, unknown> = { exclude: addresses(input.exclude, "exclude") };
     if (input.windowTo) params.windowTo = isoTime(input.windowTo, "windowTo");
@@ -2658,13 +2666,19 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     if (input.cashInLieu && input.type !== "split") {
       throw new Invalid("cashInLieu is only valid for split actions");
     }
-    const title =
-      label(input.label, "label") ??
-      (input.type === "dividend"
+    const defaultTitle =
+      input.type === "dividend"
         ? `Dividend ${input.ratePerUnit} per unit`
         : input.type === "split"
           ? `Split ${input.num}:${input.den}`
-          : `Redemption ${input.num}/${input.den}`);
+          : `Redemption ${input.num}/${input.den}`;
+    return { recordTime, params, defaultTitle };
+  }
+
+  async createAction(ref: string, input: ActionInput, actor?: Actor) {
+    const asset = this.asset(ref);
+    const { recordTime, params, defaultTitle } = this.validateAction(asset, input);
+    const title = label(input.label, "label") ?? defaultTitle;
     const id = this.db.insert(
       "INSERT INTO actions (asset_id, type, label, record_time, params, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       asset.id,
@@ -2676,6 +2690,128 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       now(),
     );
     return this.reconcileAction(id);
+  }
+
+  async updateAction(id: number, patch: ActionPatch, actor?: Actor) {
+    const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
+    if (!row) throw new NotFound(`corporate action ${id} not found`);
+    if (row.snapshot) {
+      throw new Invalid("already snapshotted");
+    }
+    const asset = this.asset(String(row.asset_id));
+    const existingParams = JSON.parse(String(row.params)) as Record<string, unknown>;
+    const oldType = String(row.type) as ActionType;
+    const effectiveType = patch.type ?? oldType;
+
+    const pick = <T>(patchVal: T | undefined, existingVal: T | undefined): T | undefined => {
+      if (patchVal === null) return undefined;
+      return patchVal !== undefined ? patchVal : existingVal;
+    };
+
+    const isSameType = effectiveType === oldType;
+
+    const mergedInput: ActionInput = {
+      type: effectiveType,
+      recordTime: patch.recordTime ?? String(row.record_time),
+      exclude: pick(patch.exclude, existingParams.exclude as string[] | undefined),
+      windowTo: pick(patch.windowTo, existingParams.windowTo as string | undefined),
+      windowFromLedger: pick(patch.windowFromLedger, existingParams.windowFromLedger as number | undefined),
+      windowToLedger: pick(patch.windowToLedger, existingParams.windowToLedger as number | undefined),
+      ratePerUnit: pick(patch.ratePerUnit, isSameType ? (existingParams.ratePerUnit as string | undefined) : undefined),
+      payAsset: pick(patch.payAsset, isSameType ? (existingParams.payAsset as string | undefined) : undefined),
+      payer: pick(patch.payer, isSameType ? (existingParams.payer as string | undefined) : undefined),
+      rounding: pick(patch.rounding, isSameType ? (existingParams.rounding as Rounding | undefined) : undefined),
+      num: pick(patch.num, isSameType ? (existingParams.num as string | undefined) : undefined),
+      den: pick(patch.den, isSameType ? (existingParams.den as string | undefined) : undefined),
+      label: patch.label,
+    };
+
+    const { recordTime, params, defaultTitle } = this.validateAction(asset, mergedInput);
+
+    const oldDefaultTitle =
+      oldType === "dividend"
+        ? `Dividend ${existingParams.ratePerUnit} per unit`
+        : oldType === "split"
+          ? `Split ${existingParams.num}:${existingParams.den}`
+          : `Redemption ${existingParams.num}/${existingParams.den}`;
+
+    const title =
+      patch.label !== undefined
+        ? (label(patch.label, "label") ?? defaultTitle)
+        : String(row.label) === oldDefaultTitle
+          ? defaultTitle
+          : String(row.label);
+
+    const at = now();
+    const paramsJson = JSON.stringify(params);
+
+    this.db.tx(() => {
+      this.db.write(
+        "UPDATE actions SET type = ?, label = ?, record_time = ?, params = ?, result = NULL, reconciled_at = NULL WHERE id = ?",
+        effectiveType,
+        title,
+        recordTime,
+        paramsJson,
+        id,
+      );
+      this.db.insert(
+        `INSERT INTO action_history (action_id, asset_id, label, record_time, params, author, author_id, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        asset.id,
+        title,
+        recordTime,
+        paramsJson,
+        actor?.label ?? null,
+        actor?.id ?? null,
+        at,
+      );
+    });
+
+    return this.reconcileAction(id);
+  }
+
+  actionHistory(refOrId: string | number, actionId?: number) {
+    let aid: number | undefined;
+    let assetId: string | undefined;
+    if (typeof refOrId === "number") {
+      aid = refOrId;
+    } else if (actionId !== undefined) {
+      assetId = this.asset(refOrId).id;
+      aid = actionId;
+    } else if (/^\d+$/.test(refOrId)) {
+      aid = Number(refOrId);
+    } else {
+      assetId = this.asset(refOrId).id;
+    }
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (aid !== undefined) {
+      where.push("action_id = ?");
+      params.push(aid);
+    }
+    if (assetId !== undefined) {
+      where.push("asset_id = ?");
+      params.push(assetId);
+    }
+    const sql = `SELECT id, action_id, asset_id, label, record_time, params, author, author_id, at FROM action_history${
+      where.length ? " WHERE " + where.join(" AND ") : ""
+    } ORDER BY id`;
+    return this.db.all(sql, ...params).map((r) => ({
+      id: Number(r.id),
+      actionId: Number(r.action_id),
+      assetId: String(r.asset_id),
+      label: String(r.label),
+      recordTime: String(r.record_time),
+      params: JSON.parse(String(r.params)) as Record<string, unknown>,
+      author: r.author ? String(r.author) : null,
+      authorId: r.author_id ? String(r.author_id) : null,
+      at: String(r.at),
+    }));
+  }
+
+  actionChanges(refOrId: string | number, actionId?: number) {
+    return this.actionHistory(refOrId, actionId);
   }
 
   /** Establish where the asset's indexed history begins. */
