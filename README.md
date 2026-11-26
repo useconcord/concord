@@ -126,6 +126,7 @@ Architecture decisions: [`docs/adr/`](./docs/adr/README.md).
 - [`docs/limits.md`](./docs/limits.md): the deliberate limits (fractions of the smallest unit in splits drop unless cash in lieu is configured); [`docs/ROADMAP.md`](./docs/ROADMAP.md)
   says which are next to fall.
 - [`docs/baselines.md`](./docs/baselines.md): opening balances (baselines), Horizon paging, per-holder cutoffs, and blind spots.
+- [`docs/troubleshooting-indexing.md`](./docs/troubleshooting-indexing.md): troubleshooting guide for indexing and chain errors.
 - [`docs/prior-art.md`](./docs/prior-art.md): the prior-art check against the brief's first kill
   criterion (someone already ships this for Stellar): dated sources, kill criteria, re-check schedule.
 - [`docs/demo-testnet.md`](./docs/demo-testnet.md): `pnpm demo:testnet` issues a practice asset on
