@@ -33,6 +33,9 @@ export const CLI_OPTIONS = {
   limit: { type: "string" },
   before: { type: "string" },
   scope: { type: "string" },
+  verify: { type: "boolean" },
+  into: { type: "string" },
+  force: { type: "boolean", short: "f" },
   status: { type: "string" },
   key: { type: "string" },
   run: { type: "string" },
@@ -155,7 +158,10 @@ Operator commands.
   reset-link EMAIL                 a one-day link for setting a new password
   invite ORG EMAIL [--role owner|member]  create a workspace invitation link
   org-delete ORG                   delete a workspace and everything in it
-  backup DIR                       copy every database to DIR while the server runs
+  backup DIR [--verify]            copy every database to DIR while the server runs; --verify
+                                   checks each copy's integrity and schema version
+  restore DIR [--into DIR2] [--force]
+                                   copy a backup into the data directory (refuses a non-empty one)
   serve                            run the API and dashboard
 
 ASSET is a code or a contract id. Add --json to most commands for machine-readable output,
