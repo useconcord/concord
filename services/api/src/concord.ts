@@ -605,6 +605,31 @@ function resume(
   return state;
 }
 
+/** An asset's headline figures, as the overview shows them and `asset_stats` stores them. */
+interface AssetStats {
+  supply: string;
+  holderCount: number;
+  eventCount: number;
+  incomplete: boolean;
+  lastRun: { id: number; asOf: string; status: "clean" | "breaks"; openBreaks: number } | null;
+  openBreaks: { reconciliation: number; controls: number; actions: number };
+}
+
+function statsFromRow(row: Row): AssetStats {
+  return {
+    supply: String(row.supply),
+    holderCount: Number(row.holder_count),
+    eventCount: Number(row.event_count),
+    incomplete: Number(row.incomplete) === 1,
+    lastRun: row.last_run ? (JSON.parse(String(row.last_run)) as AssetStats["lastRun"]) : null,
+    openBreaks: {
+      reconciliation: Number(row.open_reconciliation),
+      controls: Number(row.open_controls),
+      actions: Number(row.open_actions),
+    },
+  };
+}
+
 /**
  * One workspace: every operation the API and the CLI expose over a single database.
  * Reads the chain, never writes it.
@@ -999,6 +1024,8 @@ export class Concord {
       registerMaxAge,
       asset.id,
     );
+    // The matching windows decide which controls break, and so the stored open-break count.
+    this.refreshStats(asset.id);
     return this.asset(asset.id);
   }
 
@@ -1040,6 +1067,8 @@ export class Concord {
       );
     });
     this.touch(asset.id);
+    // The history is gone until the next pass; a deferred rebuild must not keep showing it.
+    this.refreshStats(asset.id);
     if (options.defer) void this.sync(asset.id).catch(() => {});
     else await this.sync(asset.id);
     return this.asset(asset.id);
@@ -1126,10 +1155,18 @@ export class Concord {
       if (asset.syncError) {
         this.db.write("UPDATE assets SET sync_error = NULL, sync_error_at = NULL WHERE id = ?", asset.id);
       }
+      // Even a pass that added nothing moved the read-through time the controls log runs to.
+      this.refreshStats(asset.id);
       return out;
     } catch (err) {
       if (this.removing.has(asset.id)) throw err;
       const failure = describeFailure(err);
+      // Pages written before the failure are committed; the figures must include them.
+      try {
+        this.refreshStats(asset.id);
+      } catch {
+        // The sync failure below is the one to report.
+      }
       this.db.write(
         "UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?",
         failure,
@@ -1558,6 +1595,8 @@ export class Concord {
       )?.count ?? 0;
     const removed = this.db.write("DELETE FROM registers WHERE id = ? AND asset_id = ?", registerId, asset.id);
     if (removed === 0) throw new NotFound("no such register for this asset");
+    // Its runs went with it, and the latest run may have been one of them.
+    this.refreshStats(asset.id);
     return { runs };
   }
 
@@ -1858,6 +1897,7 @@ export class Concord {
         }
       }
     });
+    this.refreshStats(asset.id);
     return { instructions: parsed.instructions.length, added, replaced, removed, issues: parsed.issues };
   }
 
@@ -2056,6 +2096,7 @@ export class Concord {
     if (breaks.length > 0) {
       this.alert("run.breaks", asset, breaks.length, `/#/a/${asset.id}/reconciliation`);
     }
+    this.refreshStats(asset.id);
     return this.run(id);
   }
 
@@ -2472,6 +2513,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       // A sign-off moves a break out of the open count the runs list reads from a column.
       if (scope === "recon") this.countOpenBreaks(asset.id);
     });
+    this.refreshStats(asset.id);
     return { ok: true };
   }
 
@@ -2941,6 +2983,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         coverage: this.coverage(asset, recordTime),
       };
       this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
+      this.refreshStats(asset.id);
       return this.action(id);
     }
 
@@ -3132,6 +3175,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     if (result.breaks.length > 0) {
       this.alert("action.breaks", asset, result.breaks.length, `/#/a/${asset.id}/actions`);
     }
+    this.refreshStats(asset.id);
     return this.action(id);
   }
 
@@ -3407,28 +3451,40 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     };
   }
 
-  /** One asset with the headline figures the dashboard lists. */
+  /**
+   * One asset with the headline figures the dashboard lists. The figures come from the
+   * asset's `asset_stats` row, which every change that can move them rewrites (`refreshStats`),
+   * so a poll reads one row however long the history is.
+   */
   assetSummary(asset: AssetRecord) {
+    // Never indexed: the controls log runs up to the clock, and there is nothing to replay.
+    const row = asset.syncedAt ? this.db.get("SELECT * FROM asset_stats WHERE asset_id = ?", asset.id) : undefined;
+    const stats = row ? statsFromRow(row) : this.refreshStats(asset.id);
+    // Not stored with the figures: a register's age grows with the clock, not with any write.
+    const latestRegister = this.db.get<{ as_of: string }>(
+      "SELECT as_of FROM registers WHERE asset_id = ? ORDER BY as_of DESC, id DESC LIMIT 1",
+      asset.id,
+    );
+    // A register nobody has refreshed is the attention item a timer-free service cannot raise itself.
+    const registerStale =
+      asset.registerMaxAgeDays === undefined || !latestRegister
+        ? null
+        : this.registerAge(latestRegister.as_of, asset.registerMaxAgeDays);
+    return { ...asset, ...stats, registerStale };
+  }
+
+  /** The headline figures recomputed from the data, ignoring any stored row. */
+  private computeStats(asset: AssetRecord): AssetStats {
     const state = this.state(asset);
     const run = this.latestRun(asset.id);
     const controls = this.controls(asset.id);
     const actions = this.actions(asset.id);
     const events = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE asset_id = ?", asset.id)!.n;
-    const latestRegister = this.db.get<{ as_of: string }>(
-      "SELECT as_of FROM registers WHERE asset_id = ? ORDER BY as_of DESC, id DESC LIMIT 1",
-      asset.id,
-    );
     return {
-      ...asset,
       supply: formatUnits(state.supply, asset.decimals),
       holderCount: state.balances.size,
       eventCount: events,
       incomplete: state.incomplete.length > 0,
-      // A register nobody has refreshed is the attention item a timer-free service cannot raise itself.
-      registerStale:
-        asset.registerMaxAgeDays === undefined || !latestRegister
-          ? null
-          : this.registerAge(latestRegister.as_of, asset.registerMaxAgeDays),
       lastRun: run && { id: run.id, asOf: run.asOf, status: run.status, openBreaks: run.openBreaks },
       openBreaks: {
         reconciliation: run?.openBreaks ?? 0,
@@ -3451,6 +3507,31 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     const ageMs = this.nowMs() - Date.parse(asOf);
     if (!(ageMs > limitDays * DAY_MS)) return null;
     return { ageDays: Math.floor(ageMs / DAY_MS) };
+  }
+
+  /**
+   * Recompute and store an asset's headline figures. Called at the end of every change that can
+   * move them: a sync pass, a rebuild, a reconciliation or a deleted register, a sign-off, an
+   * instructions import and a corporate action's reconciliation.
+   */
+  private refreshStats(assetId: string): AssetStats {
+    const asset = this.asset(assetId);
+    const stats = this.computeStats(asset);
+    this.db.write(
+      `INSERT OR REPLACE INTO asset_stats (asset_id, supply, holder_count, event_count, incomplete, last_run,
+         open_reconciliation, open_controls, open_actions, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      asset.id,
+      stats.supply,
+      stats.holderCount,
+      stats.eventCount,
+      stats.incomplete ? 1 : 0,
+      stats.lastRun ? JSON.stringify(stats.lastRun) : null,
+      stats.openBreaks.reconciliation,
+      stats.openBreaks.controls,
+      stats.openBreaks.actions,
+      now(),
+    );
+    return stats;
   }
 
   /** Everything an auditor needs for a period, with a digest over the content. */

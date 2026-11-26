@@ -48,13 +48,14 @@ erDiagram
     assets ||--o{ break_notes : "asset_id"
     assets ||--o{ holdings_checkpoints : "asset_id"
     actions ||--o{ action_history : "action_id"
+    assets ||--o| asset_stats : "asset_id"
     registers ||--o{ register_positions : "register_id"
     registers ||--o{ runs : "register_id"
 ```
 
 Every arrow is `ON DELETE CASCADE`. Deleting an asset therefore deletes its events, opening
 balances, registers (and through them their positions and runs), journal, instructions, corporate
-actions, break notes and holdings checkpoints. Deleting a register deletes its positions *and the runs made from it*.
+actions, break notes, holdings checkpoints and stored figures. Deleting a register deletes its positions *and the runs made from it*.
 `meta` stands alone.
 
 ### `meta`
@@ -314,6 +315,29 @@ One row per `updateAction` call:
 Index `action_history_action (action_id, id)`.
 
 The `action_changes` view projects all columns from `action_history`.
+
+### `asset_stats`
+
+Each asset's headline figures (added in migration 14), so the dashboard's polled
+`GET /api/overview` and `GET /api/assets/:id` read one row instead of replaying events and
+rebuilding the controls log. Primary key `asset_id`. Derived data: a missing row is recomputed
+and stored on the next read (`Concord.assetSummary`, `services/api/src/concord.ts`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `asset_id` | TEXT | → `assets.id` |
+| `supply` | TEXT | Current supply in whole units, formatted as the overview shows it. |
+| `holder_count` | INTEGER | Addresses with a non-zero balance. |
+| `event_count` | INTEGER | Indexed events. |
+| `incomplete` | INTEGER | `1` when some holder's derived balance is negative (history missing). |
+| `last_run` | TEXT (JSON), null | `{ id, asOf, status, openBreaks }` of the latest reconciliation. |
+| `open_reconciliation`, `open_controls`, `open_actions` | INTEGER | Open breaks in the latest run, the controls log, and all corporate actions. |
+| `updated_at` | TEXT | |
+
+The row is rewritten at the end of every change that can move a figure (`Concord.refreshStats`):
+a sync pass (also one that adds nothing, since the controls log runs to the read-through time),
+a rebuild, a reconciliation, a deleted register, a sign-off, an instructions import and a
+corporate action's reconciliation. An asset that has never been synced is always recomputed.
 
 ## Control database (`control.db`)
 
