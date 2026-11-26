@@ -1139,6 +1139,29 @@ describe("networks", () => {
       expect(loadConfig({ CONCORD_MAINNET_RPC_URLS: input }).networks.mainnet.rpc.map((e) => e.url)).toEqual(expected);
     }
   });
+
+  it.each([
+    ["PORT 0", { PORT: "0" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["PORT -1", { PORT: "-1" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["PORT 1.5", { PORT: "1.5" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["PORT abc", { PORT: "abc" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["PORT 70000 expecting PORT message after CON-0315", { PORT: "70000" }, { error: "PORT must be a whole number from 1 to 65535" }],
+    ["sync interval 0 accepted", { CONCORD_SYNC_INTERVAL: "0" }, { value: { syncIntervalSec: 0 } }],
+    ["sync interval -1 rejected by name", { CONCORD_SYNC_INTERVAL: "-1" }, { error: "CONCORD_SYNC_INTERVAL must be a whole number of at least 0" }],
+    ["sync interval 0.5 rejected by name", { CONCORD_SYNC_INTERVAL: "0.5" }, { error: "CONCORD_SYNC_INTERVAL must be a whole number of at least 0" }],
+    ["CONCORD_PORT beats PORT", { CONCORD_PORT: "5500", PORT: "6600" }, { value: { port: 5500 } }],
+    ["bad CONCORD_PORT names itself", { CONCORD_PORT: "bad", PORT: "6600" }, { error: "CONCORD_PORT must be a whole number from 1 to 65535" }],
+    ["empty strings count as unset", { PORT: "", CONCORD_PORT: "", CONCORD_SYNC_INTERVAL: "", CONCORD_TRUST_PROXY: "", CONCORD_EPHEMERAL: "" }, { value: { port: 4400, syncIntervalSec: 30, trustProxyHops: 0, ephemeral: false } }],
+    ["ephemeral 1 is true", { CONCORD_EPHEMERAL: "1" }, { value: { ephemeral: true } }],
+    ["ephemeral true is true", { CONCORD_EPHEMERAL: "true" }, { value: { ephemeral: true } }],
+    ["ephemeral yes is true after CON-0317", { CONCORD_EPHEMERAL: "yes" }, { value: { ephemeral: true } }],
+  ])("parses integer and boolean settings: %s", (_name, env, outcome) => {
+    if ("error" in outcome) {
+      expect(() => loadConfig(env)).toThrow(outcome.error);
+    } else {
+      expect(loadConfig(env)).toMatchObject(outcome.value);
+    }
+  });
 });
 
 describe("chain endpoints", () => {
