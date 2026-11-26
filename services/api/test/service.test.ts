@@ -950,6 +950,112 @@ describe("Concord", () => {
     expect(run5.breaks.find((b) => b.address === h1)).toMatchObject({ status: "open", noteStale: true });
   });
 
+  it("lists reconciliations from stored columns without parsing their result bodies", async () => {
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    const run = await concord.reconcile("FUND", reg.registerId);
+
+    const parse = vi.spyOn(JSON, "parse");
+    const listed = concord.runs("FUND");
+    const bodies = parse.mock.calls.map(([text]) => String(text)).filter((text) => text.includes('"registerSha256"'));
+    parse.mockRestore();
+
+    // The list's shape is exactly what run() reports, but no run body went through JSON.parse.
+    expect(bodies).toEqual([]);
+    expect(listed).toEqual([
+      {
+        id: run.id,
+        asOf: run.asOf,
+        createdAt: run.createdAt,
+        status: run.status,
+        chainBehind: run.chainBehind,
+        summary: run.summary,
+        openBreaks: run.openBreaks,
+      },
+    ]);
+
+    // The open count is a stored column, so a sign-off has to move it rather than leave it stale.
+    const brk = run.breaks[0]!;
+    expect(run.openBreaks).toBeGreaterThan(0);
+    concord.setNote(
+      "FUND",
+      "recon",
+      brk.key,
+      { fingerprint: brk.fingerprint, status: "acknowledged", note: "T+1 timing" },
+      { id: "u1", label: "ops" },
+    );
+    expect(concord.runs("FUND")[0]!.openBreaks).toBe(run.openBreaks - 1);
+    // Reopening puts it back.
+    concord.setNote("FUND", "recon", brk.key, { fingerprint: brk.fingerprint, status: "open", note: "wrong" });
+    expect(concord.runs("FUND")[0]!.openBreaks).toBe(run.openBreaks);
+  });
+
+  it("lists 200 runs of a thousand-holder register without reading the bodies", () => {
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    const summary = { chainSupply: "150", registerTotal: "150", breakCount: 0, lines: 1000 };
+    const body = JSON.stringify({
+      registerId: reg.registerId,
+      registerSha256: "sha",
+      asOf: at(40),
+      chainLedger: 100,
+      chainSyncedAt: at(100),
+      chainBehind: false,
+      warnings: [],
+      status: "clean",
+      summary,
+      lines: Array.from({ length: 1000 }, (_, i) => ({
+        address: `G${String(i).padStart(55, "0")}`,
+        holderIds: [`h${i}`],
+        chainUnits: "100",
+        registerUnits: "100",
+        difference: "0",
+        chainStatus: "active",
+        registerStatus: "active",
+        matched: true,
+      })),
+      movement: null,
+      breaks: [],
+    });
+    concord.db.tx(() => {
+      for (let i = 0; i < 200; i++) {
+        concord.db.insert(
+          `INSERT INTO runs (asset_id, register_id, as_of, created_at, summary, status, chain_behind, open_breaks, result)
+           VALUES (?, ?, ?, ?, ?, 'clean', 0, 0, ?)`,
+          assetId,
+          reg.registerId,
+          at(40),
+          at(40 + i),
+          JSON.stringify(summary),
+          body,
+        );
+      }
+    });
+
+    const started = performance.now();
+    const listed = concord.runs("FUND");
+    const listedMs = performance.now() - started;
+
+    // What the list used to do: parse and annotate every body.
+    const legacyStarted = performance.now();
+    const expected = concord.db
+      .all<{ id: number }>("SELECT id FROM runs WHERE asset_id = ? ORDER BY id DESC LIMIT 200", assetId)
+      .map(({ id }) => concord.run(id))
+      .map((r) => ({
+        id: r.id,
+        asOf: r.asOf,
+        createdAt: r.createdAt,
+        status: r.status,
+        chainBehind: r.chainBehind,
+        summary: r.summary,
+        openBreaks: r.openBreaks,
+      }));
+    const legacyMs = performance.now() - legacyStarted;
+
+    expect(listed).toEqual(expected);
+    expect(listed).toHaveLength(200);
+    // Each body is ~250 KB, so the old path parsed tens of MB per request; the columns parse none.
+    expect(listedMs).toBeLessThan(legacyMs / 5);
+  });
+
   it("warns when the register is ahead of the indexed chain", async () => {
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(500) });
     const run = await concord.reconcile("FUND", reg.registerId);
