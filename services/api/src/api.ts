@@ -167,6 +167,18 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     auth.renameOrg(c.var.session.org.id, input.name);
     return c.json(me(auth, cookies.read(c)!));
   });
+
+  // Outbound alerts: an https endpoint receives a signed POST when a run or a sync needs
+  // attention. Private and loopback targets are refused, and only an owner may see or set it.
+  priv.get("/org/webhook", (c) => {
+    owner(c);
+    return c.json(c.var.ws.webhookSettings());
+  });
+  priv.put("/org/webhook", async (c) => {
+    owner(c);
+    const input = await jsonBody<{ url?: unknown }>(c);
+    return c.json(c.var.ws.setWebhook(input.url ?? "", options.publicUrl));
+  });
   priv.delete("/org", async (c) => {
     owner(c);
     const { session } = c.var;
