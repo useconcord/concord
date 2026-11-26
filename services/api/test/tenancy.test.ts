@@ -9,7 +9,7 @@ import { readFileSync as readFixture } from "node:fs";
 import { Address, Asset, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Auth } from "../src/auth.js";
 import { runCli } from "../src/cli.js";
-import { StellarSource } from "../src/chain.js";
+import { StellarSource, ChainError } from "../src/chain.js";
 import { Concord } from "../src/concord.js";
 import { loadConfig } from "../src/config.js";
 import { Db } from "../src/db.js";
@@ -1998,6 +1998,48 @@ describe("chain endpoints", () => {
       method: "getLedgerEntries",
       params: { keys: [expectedKey] },
     });
+  });
+
+  it.each([
+    [
+      "string-typed latestLedger",
+      { latestLedger: "10", oldestLedger: 1 },
+      { error: "Stellar RPC getHealth did not report its ledger range" },
+    ],
+    [
+      "missing oldestLedger",
+      { latestLedger: 10 },
+      { error: "Stellar RPC getHealth did not report its ledger range" },
+    ],
+    [
+      "null result",
+      null,
+      { error: "Stellar RPC getHealth returned no result" },
+    ],
+    [
+      "oldestLedgerCloseTime 'abc'",
+      { latestLedger: 10, oldestLedger: 1, oldestLedgerCloseTime: "abc" },
+      { head: { latest: 10, oldest: 1 } },
+    ],
+    [
+      "oldestLedgerCloseTime '0'",
+      { latestLedger: 10, oldestLedger: 1, oldestLedgerCloseTime: "0" },
+      { head: { latest: 10, oldest: 1 } },
+    ],
+  ])("handles %s from getHealth", async (_name, result, expected) => {
+    const url = "https://rpc.example";
+    const { deps } = scripted({
+      [url]: [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }))],
+    });
+    const source = new StellarSource(network([url]), deps);
+    if ("error" in expected) {
+      const err = await source.latestLedger().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ChainError);
+      expect((err as ChainError).kind).toBe("rejected");
+      expect((err as ChainError).message).toBe(expected.error);
+    } else {
+      expect(await source.latestLedger()).toEqual(expected.head);
+    }
   });
 });
 
