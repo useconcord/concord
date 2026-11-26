@@ -2125,6 +2125,61 @@ describe("chain endpoints", () => {
       expect(await source.latestLedger()).toEqual(expected.head);
     }
   });
+
+  it("retries an unreadable HTML response once, sleeping 250-500ms, and succeeds if next is valid", async () => {
+    const a = "https://a.example";
+    const { calls, sleeps, deps } = scripted({
+      [a]: [
+        () => new Response("<html><head><title>Sign in</title></head><body>Captive portal</body></html>", { status: 200, headers: { "content-type": "text/html" } }),
+        health,
+      ],
+    });
+    const source = new StellarSource(network([a]), deps);
+    const head = await source.latestLedger();
+    expect(head.latest).toBe(50);
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeGreaterThanOrEqual(250);
+    expect(sleeps[0]).toBeLessThanOrEqual(500);
+  });
+
+  it("retries an unreadable HTML response once and reports ChainError with unreadable response on second failure", async () => {
+    const a = "https://a.example";
+    const { calls, sleeps, deps } = scripted({
+      [a]: [
+        () => new Response("<html>502 Bad Gateway</html>", { status: 200 }),
+        () => new Response("<html>502 Bad Gateway</html>", { status: 200 }),
+      ],
+    });
+    const source = new StellarSource(network([a]), deps);
+    const err = await source.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(ChainError);
+    expect(err).not.toBeInstanceOf(SyntaxError);
+    expect((err as ChainError).message).toContain("a.example: unreadable response");
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeGreaterThanOrEqual(250);
+    expect(sleeps[0]).toBeLessThanOrEqual(500);
+  });
+
+  it("retries an empty response body once and reports ChainError with unreadable response on second failure", async () => {
+    const a = "https://a.example";
+    const { calls, sleeps, deps } = scripted({
+      [a]: [
+        () => new Response("", { status: 200 }),
+        () => new Response("", { status: 200 }),
+      ],
+    });
+    const source = new StellarSource(network([a]), deps);
+    const err = await source.latestLedger().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(ChainError);
+    expect(err).not.toBeInstanceOf(SyntaxError);
+    expect((err as ChainError).message).toContain("a.example: unreadable response");
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeGreaterThanOrEqual(250);
+    expect(sleeps[0]).toBeLessThanOrEqual(500);
+  });
 });
 
 describe("what ships", () => {
