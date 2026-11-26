@@ -36,10 +36,31 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 
 ### Fixed
 
+- The CLI answers an unknown flag, or a flag missing its value, with one line that names the
+  flag, suggests the closest known one and points to `concord --help`, instead of Node's raw
+  parser message (#581).
 - Register imports reject as-of times more than five minutes in the future (#100).
 
 ### Added
 
+- A printable HTML report of a reconciliation run, with its summary, coverage, register and run
+  digests, and break sign-off history (`GET /api/reconciliations/:id/report`) (#552).
+- `Concord.diffRegisters(asset, fromId, toId)` compares two registers of one asset by
+  `holder_id`: holders added and removed, and holders whose units, accounts or statuses changed,
+  each list sorted by holder id (#566).
+- `Concord.diffRuns(fromId, toId)` compares two reconciliation runs of one asset: each break key
+  is new, resolved, persisting, or changed when its fingerprint differs, every list sorted by
+  key (#567).
+- Dividend withholding (#570): `withholdingRate` and per-address `withholdingOverrides` on a
+  dividend. The expected payment is the net of withholding, applied after the gross is rounded,
+  and the action's result lines show `gross`, `withheld` and `net` (also in the audit pack).
+- A per-asset reconciliation `tolerance` (smallest units): a holder whose chain and register
+  balances differ by no more than it is treated as matched. Schema: `ORG_MIGRATIONS` v5 adds
+  `assets.tolerance` (#564).
+- Holdings checkpoints (#576): historical holdings (`asOf`), corporate-action snapshots and the
+  current holdings replay from the nearest stored checkpoint, so their cost near the tip no longer
+  grows with the length of the history. Results are unchanged. Schema: `ORG_MIGRATIONS` entry 6
+  adds the `holdings_checkpoints` table and the `events_asset_ledger` index on `events`.
 - CSV templates can include one illustrative example row with `?example=1` or `?example=true` (#200).
 - The accounting core (`feat(core)`, `c402eae`): holdings replay from CAP-67 events, position
   and movement reconciliation with typed breaks, corporate-action entitlements (dividend,

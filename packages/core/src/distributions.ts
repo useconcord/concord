@@ -17,6 +17,60 @@ export interface DividendTerms {
   rounding?: Rounding;
   /** Holders with no entitlement, e.g. treasury stock. */
   exclude?: Iterable<string>;
+  /** Share of the gross the payer withholds, a decimal from 0 to 1, e.g. "0.15". Default none. */
+  withholdingRate?: string;
+  /** Per-holder rates that replace `withholdingRate`, e.g. a treaty rate or an exempt holder. */
+  withholdingOverrides?: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
+}
+
+/** One holder's dividend: what the holding earns, what the payer keeps back, and what is paid. */
+export interface DividendAmounts {
+  gross: bigint;
+  withheld: bigint;
+  /** gross minus withheld: the payment to expect on the ledger. */
+  net: bigint;
+}
+
+function withholdingRatio(rate: string, name: string): { num: bigint; den: bigint } {
+  let ratio: { num: bigint; den: bigint };
+  try {
+    ratio = parseRatio(rate);
+  } catch {
+    throw new Error(`${name} must be a decimal from 0 to 1, got "${rate}"`);
+  }
+  if (ratio.num > ratio.den) throw new Error(`${name} must be a decimal from 0 to 1, got "${rate}"`);
+  return ratio;
+}
+
+/**
+ * Gross, withheld and net per entitled holder. Rounding order: the gross is rounded first, per
+ * holder at the pay asset's smallest unit, exactly as without withholding; the withheld amount
+ * is then `gross × rate` rounded with the same rule; and the net is `gross − withheld`, so the
+ * three always add up. Holders whose gross rounds to zero are omitted.
+ */
+export function dividendBreakdown(snapshot: HoldingsState, terms: DividendTerms): Map<string, DividendAmounts> {
+  checkDecimals("baseDecimals", terms.baseDecimals);
+  checkDecimals("payDecimals", terms.payDecimals);
+  const rate = parseRatio(terms.ratePerUnit);
+  const exclude = new Set(terms.exclude ?? []);
+  const num = rate.num * 10n ** BigInt(terms.payDecimals);
+  const den = rate.den * 10n ** BigInt(terms.baseDecimals);
+  const fallback = withholdingRatio(terms.withholdingRate ?? "0", "withholdingRate");
+  const overrides = new Map<string, { num: bigint; den: bigint }>();
+  const given = terms.withholdingOverrides;
+  for (const [address, value] of given instanceof Map ? given : Object.entries(given ?? {})) {
+    overrides.set(address, withholdingRatio(value, `withholding override for ${address}`));
+  }
+  const out = new Map<string, DividendAmounts>();
+  for (const [address, units] of snapshot.balances) {
+    if (exclude.has(address) || units <= 0n) continue;
+    const gross = mulDiv(units, num, den, terms.rounding);
+    if (gross <= 0n) continue;
+    const w = overrides.get(address) ?? fallback;
+    const withheld = mulDiv(gross, w.num, w.den, terms.rounding);
+    out.set(address, { gross, withheld, net: gross - withheld });
+  }
+  return out;
 }
 
 function checkDecimals(name: string, val: number): void {
@@ -25,19 +79,10 @@ function checkDecimals(name: string, val: number): void {
   }
 }
 
+/** The payment each holder should receive: the net of `dividendBreakdown`, omitting zeros. */
 export function dividendEntitlements(snapshot: HoldingsState, terms: DividendTerms): ExpectedFlows {
-  checkDecimals("baseDecimals", terms.baseDecimals);
-  checkDecimals("payDecimals", terms.payDecimals);
-  const rate = parseRatio(terms.ratePerUnit);
-  const exclude = new Set(terms.exclude ?? []);
-  const num = rate.num * 10n ** BigInt(terms.payDecimals);
-  const den = rate.den * 10n ** BigInt(terms.baseDecimals);
   const out: ExpectedFlows = new Map();
-  for (const [address, units] of snapshot.balances) {
-    if (exclude.has(address) || units <= 0n) continue;
-    const entitlement = mulDiv(units, num, den, terms.rounding);
-    if (entitlement > 0n) out.set(address, entitlement);
-  }
+  for (const [address, { net }] of dividendBreakdown(snapshot, terms)) if (net > 0n) out.set(address, net);
   return out;
 }
 
@@ -53,6 +98,16 @@ export interface SplitResult {
    * Holders with nothing dropped are absent.
    */
   fractions: Map<string, bigint>;
+  /** Optional cash in lieu entitlements when cashInLieu terms are provided. */
+  cash?: ExpectedFlows;
+}
+
+export interface SplitCashInLieuTerms {
+  /** Pay-asset units per one whole unit held/split, any precision, e.g. "10.5". */
+  pricePerUnit: string;
+  baseDecimals: number;
+  payDecimals: number;
+  rounding?: Rounding;
 }
 
 /** Forward split when num > den, reverse when num < den. Fractions of the smallest unit drop. */
@@ -60,6 +115,7 @@ export function splitDeltas(
   snapshot: HoldingsState,
   ratio: { num: bigint; den: bigint },
   exclude: Iterable<string> = [],
+  cashInLieu?: SplitCashInLieuTerms,
 ): SplitResult {
   if (ratio.num <= 0n || ratio.den <= 0n) throw new Error("split ratio must be positive");
   const skip = new Set(exclude);
@@ -74,7 +130,35 @@ export function splitDeltas(
     if (delta !== 0n) deltas.set(address, delta);
     if (remainder !== 0n) fractions.set(address, remainder);
   }
-  return { deltas, fractions };
+  const result: SplitResult = { deltas, fractions };
+  if (cashInLieu) {
+    result.cash = splitCashInLieu(fractions, ratio.den, cashInLieu);
+  }
+  return result;
+}
+
+/**
+ * Compute cash in lieu entitlements from the dropped split fractions:
+ * expected cash = (remainder / (den * 10^baseDecimals)) * pricePerUnit * 10^payDecimals.
+ */
+export function splitCashInLieu(
+  fractions: Map<string, bigint>,
+  den: bigint,
+  terms: SplitCashInLieuTerms,
+): ExpectedFlows {
+  if (den <= 0n) throw new Error("split denominator must be positive");
+  checkDecimals("baseDecimals", terms.baseDecimals);
+  checkDecimals("payDecimals", terms.payDecimals);
+  const price = parseRatio(terms.pricePerUnit);
+  const num = price.num * 10n ** BigInt(terms.payDecimals);
+  const divisor = den * price.den * 10n ** BigInt(terms.baseDecimals);
+  const out: ExpectedFlows = new Map();
+  for (const [address, remainder] of fractions) {
+    if (remainder <= 0n) continue;
+    const cash = mulDiv(remainder, num, divisor, terms.rounding);
+    if (cash > 0n) out.set(address, cash);
+  }
+  return out;
 }
 
 /** Pro-rata redemption of num/den of every holding. 1/1 redeems the asset in full. */
