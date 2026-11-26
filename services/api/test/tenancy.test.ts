@@ -1226,11 +1226,11 @@ describe("networks", () => {
 });
 
 describe("chain endpoints", () => {
-  const network = (urls: string[], headers?: Record<string, string>) => ({
+  const network = (urls: string[], headers?: Record<string, string>, horizon: string[] = ["https://horizon.example"]) => ({
     name: "mainnet" as const,
     passphrase: MAINNET_PASSPHRASE,
     rpc: urls.map((url) => ({ url, ...(headers ? { headers } : {}) })),
-    horizon: [{ url: "https://horizon.example" }],
+    horizon: horizon.map((url) => ({ url })),
   });
   const health = () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { latestLedger: 50, oldestLedger: 10, oldestLedgerCloseTime: "1790000000" } }));
 
@@ -1521,6 +1521,37 @@ describe("chain endpoints", () => {
       [second]: [page([record(h2, "30.5000000")], 149)],
     });
     await expect(new StellarSource(network(["https://rpc.example"]), lagging.deps).baseline("FUND", issuer, 7)).rejects.toThrow(/back in time/);
+  });
+
+  it("baseline() starts over on the next Horizon when the first fails mid-read, keeping none of its pages", async () => {
+    const issuer = key();
+    const [h1, h3] = [key(), key()];
+    const record = (id: string, balance: string) => ({
+      account_id: id,
+      balances: [{ asset_code: "FUND", asset_issuer: issuer, balance, is_authorized: true }],
+    });
+    const many = Array.from({ length: 199 }, () => record(key(), "1.0000000"));
+    const [a, b] = ["https://horizon-a.example", "https://horizon-b.example"];
+    const query = `/accounts?asset=FUND%3A${issuer}&limit=200&order=asc`;
+    const aPage2 = `${a}/accounts?cursor=abc&limit=200`;
+    const page = (records: unknown[], ledger: number, next?: string) => () =>
+      new Response(JSON.stringify({ _links: next ? { next: { href: next } } : {}, _embedded: { records } }), {
+        headers: { "latest-ledger": String(ledger) },
+      });
+    const { calls, deps } = scripted({
+      [`${a}${query}`]: [page([record(h1, "70.0000000"), ...many], 150, aPage2)],
+      [aPage2]: [() => new Response("slow down", { status: 429 })],
+      [`${b}${query}`]: [page([record(h3, "12.0000000")], 160)],
+    });
+    const source = new StellarSource(network(["https://rpc.example"], undefined, [a, b]), deps);
+    const baseline = await source.baseline("FUND", issuer, 7);
+
+    // A's first page is discarded with the failed read; only B's page makes up the result.
+    expect(calls.map((c) => c.url)).toEqual([`${a}${query}`, aPage2, `${b}${query}`]);
+    expect(baseline.ledger).toBe(160);
+    expect(baseline.openings.size).toBe(1);
+    expect(baseline.openings.get(h3)).toEqual({ amount: u(12), asOfLedger: 160, authorized: true });
+    expect(baseline.openings.has(h1)).toBe(false);
   });
 
   it.each([
