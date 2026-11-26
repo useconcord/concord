@@ -3,7 +3,16 @@ import type { Hono } from "hono";
 import type { AssetEvent, EventKind } from "@concord/core";
 import { createApi, type ApiOptions } from "../src/api.js";
 import { Auth } from "../src/auth.js";
-import type { AssetCandidate, AssetDescription, Baseline, ChainSource, EventPage, ResolvedAsset } from "../src/chain.js";
+import {
+  StellarSource,
+  type AssetCandidate,
+  type AssetDescription,
+  type Baseline,
+  type ChainSource,
+  type EventPage,
+  type RawEvent,
+  type ResolvedAsset,
+} from "../src/chain.js";
 import type { Networks } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { CONTROL_MIGRATIONS } from "../src/schema.js";
@@ -67,9 +76,11 @@ export class FakeChain implements ChainSource {
       .sort((a, b) => (a.id < b.id ? -1 : 1));
     const events = pending.slice(0, limit);
     const end = `${(BigInt(this.latest) << 32n).toString().padStart(19, "0")}-9999999999`;
+    const prevCursor = "cursor" in from ? from.cursor : undefined;
+    const defaultCursor = prevCursor && prevCursor > end ? prevCursor : end;
     return {
       events,
-      cursor: events.length === limit ? events.at(-1)!.id : end,
+      cursor: events.length === limit ? events.at(-1)!.id : defaultCursor,
       latestLedger: this.latest,
       latestLedgerClosedAt: at(this.latest),
     };
@@ -113,6 +124,28 @@ export class FakeChain implements ChainSource {
     this.gate = new Promise<void>((resolve) => (release = resolve));
     this.onGetEvents = () => entered();
     return { entered: whenEntered, release };
+  }
+
+  known?: Set<string>;
+  candidates: AssetCandidate[] = [];
+
+  async describe(asset: ResolvedAsset): Promise<AssetDescription | undefined> {
+    if (this.known === undefined) return {};
+    if (!this.known.has(asset.id) && !this.known.has(asset.code) && !(asset.issuer && this.known.has(`${asset.code}:${asset.issuer}`))) {
+      return undefined;
+    }
+    return { code: asset.code, issuer: asset.issuer, decimals: 7 };
+  }
+
+  async search(code: string): Promise<AssetCandidate[]> {
+    return this.candidates.filter((c) => c.code.toUpperCase() === code.toUpperCase());
+  }
+
+  advance(n: number, options: { retain?: number } = {}): void {
+    this.latest += n;
+    if (options.retain !== undefined) {
+      this.oldest = Math.max(this.oldest, this.latest - options.retain + 1);
+    }
   }
 }
 
@@ -167,7 +200,7 @@ export class Client {
   constructor(
     private readonly app: Hono,
     private readonly origin: string | null = ORIGIN,
-  ) {}
+  ) { }
 
   async call(path: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<Response> {
     const headers: Record<string, string> = { ...init.headers };
@@ -204,4 +237,73 @@ export class Client {
     this.userId = me.user.id;
     return this;
   }
+}
+
+/** Creates a StellarSource backed by a scripted in-memory RPC endpoint for testing. */
+export function createScriptedStellarSource(options: {
+  contractId: string;
+  rawEvents?: RawEvent[];
+  latestLedger?: number;
+  oldestLedger?: number;
+}): { source: StellarSource; contractId: string } {
+  const contractId = options.contractId;
+  const latest = options.latestLedger ?? 100;
+  const oldest = options.oldestLedger ?? 1;
+  const rawEvents = options.rawEvents ?? [];
+
+  const networkConfig = {
+    name: "testnet" as const,
+    passphrase: PASSPHRASE,
+    rpc: [{ url: "https://rpc.example" }],
+    horizon: [{ url: "https://horizon.example" }],
+  };
+
+  const fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    if (body.method === "getHealth") {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            latestLedger: latest,
+            oldestLedger: oldest,
+            oldestLedgerCloseTime: "1790000000",
+          },
+        }),
+      );
+    }
+    if (body.method === "getEvents") {
+      const { pagination, startLedger } = body.params ?? {};
+      const limit = Number(pagination?.limit ?? 10);
+      const cursor = pagination?.cursor ? String(pagination.cursor) : undefined;
+      const start = Number(startLedger ?? 0);
+
+      const filtered = rawEvents
+        .filter((e) => e.contractId === contractId && e.ledger <= latest)
+        .filter((e) => (cursor ? e.id > cursor : e.ledger >= start))
+        .sort((a, b) => (a.id < b.id ? -1 : 1));
+
+      const eventsSlice = filtered.slice(0, limit);
+      const end = `${(BigInt(latest) << 32n).toString().padStart(19, "0")}-9999999999`;
+      const nextCursor = eventsSlice.length === limit ? eventsSlice.at(-1)!.id : (cursor && cursor > end ? cursor : end);
+
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            events: eventsSlice,
+            cursor: nextCursor,
+            latestLedger: latest,
+            latestLedgerCloseTime: "1790000000",
+          },
+        }),
+      );
+    }
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, error: { code: -32601, message: "not found" } }));
+  }) as typeof globalThis.fetch;
+
+  const source = new StellarSource(networkConfig, { fetch, sleep: async () => {}, now: () => Date.now() });
+  return { source, contractId };
 }
