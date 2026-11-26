@@ -88,6 +88,8 @@ export interface AssetRecord {
   instructionWindowHours: number;
   movementWindowHours: number;
   flowOnly?: boolean;
+  /** Flag the latest register once it is older than this many days. Unset means the check is off. */
+  registerMaxAgeDays?: number;
   createdAt: string;
 }
 
@@ -106,6 +108,8 @@ export interface WatchInput {
   ignore?: string[];
   instructionWindowHours?: number;
   movementWindowHours?: number;
+  /** Flag the latest register once it is older than this many days. Omitted means the check is off. */
+  registerMaxAgeDays?: number;
 }
 
 export type ActionType = "dividend" | "split" | "redemption";
@@ -327,6 +331,8 @@ export interface DeletionCounts {
 }
 
 export interface ConcordOptions {
+  /** Wall clock, in milliseconds. Tests inject one so register age is deterministic. */
+  now?: () => number;
   checkpointEvery?: number;
   /** ed25519 private key (PEM, or a path to one) that signs audit packs. */
   signingKey?: string;
@@ -379,6 +385,15 @@ export const EXPORT_CSV_SECTIONS = [
 export const EXPORT_CSV_SECTION_ERROR =
   "section must be holdings, events, controls, breaks, action, positions, runs, actions, journal or instructions";
 export type ExportCsvSection = (typeof EXPORT_CSV_SECTIONS)[number];
+const DAY_MS = 86_400_000;
+
+/** A register freshness limit: whole days, long enough to be meaningful and short enough to be sane. */
+function maxAgeDays(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 3650) {
+    throw new Invalid("registerMaxAgeDays must be a whole number of days from 1 to 3650");
+  }
+  return value;
+}
 
 function isoTime(input: string, field: string): string {
   const t = Date.parse(input);
@@ -479,6 +494,9 @@ function toAsset(row: Row): AssetRecord {
     movementWindowHours: Number(row.movement_window_hours ?? DEFAULT_MOVEMENT_WINDOW_HOURS),
     createdAt: String(row.created_at),
   };
+  if (row.register_max_age_days !== null && row.register_max_age_days !== undefined) {
+    asset.registerMaxAgeDays = Number(row.register_max_age_days);
+  }
   if (row.issuer) asset.issuer = String(row.issuer);
   if (row.start_ledger !== null) asset.startLedger = Number(row.start_ledger);
   if (row.baseline_ledger !== null) asset.baselineLedger = Number(row.baseline_ledger);
@@ -636,6 +654,10 @@ export class Concord {
     this.clock = options.now ?? Date.now;
   }
 
+  private nowMs(): number {
+    return (this.options.now ?? Date.now)();
+  }
+
   /** Forget cached holdings for an asset this instance just changed. */
   private touch(assetId: string): void {
     this.stateMemo.delete(assetId);
@@ -789,6 +811,8 @@ export class Concord {
     const ignore = addresses(input.ignore, "ignore");
     const instructionWindowHours = windowHours(input.instructionWindowHours, "instructionWindowHours", DEFAULT_INSTRUCTION_WINDOW_HOURS);
     const movementWindowHours = windowHours(input.movementWindowHours, "movementWindowHours", DEFAULT_MOVEMENT_WINDOW_HOURS);
+    const registerMaxAge =
+      input.registerMaxAgeDays === undefined ? undefined : maxAgeDays(input.registerMaxAgeDays);
     let name = label(input.name, "name");
     let decimals = input.decimals;
     if (input.fromLedger !== undefined && (!Number.isInteger(input.fromLedger) || input.fromLedger < 1)) {
@@ -846,8 +870,8 @@ export class Concord {
     }
     try {
       this.db.insert(
-        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, flow_only, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, flow_only, register_max_age_days, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?, ?, ?)`,
         resolved.id,
         input.network,
         resolved.code,
@@ -860,6 +884,7 @@ export class Concord {
         instructionWindowHours,
         movementWindowHours,
         options.flowOnly ? 1 : 0,
+        registerMaxAge ?? null,
         options.actor?.label ?? null,
         now(),
       );
@@ -935,7 +960,14 @@ export class Concord {
 
   updateAsset(
     ref: string,
-    patch: { name?: string; ignore?: string[]; tolerance?: string | null; instructionWindowHours?: number; movementWindowHours?: number },
+    patch: {
+      name?: string;
+      ignore?: string[];
+      tolerance?: string | null;
+      instructionWindowHours?: number;
+      movementWindowHours?: number;
+      registerMaxAgeDays?: number | null;
+    },
   ): AssetRecord {
     const asset = this.asset(ref);
     const name = label(patch.name, "name");
@@ -956,13 +988,17 @@ export class Concord {
       asset.instructionWindowHours,
     );
     const movementWindowHours = windowHours(patch.movementWindowHours, "movementWindowHours", asset.movementWindowHours);
+    let registerMaxAge = asset.registerMaxAgeDays ?? null;
+    if (patch.registerMaxAgeDays === null) registerMaxAge = null;
+    else if (patch.registerMaxAgeDays !== undefined) registerMaxAge = maxAgeDays(patch.registerMaxAgeDays);
     this.db.write(
-      "UPDATE assets SET name = ?, ignore_addresses = ?, tolerance = ?, instruction_window_hours = ?, movement_window_hours = ? WHERE id = ?",
+      "UPDATE assets SET name = ?, ignore_addresses = ?, tolerance = ?, instruction_window_hours = ?, movement_window_hours = ?, register_max_age_days = ? WHERE id = ?",
       name ?? asset.name,
       JSON.stringify(patch.ignore === undefined ? asset.ignore : addresses(patch.ignore, "ignore")),
       tolerance,
       instructionWindowHours,
       movementWindowHours,
+      registerMaxAge,
       asset.id,
     );
     return this.asset(asset.id);
@@ -3380,12 +3416,21 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     const controls = this.controls(asset.id);
     const actions = this.actions(asset.id);
     const events = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE asset_id = ?", asset.id)!.n;
+    const latestRegister = this.db.get<{ as_of: string }>(
+      "SELECT as_of FROM registers WHERE asset_id = ? ORDER BY as_of DESC, id DESC LIMIT 1",
+      asset.id,
+    );
     return {
       ...asset,
       supply: formatUnits(state.supply, asset.decimals),
       holderCount: state.balances.size,
       eventCount: events,
       incomplete: state.incomplete.length > 0,
+      // A register nobody has refreshed is the attention item a timer-free service cannot raise itself.
+      registerStale:
+        asset.registerMaxAgeDays === undefined || !latestRegister
+          ? null
+          : this.registerAge(latestRegister.as_of, asset.registerMaxAgeDays),
       lastRun: run && { id: run.id, asOf: run.asOf, status: run.status, openBreaks: run.openBreaks },
       openBreaks: {
         reconciliation: run?.openBreaks ?? 0,
@@ -3401,6 +3446,13 @@ ul { margin: 6px 0 0; padding-left: 20px; }
    */
   isVoided(row: Row): boolean {
     return row.voided_at !== null && row.voided_at !== undefined;
+  }
+
+  /** How far past its limit a register is, or null while it is still fresh enough. */
+  private registerAge(asOf: string, limitDays: number): { ageDays: number } | null {
+    const ageMs = this.nowMs() - Date.parse(asOf);
+    if (!(ageMs > limitDays * DAY_MS)) return null;
+    return { ageDays: Math.floor(ageMs / DAY_MS) };
   }
 
   /** Everything an auditor needs for a period, with a digest over the content. */

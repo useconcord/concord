@@ -244,6 +244,10 @@ CREATE TABLE action_history (
 CREATE INDEX action_history_action ON action_history (action_id, id);
 CREATE VIEW action_changes AS SELECT * FROM action_history;
 `,
+  // v13: per-asset register freshness limit; NULL means the stale-register check is off
+  `
+ALTER TABLE assets ADD COLUMN register_max_age_days INTEGER;
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */
