@@ -69,8 +69,13 @@ pnpm concord watch FUND:GISSUER... --name "Example Fund" --ignore GTREASURY...
 pnpm concord register FUND ./register.csv --as-of 2026-10-06T21:00:00Z
 pnpm concord action FUND split --record 2026-10-01T21:00:00Z --ratio 2:1
 pnpm concord export FUND --out audit.json
+pnpm concord reconcile-all --json                # every asset's latest register
 pnpm concord --help
 ```
+
+`reconcile-all` runs `reconcile` for every watched asset that has a register, carries on past an
+asset that fails and prints one summary. Add `--fail-on-breaks` when a script should exit
+non-zero over an asset with unresolved breaks.
 
 Every command, option and exit code (journal, instructions, dividends, controls, backup and the
 rest) is in the [command-line reference](./docs/cli.md). The audit pack format is in
