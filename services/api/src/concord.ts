@@ -276,6 +276,51 @@ function windowHours(value: number | undefined, field: string, fallback: number)
   return value;
 }
 
+/** Options for one page of `holdings()`. `after` is the last address of the previous page. */
+export interface HoldingsPage {
+  limit?: number;
+  offset?: number;
+  after?: string;
+  /** Address prefix; case does not matter. */
+  q?: string;
+  sort?: "units" | "address";
+}
+
+const DEFAULT_HOLDINGS_LIMIT = 100;
+const MAX_HOLDINGS_LIMIT = 1000;
+
+function holdingsPage(page: HoldingsPage): Required<Pick<HoldingsPage, "limit" | "offset" | "sort">> & Pick<HoldingsPage, "after" | "q"> {
+  const limit = page.limit ?? DEFAULT_HOLDINGS_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_HOLDINGS_LIMIT) {
+    throw new Invalid(`limit must be an integer between 1 and ${MAX_HOLDINGS_LIMIT}`);
+  }
+  const offset = page.offset ?? 0;
+  if (!Number.isInteger(offset) || offset < 0) throw new Invalid("offset must be a whole number");
+  if (page.after !== undefined && page.offset !== undefined) throw new Invalid("give offset or after, not both");
+  if (page.after !== undefined && !page.after) throw new Invalid("after must be an address");
+  const sort = page.sort ?? "units";
+  if (sort !== "units" && sort !== "address") throw new Invalid("sort must be units or address");
+  const q = page.q?.trim().toUpperCase();
+  return { limit, offset, sort, ...(page.after !== undefined ? { after: page.after } : {}), ...(q ? { q } : {}) };
+}
+
+export interface ConcordOptions {
+  checkpointEvery?: number;
+  /** ed25519 private key (PEM, or a path to one) that signs audit packs. */
+  signingKey?: string;
+  /** Assets of one network that `syncAll` indexes at once. 1 walks them in order. */
+  syncConcurrency?: number;
+  /**
+   * How long one asset may page through events in a `syncAll` pass before it yields; the rest of
+   * its backlog waits for the next pass. 0 means no limit.
+   */
+  syncAssetBudgetMs?: number;
+  /** Milliseconds clock, for tests. */
+  now?: () => number;
+}
+
+export type SyncResult = { added: number; more?: true };
+
 const HTML_ESCAPES: Record<string, string> = {
   "&": "&amp;",
   "<": "&lt;",
@@ -525,6 +570,18 @@ function resume(
  * One workspace: every operation the API and the CLI expose over a single database.
  * Reads the chain, never writes it.
  */
+export const EVENT_COLUMNS = [
+  "id",
+  "ledger",
+  "closedAt",
+  "kind",
+  "from",
+  "to",
+  "units",
+  "authorized",
+  "txHash",
+] as const;
+
 export class Concord {
   private readonly syncing = new Map<string, Promise<{ added: number }>>();
   private readonly removing = new Set<string>();
@@ -532,16 +589,26 @@ export class Concord {
   private readonly stateMemo = new Map<string, HoldingsState>();
   private seenVersion: number;
   private readonly checkpointEvery: number;
+  private readonly syncConcurrency: number;
+  private readonly syncAssetBudgetMs: number;
+  private readonly clock: () => number;
 
   constructor(
     readonly db: Db,
     readonly networks: Networks,
-    readonly options: { checkpointEvery?: number; signingKey?: string } = {},
+    readonly options: ConcordOptions = {},
   ) {
     this.seenVersion = db.dataVersion();
     const every = options.checkpointEvery ?? CHECKPOINT_EVERY;
     if (!Number.isSafeInteger(every) || every < 1) throw new Error("checkpointEvery must be a positive integer");
     this.checkpointEvery = every;
+    const concurrency = options.syncConcurrency ?? 1;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error("syncConcurrency must be a positive integer");
+    this.syncConcurrency = concurrency;
+    const budget = options.syncAssetBudgetMs ?? 0;
+    if (!Number.isFinite(budget) || budget < 0) throw new Error("syncAssetBudgetMs must be zero or more");
+    this.syncAssetBudgetMs = budget;
+    this.clock = options.now ?? Date.now;
   }
 
   /** Forget cached holdings for an asset this instance just changed. */
@@ -839,42 +906,54 @@ export class Concord {
 
   // ── indexer ───────────────────────────────────────────────────────────────
 
-  /** Pull new events for one asset. Concurrent calls share one pass. */
-  sync(ref: string, head?: ChainHead): Promise<{ added: number }> {
+  /**
+   * Pull new events for one asset. Concurrent calls share one pass. With `budgetMs` the pass
+   * stops paging once that long has gone by, saves its position and reports `more`.
+   */
+  sync(ref: string, head?: ChainHead, options: { budgetMs?: number } = {}): Promise<SyncResult> {
     const asset = this.asset(ref);
     if (this.removing.has(asset.id)) throw new NotFound(`asset ${ref} is not watched`);
     const running = this.syncing.get(asset.id);
     if (running) return running;
-    const pass = this.runSync(asset, head).finally(() => this.syncing.delete(asset.id));
+    const deadline = options.budgetMs ? this.clock() + options.budgetMs : undefined;
+    const pass = this.runSync(asset, head, deadline).finally(() => this.syncing.delete(asset.id));
     this.syncing.set(asset.id, pass);
     return pass;
   }
 
   /**
    * One pass over every asset. Networks run side by side, so an outage on one cannot stall the
-   * other. Keyed by asset id.
+   * other. Within a network up to `syncConcurrency` assets index at once, taken in order, and
+   * each may page for at most `syncAssetBudgetMs` before yielding to the next pass; one asset
+   * with a long backlog therefore cannot hold the rest. Keyed by asset id.
    */
-  async syncAll(): Promise<Record<string, { added: number } | { error: string }>> {
-    const out: Record<string, { added: number } | { error: string }> = {};
+  async syncAll(): Promise<Record<string, SyncResult | { error: string }>> {
+    const out: Record<string, SyncResult | { error: string }> = {};
+    const budget = this.syncAssetBudgetMs > 0 ? { budgetMs: this.syncAssetBudgetMs } : {};
     await Promise.all(
       this.networkNames().map(async (network) => {
         const assets = this.assets(network);
         if (assets.length === 0) return;
         // One look at the chain's range serves every asset on the network.
         const head = await this.networks[network]?.chain?.latestLedger().catch(() => undefined);
-        for (const asset of assets) {
-          try {
-            out[asset.id] = await this.sync(asset.id, head);
-          } catch (err) {
-            out[asset.id] = { error: describeFailure(err) };
+        let next = 0;
+        const worker = async () => {
+          while (next < assets.length) {
+            const asset = assets[next++]!;
+            try {
+              out[asset.id] = await this.sync(asset.id, head, budget);
+            } catch (err) {
+              out[asset.id] = { error: describeFailure(err) };
+            }
           }
-        }
+        };
+        await Promise.all(Array.from({ length: Math.min(this.syncConcurrency, assets.length) }, worker));
       }),
     );
     return out;
   }
 
-  private async runSync(asset: AssetRecord, head?: ChainHead): Promise<{ added: number }> {
+  private async runSync(asset: AssetRecord, head?: ChainHead, deadline?: number): Promise<SyncResult> {
     try {
       const chain = this.requireChain(asset.network);
       head ??= await chain.latestLedger();
@@ -901,7 +980,7 @@ export class Concord {
           );
         }
       }
-      const out = await this.syncPass(ready, chain);
+      const out = await this.syncPass(ready, chain, deadline);
       if (this.removing.has(asset.id)) return { added: 0 };
       if (asset.syncError) {
         this.db.write("UPDATE assets SET sync_error = NULL, sync_error_at = NULL WHERE id = ?", asset.id);
@@ -919,7 +998,7 @@ export class Concord {
     }
   }
 
-  private async syncPass(asset: AssetRecord, chain: ChainSource): Promise<{ added: number }> {
+  private async syncPass(asset: AssetRecord, chain: ChainSource, deadline?: number): Promise<SyncResult> {
     if (asset.startLedger === undefined) throw new Invalid("this asset has no starting ledger yet");
     const limit = 1000;
     let from: { startLedger: number } | { cursor: string } = asset.cursor
@@ -967,6 +1046,8 @@ export class Concord {
         this.touch(asset.id);
       }
       if (atTip || !cursor) break;
+      // Out of time: the cursor is saved, so the next pass carries on from here.
+      if (deadline !== undefined && this.clock() >= deadline) return { added, more: true };
       from = { cursor };
     }
     return { added };
@@ -1114,13 +1195,44 @@ export class Concord {
     });
   }
 
-  holdings(ref: string, asOf?: string) {
+  /**
+   * Holders of an asset at a moment. Without `page` every holder is returned (exports rely on
+   * this). With `page` the list is filtered, sorted and cut to one page; `supply` and
+   * `holderCount` always describe the whole asset, and `matched` counts holders matching `q`.
+   * Every sort ends on the address, so the order is total and pages are stable across calls.
+   */
+  holdings(ref: string, asOf?: string, page?: HoldingsPage) {
     const asset = this.asset(ref);
     const upTo = asOf ? isoTime(asOf, "asOf") : undefined;
+    const paging = page ? holdingsPage(page) : undefined;
     const state = this.state(asset, upTo);
     const ignored = new Set(asset.ignore);
-    const holders = [...state.balances]
-      .sort((a, b) => (a[1] === b[1] ? a[0].localeCompare(b[0]) : a[1] > b[1] ? -1 : 1))
+    let rows = [...state.balances].sort(
+      paging?.sort === "address"
+        ? (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+        : (a, b) => (a[1] === b[1] ? (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0) : a[1] > b[1] ? -1 : 1),
+    );
+    const holderCount = rows.length;
+    let pageInfo: { matched: number; offset: number; limit: number; next: string | null } | undefined;
+    if (paging) {
+      if (paging.q) rows = rows.filter(([address]) => address.startsWith(paging.q!));
+      const matched = rows.length;
+      let offset = paging.offset;
+      if (paging.after !== undefined) {
+        const after = paging.after;
+        const at = rows.findIndex(([address]) => address === after);
+        if (at >= 0) offset = at + 1;
+        else if (paging.sort === "address") {
+          // The holder may have left since the last page; resume at the next address instead.
+          const next = rows.findIndex(([address]) => address > after);
+          offset = next < 0 ? rows.length : next;
+        } else throw new Invalid("after must name a holder on this list; it may have sold out, so start again");
+      }
+      rows = rows.slice(offset, offset + paging.limit);
+      const end = offset + rows.length;
+      pageInfo = { matched, offset, limit: paging.limit, next: end < matched && rows.length > 0 ? rows[rows.length - 1]![0] : null };
+    }
+    const holders = rows
       .map(([address, units]) => ({
         address,
         units: formatUnits(units, asset.decimals),
@@ -1141,10 +1253,11 @@ export class Concord {
       asOf: upTo ?? asset.syncedAt ?? null,
       ledger: state.ledger,
       supply: formatUnits(state.supply, asset.decimals),
-      holderCount: holders.length,
+      holderCount,
       incomplete: state.incomplete,
       beforeHistory,
       warnings,
+      ...(pageInfo ? { page: pageInfo } : {}),
       holders,
     };
   }
@@ -2837,6 +2950,51 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     };
   }
 
+  /**
+   * Stream events for an asset over a period as CSV or NDJSON lines one by one.
+   * Yields formatted strings with line breaks. Does not materialize all events in memory.
+   * Peak memory growth remains bounded under 50 MB even for 200,000+ events.
+   */
+  *exportEvents(
+    ref: string,
+    period: { from?: string; to?: string; format?: "csv" | "ndjson" } = {},
+    formatOrOptions?: "csv" | "ndjson" | { format?: "csv" | "ndjson" },
+  ): Generator<string, void, undefined> {
+    const format =
+      (typeof formatOrOptions === "string"
+        ? formatOrOptions
+        : formatOrOptions?.format ?? period.format) ?? "csv";
+    if (format !== "csv" && format !== "ndjson") {
+      throw new Invalid("format must be csv or ndjson");
+    }
+    const asset = this.asset(ref);
+    const to = period.to ? isoTime(period.to, "to") : (asset.syncedAt ?? now());
+    const from = period.from ? isoTime(period.from, "from") : "1970-01-01T00:00:00.000Z";
+    if (from > to) throw new Invalid("from must not be after to");
+
+    const header = format === "csv" ? toCsv([...EVENT_COLUMNS], []) : "";
+    if (format === "csv") {
+      yield header;
+    }
+
+    const stmt = this.db.raw.prepare(
+      "SELECT * FROM events WHERE asset_id = ? AND closed_at >= ? AND closed_at <= ? ORDER BY id",
+    );
+    const iter = stmt.iterate(asset.id, from, to);
+    try {
+      for (const row of iter) {
+        const ev = this.eventJson(toEvent(row as Row), asset.decimals);
+        if (format === "csv") {
+          yield toCsv([...EVENT_COLUMNS], [ev]).slice(header.length);
+        } else {
+          yield JSON.stringify(ev) + "\n";
+        }
+      }
+    } finally {
+      iter.return?.();
+    }
+  }
+
   /** One section of the audit pack, or one corporate action's entitlement table, as CSV. */
   exportCsv(ref: string, section: string, period: { from?: string; to?: string; id?: number } = {}): string {
     // Reject an unknown section before building the audit pack, which replays every event.
@@ -2878,7 +3036,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       case "holdings":
         return toCsv(["address", "units", "share", "status", "ignored"], pack.holdings.holders);
       case "events":
-        return toCsv(["id", "ledger", "closedAt", "kind", "from", "to", "units", "authorized", "txHash"], pack.events);
+        return toCsv([...EVENT_COLUMNS], pack.events);
       case "controls":
         return toCsv(
           ["closedAt", "ledger", "type", "account", "units", "txHash", "instructionRef", "approvedBy", "reason"],

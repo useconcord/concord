@@ -1,6 +1,6 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { Concord, NotFound, type Networks } from "./concord.js";
+import { Concord, NotFound, type Networks, type ConcordOptions } from "./concord.js";
 import { Db, type SqliteSynchronous } from "./db.js";
 import { ORG_MIGRATIONS } from "./schema.js";
 
@@ -54,6 +54,8 @@ export class Tenants {
     /** Only workspaces the identity records know are opened. */
     private readonly known: (orgId: string) => boolean,
     private readonly listOrgIds: () => string[],
+    /** Passed to every workspace, e.g. how the indexer schedules its passes. */
+    private readonly workspaceOptions: ConcordOptions = {},
   ) {}
 
   forOrg(orgId: string): Concord {
@@ -70,7 +72,7 @@ export class Tenants {
       db.close();
       throw new Error(`the database for workspace ${orgId} belongs to ${owner.value}`);
     }
-    const workspace = new Concord(db, this.networks);
+    const workspace = new Concord(db, this.networks, this.workspaceOptions);
     this.open.set(orgId, workspace);
     return workspace;
   }
@@ -85,8 +87,8 @@ export class Tenants {
   }
 
   /** Index every asset of every workspace, then advance corporate actions that have come due. */
-  async syncAll(): Promise<Array<{ orgId: string; assetId: string; added?: number; error?: string }>> {
-    const out: Array<{ orgId: string; assetId: string; added?: number; error?: string }> = [];
+  async syncAll(): Promise<Array<{ orgId: string; assetId: string; added?: number; more?: true; error?: string }>> {
+    const out: Array<{ orgId: string; assetId: string; added?: number; more?: true; error?: string }> = [];
     for (const orgId of this.listOrgIds()) {
       try {
         const workspace = this.forOrg(orgId);

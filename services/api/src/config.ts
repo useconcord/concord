@@ -56,6 +56,10 @@ export interface Config {
   port: number;
   /** Seconds between indexer passes. 0 disables the background indexer. */
   syncIntervalSec: number;
+  /** Assets of one network the indexer works on at once. */
+  syncConcurrency: number;
+  /** Seconds one asset may index in a pass before yielding to the next one. 0 means no limit. */
+  syncAssetBudgetSec: number;
   webDir: string;
   /** The origin users reach the service on. Decides cookie flags and the OAuth redirect. */
   publicUrl: string;
@@ -91,7 +95,7 @@ const KNOWN_CONCORD_SETTINGS = [
   "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
   "CONCORD_MAX_ASSETS", "CONCORD_MAX_INVITES", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
   "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS", "CONCORD_RPC_HEADERS_FILE",
-  "CONCORD_SIGNING_KEY", "CONCORD_SIGNUP", "CONCORD_SQLITE_SYNCHRONOUS", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
+  "CONCORD_SIGNING_KEY", "CONCORD_SIGNUP", "CONCORD_SQLITE_SYNCHRONOUS", "CONCORD_SYNC_ASSET_BUDGET", "CONCORD_SYNC_CONCURRENCY", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
   "CONCORD_TESTNET_RPC_URLS", "CONCORD_TRUST_PROXY", "CONCORD_USER_AGENT_SUFFIX", "CONCORD_WEB_DIR",
 ] as const;
 const KNOWN_SETTINGS = new Set<string>(KNOWN_CONCORD_SETTINGS);
@@ -301,6 +305,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
     host,
     port,
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),
+    syncConcurrency: integer(env, "CONCORD_SYNC_CONCURRENCY", 4, 1, 32),
+    syncAssetBudgetSec: integer(env, "CONCORD_SYNC_ASSET_BUDGET", 60, 0, 3600),
     webDir: env.CONCORD_WEB_DIR ? resolve(ROOT, env.CONCORD_WEB_DIR) : resolve(ROOT, "apps/web/dist"),
     publicUrl,
     trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0, 0, 10),

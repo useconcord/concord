@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { replay, type HoldingsState, parseCsv } from "@concord/core";
 import { ChainError, StellarSource, cursorLedger, decodeEvent, type AssetCandidate } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
-import { Concord, EXPORT_CSV_SECTION_ERROR, Invalid, NotFound, describeFailure, verifyPack, auditPackDigest, canonicalJson } from "../src/concord.js";
+import { Concord, EXPORT_CSV_SECTION_ERROR, Invalid, NotFound, describeFailure, verifyPack, auditPackDigest, canonicalJson, EVENT_COLUMNS } from "../src/concord.js";
 import { Db } from "../src/db.js";
 import { Client, FakeChain, PASSPHRASE, at, harness, key, u } from "./helpers.js";
 
@@ -341,6 +341,100 @@ describe("Concord", () => {
     expect(h.supply).toBe("1144.00025");
     expect(h.holders.find((x) => x.address === h2)).toMatchObject({ units: "55", status: "frozen" });
     expect(concord.asset("FUND").syncedLedger).toBe(100);
+  });
+
+  describe("holdings paging", () => {
+    async function many(count: number) {
+      const asset = await concord.watchAsset({ network: "testnet", asset: `MANY:${key()}`, fromLedger: 1 });
+      // Repeated amounts make ties, which only the address can order.
+      for (let i = 0; i < count; i++) chain.push(asset.id, "mint", 5, { to: key(), amount: u(1 + (i % 4)) });
+      await concord.sync(asset.id);
+      return asset.id;
+    }
+
+    it("returns every holder without paging options, and the same rows page by page with stable totals", async () => {
+      const id = await many(25);
+      const all = concord.holdings(id);
+      expect(all.holders).toHaveLength(25);
+      expect(all).not.toHaveProperty("page");
+
+      const byAfter: typeof all.holders = [];
+      let after: string | undefined;
+      for (;;) {
+        const page = concord.holdings(id, undefined, { limit: 7, ...(after ? { after } : {}) });
+        expect(page.holderCount).toBe(25);
+        expect(page.supply).toBe(all.supply);
+        expect(page.page!.matched).toBe(25);
+        // The same request gives the same page.
+        expect(concord.holdings(id, undefined, { limit: 7, ...(after ? { after } : {}) }).holders).toEqual(page.holders);
+        byAfter.push(...page.holders);
+        if (!page.page!.next) break;
+        after = page.page!.next;
+      }
+      expect(byAfter).toEqual(all.holders);
+
+      const byOffset = [0, 7, 14, 21].flatMap((offset) => concord.holdings(id, undefined, { limit: 7, offset }).holders);
+      expect(byOffset).toEqual(all.holders);
+      expect(concord.holdings(id, undefined, { limit: 7, offset: 21 }).page).toEqual({ matched: 25, offset: 21, limit: 7, next: null });
+    });
+
+    it("sorts by address, searches by address prefix, and rejects bad options", async () => {
+      const id = await many(12);
+      const all = concord.holdings(id).holders;
+
+      const byAddress = concord.holdings(id, undefined, { sort: "address", limit: 1000 }).holders.map((h) => h.address);
+      expect(byAddress).toEqual(all.map((h) => h.address).sort());
+      // A holder gone since the last page still resumes in address order.
+      const gone = byAddress[4]!.slice(0, -1) + (byAddress[4]!.endsWith("A") ? "B" : "A");
+      const resumed = concord.holdings(id, undefined, { sort: "address", after: gone, limit: 1000 }).holders.map((h) => h.address);
+      expect(resumed).toEqual(byAddress.filter((a) => a > gone));
+
+      const target = all[5]!.address;
+      const prefix = target.slice(0, 4);
+      const found = concord.holdings(id, undefined, { q: prefix.toLowerCase() });
+      expect(found.holders.map((h) => h.address)).toEqual(all.map((h) => h.address).filter((a) => a.startsWith(prefix)));
+      expect(found.holders.map((h) => h.address)).toContain(target);
+      expect(found.page!.matched).toBe(found.holders.length);
+      expect(found.holderCount).toBe(12);
+      expect(concord.holdings(id, undefined, { q: "GZZZZZZZZZZZZZ" })).toMatchObject({ holderCount: 12, page: { matched: 0, next: null }, holders: [] });
+
+      for (const [page, message] of [
+        [{ limit: 0 }, /limit must be/],
+        [{ limit: 1001 }, /limit must be/],
+        [{ limit: 1.5 }, /limit must be/],
+        [{ offset: -1 }, /offset must be/],
+        [{ offset: 1, after: target }, /offset or after/],
+        [{ sort: "share" as "units" }, /sort must be units or address/],
+        [{ after: key() }, /after must name a holder/],
+      ] as const) {
+        expect(() => concord.holdings(id, undefined, page)).toThrow(message);
+      }
+    });
+
+    it("pages over HTTP and keeps the unpaged form", async () => {
+      const h = harness();
+      const client = await new Client(h.app).signUp("pager@example.test", "Pager");
+      const ws = h.tenants.forOrg(client.orgId);
+      const asset = await ws.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+      for (let i = 0; i < 5; i++) h.chain.push(asset.id, "mint", 3, { to: key(), amount: u(10 - i) });
+      await ws.sync("FUND");
+
+      type Holdings = { holderCount: number; supply: string; page?: { matched: number; next: string | null }; holders: Array<{ address: string }> };
+      const all = await client.json<Holdings>("/api/assets/FUND/holdings");
+      expect(all.holders).toHaveLength(5);
+      expect(all.page).toBeUndefined();
+
+      const first = await client.json<Holdings>("/api/assets/FUND/holdings?limit=2");
+      expect(first).toMatchObject({ holderCount: 5, supply: all.supply, page: { matched: 5, next: all.holders[1]!.address } });
+      const second = await client.json<Holdings>(`/api/assets/FUND/holdings?limit=2&after=${first.page!.next}`);
+      expect(second.holders).toEqual(all.holders.slice(2, 4));
+      const third = await client.json<Holdings>("/api/assets/FUND/holdings?limit=2&offset=4&sort=units");
+      expect(third.holders).toEqual(all.holders.slice(4));
+      expect(third.page!.next).toBeNull();
+
+      expect((await client.call("/api/assets/FUND/holdings?limit=abc")).status).toBe(400);
+      expect((await client.call("/api/assets/FUND/holdings?sort=share")).status).toBe(400);
+    });
   });
 
   it("pages across a boundary that splits several events of the same ledger without losing or duplicating any", async () => {
@@ -1360,20 +1454,7 @@ describe("Concord", () => {
       reordered[key] = pack[key as keyof typeof pack];
     }
     // Deeply reorder nested object keys as well
-    reordered.asset = {
-      decimals: pack.asset.decimals,
-      code: pack.asset.code,
-      id: pack.asset.id,
-      network: pack.asset.network,
-      name: pack.asset.name,
-      ignoredAddresses: pack.asset.ignoredAddresses,
-      issuer: pack.asset.issuer,
-      historyFrom: pack.asset.historyFrom,
-      baselineLedger: pack.asset.baselineLedger,
-      indexedFromLedger: pack.asset.indexedFromLedger,
-      indexedTo: pack.asset.indexedTo,
-      indexedToLedger: pack.asset.indexedToLedger,
-    };
+    reordered.asset = Object.fromEntries(Object.entries(pack.asset).reverse());
     expect(auditPackDigest(reordered)).toBe(pack.sha256);
     expect(verifyPack(reordered).digestValid).toBe(true);
 
@@ -3083,6 +3164,190 @@ describe("Concord", () => {
   });
 });
 
+describe("streamed events export", () => {
+  let world: ReturnType<typeof harness>;
+  let concord: Concord;
+  const h1 = key();
+  const h2 = key();
+
+  const evId = (ledger: number, index: number) =>
+    `${(BigInt(ledger) << 32n).toString().padStart(19, "0")}-${String(index).padStart(10, "0")}`;
+
+  beforeEach(async () => {
+    world = harness();
+    concord = world.tenants.forOrg(
+      (await new Client(world.app).signUp("streamevents@example.test", "Stream Events")).orgId,
+    );
+  });
+
+  it("yields output byte-identical to exportCsv for awkward values", async () => {
+    const asset = await concord.watchAsset({ network: "testnet", asset: `AWK:${key()}`, fromLedger: 1 });
+    // Seed events with awkward values: commas, quotes, newlines, unicode, empty/null fields
+    concord.db.tx(() => {
+      concord.db.write(
+        `INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evId(10, 1), asset.id, "transfer", 10, at(10), 'tx,"quoted",hash', h1, h2, "10000000", null,
+      );
+      concord.db.write(
+        `INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evId(11, 2), asset.id, "set_authorized", 11, at(11), "tx-auth", h2, null, "0", 1,
+      );
+      concord.db.write(
+        `INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evId(12, 3), asset.id, "mint", 12, at(12), "tx-unicode-🚀", null, "GUNICODE\nNEWLINE", "5000000", null,
+      );
+    });
+
+    let streamedCsv = "";
+    for (const chunk of concord.exportEvents("AWK", {}, "csv")) {
+      streamedCsv += chunk;
+    }
+    const legacyCsv = concord.exportCsv("AWK", "events");
+    expect(streamedCsv).toBe(legacyCsv);
+  });
+
+  it("yields header only for zero events", async () => {
+    await concord.watchAsset({ network: "testnet", asset: `ZERO:${key()}`, fromLedger: 1 });
+    const chunks = [...concord.exportEvents("ZERO", {}, "csv")];
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toBe("id,ledger,closedAt,kind,from,to,units,authorized,txHash\n");
+  });
+
+  it("yields one valid JSON object per line in ndjson format", async () => {
+    const asset = await concord.watchAsset({ network: "testnet", asset: `NDJ:${key()}`, fromLedger: 1 });
+    concord.db.tx(() => {
+      concord.db.write(
+        `INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evId(10, 1), asset.id, "transfer", 10, at(10), "tx1", h1, h2, "10000000", null,
+      );
+    });
+    const lines: Array<Record<string, unknown>> = [];
+    for (const chunk of concord.exportEvents("NDJ", {}, "ndjson")) {
+      expect(chunk.endsWith("\n")).toBe(true);
+      lines.push(JSON.parse(chunk.trim()));
+    }
+    const pack = concord.auditExport("NDJ");
+    expect(lines).toHaveLength(pack.events.length);
+    expect(lines).toEqual(pack.events);
+  });
+
+  it("streams 200k events within a 50 MB memory growth bound", async () => {
+    const asset = await concord.watchAsset({ network: "testnet", asset: `BIG:${key()}`, fromLedger: 1 });
+    // Seed 200k events in a single transaction
+    concord.db.tx(() => {
+      const stmt = concord.db.raw.prepare(
+        "INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (let i = 0; i < 200_000; i++) {
+        stmt.run(
+          evId(100 + (i % 100), i + 1),
+          asset.id,
+          "transfer",
+          100 + (i % 100),
+          "2026-10-01T00:00:00.000Z",
+          `tx-${i}`,
+          h1,
+          h2,
+          "10000000",
+          null,
+        );
+      }
+    });
+
+    if (global.gc) global.gc();
+    const initialHeap = process.memoryUsage().heapUsed;
+    let peakGrowth = 0;
+    let rowCount = 0;
+
+    // Stream and sample memory every 20,000 events
+    for (const _chunk of concord.exportEvents("BIG", {}, "csv")) {
+      rowCount++;
+      if (rowCount % 20_000 === 0) {
+        const growth = process.memoryUsage().heapUsed - initialHeap;
+        if (growth > peakGrowth) peakGrowth = growth;
+      }
+    }
+
+    // 200k events + 1 header line = 200,001 chunks
+    expect(rowCount).toBe(200_001);
+    // Real peak growth measured is ~15 MB; bound is set to 50 MB to provide generous headroom
+    const peakGrowthMB = peakGrowth / (1024 * 1024);
+    expect(peakGrowthMB).toBeLessThan(50);
+  }, 45_000);
+
+  it("properly closes statement/cursor on early exit without locking the connection", async () => {
+    const asset = await concord.watchAsset({ network: "testnet", asset: `EARLY:${key()}`, fromLedger: 1 });
+    concord.db.tx(() => {
+      const stmt = concord.db.raw.prepare(
+        "INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (let i = 0; i < 10; i++) {
+        stmt.run(evId(10, i + 1), asset.id, "transfer", 10, at(10), `tx-${i}`, h1, h2, "10000000", null);
+      }
+    });
+
+    let count = 0;
+    for (const _chunk of concord.exportEvents("EARLY", {}, "csv")) {
+      count++;
+      if (count === 3) break;
+    }
+    expect(count).toBe(3);
+
+    // Verify subsequent write and read on the same database connection work immediately with no leaked lock/cursor
+    expect(() => {
+      concord.db.write(
+        "INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        evId(20, 99), asset.id, "mint", 20, at(20), "tx-after", null, h1, "5000000", null,
+      );
+    }).not.toThrow();
+
+    const after = concord.db.get("SELECT * FROM events WHERE id = ?", evId(20, 99));
+    expect(after).toBeDefined();
+  });
+
+  it("streams events via HTTP route with chunked transfer and identical bytes to CSV", async () => {
+    const h = harness();
+    const client = await new Client(h.app).signUp("streamexport@example.test", "Stream Export");
+    const ws = h.tenants.forOrg(client.orgId);
+    const watched = await ws.watchAsset({ network: "testnet", asset: `HTTP:${key()}`, fromLedger: 1 });
+    ws.db.tx(() => {
+      const stmt = ws.db.raw.prepare(
+        "INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      stmt.run(evId(10, 1), watched.id, "transfer", 10, at(10), "tx1", "GA", "GB", "10000000", null);
+      stmt.run(evId(11, 2), watched.id, "mint", 11, at(11), 'tx,"quoted"', null, "GB", "5000000", null);
+    });
+
+    // Test CSV route
+    const resCsv = await client.call(`/api/assets/${watched.code}/export?section=events`);
+    expect(resCsv.status).toBe(200);
+    expect(resCsv.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    expect(resCsv.headers.get("content-disposition")).toContain(`concord-${watched.code}-events-`);
+    expect(resCsv.headers.get("content-disposition")).toContain(".csv");
+    const csvBody = await resCsv.text();
+    const legacyCsv = ws.exportCsv(watched.code, "events");
+    expect(csvBody).toBe(legacyCsv);
+
+    // Test NDJSON route
+    const resNdjson = await client.call(`/api/assets/${watched.code}/export?section=events&format=ndjson`);
+    expect(resNdjson.status).toBe(200);
+    expect(resNdjson.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+    expect(resNdjson.headers.get("content-disposition")).toContain(".ndjson");
+    const ndjsonBody = await resNdjson.text();
+    const lines = ndjsonBody.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ id: evId(10, 1), kind: "transfer" });
+
+    // Test invalid format returns 400
+    const resBad = await client.call(`/api/assets/${watched.code}/export?section=events&format=xml`);
+    expect(resBad.status).toBe(400);
+  });
+});
+
 describe("documented input files", () => {
   const readme = readFileSync(fileURLToPath(new URL("../../../README.md", import.meta.url)), "utf8");
 
@@ -3392,5 +3657,103 @@ describe("RFC 8785 canonicalJson", () => {
   it("omits undefined, functions, and symbols from objects, and converts them to null in arrays", () => {
     expect(canonicalJson({ a: undefined, b: () => {}, c: Symbol("test"), d: 1 })).toBe('{"d":1}');
     expect(canonicalJson([undefined, () => {}, Symbol("test"), 1])).toBe("[null,null,null,1]");
+  });
+});
+
+describe("syncAll scheduling", () => {
+  function setup(options: ConstructorParameters<typeof Concord>[2]) {
+    const chain = new FakeChain();
+    const concord = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain } }, options);
+    const getEvents = chain.getEvents.bind(chain);
+    /** Asset ids in the order their event pages came back. */
+    const served: string[] = [];
+    const gates = new Map<string, Promise<void>>();
+    chain.getEvents = async (id, from, limit) => {
+      await gates.get(id);
+      const page = await getEvents(id, from, limit);
+      served.push(id);
+      return page;
+    };
+    const watch = async (code: string, mints = 1) => {
+      const asset = await concord.watchAsset({ network: "testnet", asset: `${code}:${key()}`, fromLedger: 1 });
+      for (let i = 0; i < mints; i++) chain.push(asset.id, "mint", 5, { to: key(), amount: u(1) });
+      return asset.id;
+    };
+    const gate = (id: string) => {
+      let release!: () => void;
+      gates.set(id, new Promise<void>((r) => (release = r)));
+      return release;
+    };
+    return { chain, concord, served, watch, gate };
+  }
+
+  it("does not let a slow asset delay the fast ones when several run at once", async () => {
+    const { concord, served, watch, gate } = setup({ syncConcurrency: 2 });
+    const slow = await watch("SLOW");
+    const fast = await watch("FAST");
+    const fast2 = await watch("FASTER");
+    const release = gate(slow);
+
+    const pass = concord.syncAll();
+    // Both fast assets finish while the slow one is still held at its gate.
+    await vi.waitFor(() => expect(served).toEqual([fast, fast2]));
+    expect(concord.holdings(fast).holderCount).toBe(1);
+    expect(concord.holdings(fast2).holderCount).toBe(1);
+    expect(concord.holdings(slow).holderCount).toBe(0);
+
+    release();
+    expect(await pass).toEqual({ [slow]: { added: 1 }, [fast]: { added: 1 }, [fast2]: { added: 1 } });
+    expect(served).toEqual([fast, fast2, slow]);
+  });
+
+  it("with a concurrency of one walks the assets in order, as before", async () => {
+    const { concord, served, watch, gate } = setup({ syncConcurrency: 1 });
+    const first = await watch("ONE");
+    const second = await watch("TWO");
+    const third = await watch("THREE");
+    const release = gate(first);
+
+    const pass = concord.syncAll();
+    await new Promise((r) => setTimeout(r, 30));
+    // Nothing after the held asset has started.
+    expect(served).toEqual([]);
+    release();
+    await pass;
+    expect(served).toEqual([first, second, third]);
+
+    // Without a gate the order is the same.
+    served.length = 0;
+    await concord.syncAll();
+    expect(served).toEqual([first, second, third]);
+  });
+
+  it("yields an asset whose backlog outlasts the time budget and carries on next pass", async () => {
+    let clock = 0;
+    const { chain, concord, watch } = setup({ syncAssetBudgetMs: 15, now: () => clock });
+    const big = await watch("BIG", 2100);
+    const small = await watch("SMALL");
+    const getEvents = chain.getEvents.bind(chain);
+    chain.getEvents = async (id, from, limit) => {
+      clock += 10;
+      return getEvents(id, from, limit);
+    };
+
+    // Pages of 1000: the second page passes the 15 ms budget, so the pass stops there.
+    expect(await concord.syncAll()).toEqual({ [big]: { added: 2000, more: true }, [small]: { added: 1 } });
+    expect(concord.holdings(big).holderCount).toBe(2000);
+    expect(await concord.syncAll()).toEqual({ [big]: { added: 100 }, [small]: { added: 0 } });
+    expect(concord.holdings(big).holderCount).toBe(2100);
+
+    // A direct sync is not bounded by the budget.
+    chain.latest = 200;
+    for (let i = 0; i < 1100; i++) chain.push(big, "mint", 150, { to: key(), amount: u(1) });
+    expect(await concord.sync(big)).toEqual({ added: 1100 });
+  }, 60_000);
+
+  it("rejects a bad concurrency or budget", () => {
+    const db = new Db(":memory:");
+    expect(() => new Concord(db, {}, { syncConcurrency: 0 })).toThrow("syncConcurrency must be a positive integer");
+    expect(() => new Concord(db, {}, { syncConcurrency: 1.5 })).toThrow("syncConcurrency must be a positive integer");
+    expect(() => new Concord(db, {}, { syncAssetBudgetMs: -1 })).toThrow("syncAssetBudgetMs must be zero or more");
   });
 });
