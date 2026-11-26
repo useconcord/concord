@@ -346,6 +346,16 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     throttle(c, "reconcile", 20, 10 * 60_000);
     return c.json(await c.var.ws.reconcileAction(numeric(c, "id")));
   });
+  priv.post("/actions/:id/void", async (c) => {
+    throttle(c, "reconcile", 20, 10 * 60_000);
+    const { ws, actor } = c.var;
+    const id = numeric(c, "id");
+    const input = await jsonBody<{ reason: unknown }>(c);
+    if (typeof input.reason !== "string" || !input.reason.trim()) {
+      throw new Invalid("a reason is required to void a corporate action");
+    }
+    return c.json(await ws.voidAction(id, input.reason.trim(), actor), 200);
+  });
 
   priv.get("/assets/:id/controls", (c) => c.json(c.var.ws.controls(id(c))));
 

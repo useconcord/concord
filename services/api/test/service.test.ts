@@ -2468,6 +2468,103 @@ describe("Concord", () => {
     ).rejects.toThrow(new Invalid("windowToLedger must be a positive ledger sequence number"));
   });
 
+  it("voids a wrongly entered action and keeps it in the audit trail", async () => {
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(5),
+      ratePerUnit: "10",
+    });
+    // A typo in the rate shows as real breaks until the action is voided.
+    expect(action.state).toBe("breaks");
+    expect(action.openBreaks).toBeGreaterThan(0);
+    expect(action.voidedAt).toBeNull();
+    expect(concord.assetSummary(concord.asset("FUND")).openBreaks.actions).toBe(action.openBreaks);
+
+    // The reason is mandatory, an unknown id is a 404, and a void cannot be re-entered.
+    await expect(concord.voidAction(action.id, "   ")).rejects.toThrow(/reason is required/);
+    await expect(concord.voidAction(999, "typo in the rate")).rejects.toThrow(/not found/);
+    expect(concord.db.get("SELECT voided_at FROM actions WHERE id = ?", action.id)!.voided_at).toBeNull();
+
+    const voided = await concord.voidAction(action.id, "  typo in the rate ", { id: "u1", label: "ops" });
+    expect(voided).toMatchObject({ state: "voided", openBreaks: 0, voidedBy: "ops", voidReason: "typo in the rate" });
+    expect(voided.voidedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(concord.db.get("SELECT voided_by, void_reason FROM actions WHERE id = ?", action.id)).toMatchObject({
+      voided_by: "ops",
+      void_reason: "typo in the rate",
+    });
+    // Its breaks stay on the record, but the action no longer counts as open anywhere.
+    expect(voided.result!.breaks.length).toBeGreaterThan(0);
+    expect(concord.assetSummary(concord.asset("FUND")).openBreaks.actions).toBe(0);
+    await expect(concord.voidAction(action.id, "again")).rejects.toThrow(/already voided/);
+
+    // Never reconciled again, whether asked directly or by the scheduler after a sync.
+    const before = concord.action(action.id);
+    const rerun = await concord.reconcileAction(action.id);
+    expect(rerun).toMatchObject({ state: "voided", reconciledAt: before.reconciledAt, openBreaks: 0 });
+    chain.latest = 400;
+    chain.push(assetId, "transfer", 300, { from: h1, to: h2, amount: u(1) });
+    await concord.syncAll();
+    expect(await concord.reconcileDue()).toBe(0);
+    expect(concord.action(action.id).reconciledAt).toBe(before.reconciledAt);
+
+    // It still appears in the audit pack, with who voided it and why.
+    const pack = concord.auditExport("FUND");
+    expect(pack.corporateActions.find((a) => a.id === action.id)).toMatchObject({
+      id: action.id,
+      openBreaks: 0,
+      params: { voided: { by: "ops", reason: "typo in the rate" } },
+    });
+    expect(validateAuditPack(pack), JSON.stringify(validateAuditPack.errors, null, 2)).toBe(true);
+
+    // A voided action still reaches the breaks export, but contributes no rows.
+    const breaksCsv = concord.exportCsv("FUND", "breaks");
+    expect(breaksCsv).toContain("UNINSTRUCTED_CONTROL");
+    expect(breaksCsv.split("\n").filter((line) => line.includes(`dividend ${action.id}`))).toEqual([]);
+
+    // The same void can also be requested over HTTP, by the workspace owner.
+    const h = harness();
+    const client = await new Client(h.app).signUp("ops@example.test", "Ops");
+    const watched = await client.json<{ id: string }>("/api/assets", {
+      body: { network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 },
+    });
+    // The watch already read the chain once, so put the control event past that cursor.
+    h.chain.latest = 120;
+    h.chain.push(watched.id, "set_authorized", 110, { from: h1, authorized: true });
+    const created = await client.call("/api/assets/FUND/actions", {
+      body: { type: "split", recordTime: at(10), num: "2", den: "1" },
+    });
+    const createdBody = (await created.json()) as { id: number; state: string };
+    const actionId = createdBody.id;
+    expect(actionId).toBeGreaterThan(0);
+
+    const voidRes = await client.call(`/api/actions/${actionId}/void`, {
+      method: "POST",
+      body: { reason: "entered in error" },
+    });
+    expect(voidRes.status).toBe(200);
+    expect(await voidRes.json()).toMatchObject({
+      state: "voided",
+      openBreaks: 0,
+      voidedBy: "Test User <ops@example.test>",
+      voidReason: "entered in error",
+    });
+    const again = await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "again" } });
+    expect(again.status).toBe(400);
+    const blank = await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "  " } });
+    expect(blank.status).toBe(400);
+    const missing = await client.call("/api/actions/99999/void", { method: "POST", body: { reason: "x" } });
+    expect(missing.status).toBe(404);
+    expect((await client.json<{ state: string; openBreaks: number }>(`/api/actions/${actionId}`)).state).toBe("voided");
+    expect((await client.json<{ openBreaks: { actions: number } }>("/api/overview")).assets[0]!.openBreaks.actions).toBe(0);
+
+    // The same action over CSV: still in the trail, but no open rows.
+    const csv = await client.call(`/api/assets/FUND/export?section=breaks&to=${encodeURIComponent(at(120))}`);
+    expect(csv.headers.get("content-type")).toContain("text/csv");
+    const text = await csv.text();
+    expect(text).toContain("UNINSTRUCTED_CONTROL");
+    expect(text.split("\n").filter((line: string) => line.includes(`split ${actionId}`))).toEqual([]);
+  });
+
   it("refuses a code shared by two watched assets and a pay asset from another network", async () => {
     await concord.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
     expect(() => concord.asset("FUND")).toThrow(/more than one/);
