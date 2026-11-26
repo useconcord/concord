@@ -49,6 +49,16 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 
 ### Added
 
+- A dividend paid in an asset nobody watches now watches that asset automatically as a hidden,
+  flow-only asset, so the payments can be reconciled (#569). Schema: `ORG_MIGRATIONS` entry 11
+  adds `assets.flow_only`.
+- A four-eyes rule for sign-off (#539): with `requireSecondSigner` on (`PATCH /api/org/settings`,
+  owners only; off by default), a break cannot be resolved by the person who acknowledged it or
+  who imported the register. Schema: `ORG_MIGRATIONS` entry 10 adds `registers.imported_by_id`.
+- Assign a break to a workspace member (`PUT /api/assets/:id/notes/assignee`) and list current
+  breaks by owner (`GET /api/assets/:id/breaks?assignee=<id|none>`); the owner is in break payloads
+  and the breaks CSV (#563). Schema: `ORG_MIGRATIONS` entry 9 adds `break_notes.assignee_id` and
+  `assignee_label`.
 - Workspace webhooks (#562): an owner sets an https endpoint (`PUT /api/org/webhook`) that gets an
   HMAC-signed POST (`x-concord-signature`) when a run or a corporate action has breaks, or a sync
   starts failing. Private, loopback and metadata addresses are refused, checked again at connect
@@ -56,6 +66,9 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 - `concord reconcile-all` reconciles every asset that has a register in one command, continuing
   past an asset that fails and summarising each result; `--fail-on-breaks` exits 2 when any
   asset has open breaks (#560).
+- Scheduled corporate action terms (rate, ratio, window, exclusions, payer) can be edited before
+  snapshot with `updateAction` (or `PATCH /api/actions/:id`). Schema: `ORG_MIGRATIONS` v12 adds
+  the `action_history` table and `action_changes` view (#545).
 - A printable HTML report of a reconciliation run, with its summary, coverage, register and run
   digests, and break sign-off history (`GET /api/reconciliations/:id/report`) (#552).
 - `Concord.diffRegisters(asset, fromId, toId)` compares two registers of one asset by
@@ -80,6 +93,11 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
   current holdings replay from the nearest stored checkpoint, so their cost near the tip no longer
   grows with the length of the history. Results are unchanged. Schema: `ORG_MIGRATIONS` entry 6
   adds the `holdings_checkpoints` table and the `events_asset_ledger` index on `events`.
+- Per-asset register freshness limits (#561): setting `registerMaxAgeDays` makes `assetSummary` report `registerStale: { ageDays }` once the latest register is older than that many days. Off unless set. Schema: `ORG_MIGRATIONS` entry 13 adds `assets.register_max_age_days`.
+- Stored headline figures per asset (#575): the overview and `GET /api/assets/:id` read each
+  asset's supply, holder and event counts and open-break counts from one row, rewritten after
+  every change that moves them, so a poll no longer replays events or rebuilds the controls
+  log. Schema: `ORG_MIGRATIONS` entry 14 adds the `asset_stats` table.
 - CSV templates can include one illustrative example row with `?example=1` or `?example=true` (#200).
 - The accounting core (`feat(core)`, `c402eae`): holdings replay from CAP-67 events, position
   and movement reconciliation with typed breaks, corporate-action entitlements (dividend,

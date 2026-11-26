@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import Ajv from "ajv";
 import { Keypair, StrKey, nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -56,18 +58,32 @@ describe("decodeEvent", () => {
     });
     expect(decodeEvent(raw([sym("mint"), addr(b), str(`FUND:${a}`)], i128(7n)))).toMatchObject({ to: b, amount: 7n });
     expect(decodeEvent(raw([sym("clawback"), addr(b), str(`FUND:${a}`)], i128(7n)))).toMatchObject({ from: b });
-    const authFalse = decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(false).toXDR("base64")));
+    const authFalse = decodeEvent(
+      raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(false).toXDR("base64")),
+    );
     expect(authFalse).toMatchObject({ kind: "set_authorized", from: b, authorized: false, amount: 0n });
-    const authTrue = decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(true).toXDR("base64")));
+    const authTrue = decodeEvent(
+      raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(true).toXDR("base64")),
+    );
     expect(authTrue).toMatchObject({ kind: "set_authorized", from: b, authorized: true, amount: 0n });
     expect(decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], str("false")))).toBeUndefined();
     expect(decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], i128(1n)))).toBeUndefined();
-    expect(decodeEvent(raw([sym("set_authorized"), addr(b), str(`FUND:${a}`)], nativeToScVal(undefined, { type: "void" }).toXDR("base64")))).toBeUndefined();
+    expect(
+      decodeEvent(
+        raw(
+          [sym("set_authorized"), addr(b), str(`FUND:${a}`)],
+          nativeToScVal(undefined, { type: "void" }).toXDR("base64"),
+        ),
+      ),
+    ).toBeUndefined();
   });
 
   it("takes the subject from the last address when an admin leads, and reads muxed values", () => {
     expect(decodeEvent(raw([sym("mint"), addr(a), addr(b), str(`FUND:${a}`)], i128(7n)))).toMatchObject({ to: b });
-    const muxed = nativeToScVal({ amount: 9n, to_muxed_id: 42n }, { type: { amount: ["symbol", "i128"], to_muxed_id: ["symbol", "u64"] } });
+    const muxed = nativeToScVal(
+      { amount: 9n, to_muxed_id: 42n },
+      { type: { amount: ["symbol", "i128"], to_muxed_id: ["symbol", "u64"] } },
+    );
     expect(decodeEvent(raw([sym("transfer"), addr(a), addr(b)], muxed.toXDR("base64")))).toMatchObject({ amount: 9n });
   });
 
@@ -305,7 +321,12 @@ describe("Concord", () => {
   beforeEach(async () => {
     chain = new FakeChain();
     concord = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain } });
-    const asset = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1, ignore: [treasury] });
+    const asset = await concord.watchAsset({
+      network: "testnet",
+      asset: `FUND:${issuer}`,
+      fromLedger: 1,
+      ignore: [treasury],
+    });
     assetId = asset.id;
     chain.push(assetId, "set_authorized", 2, { from: h1, authorized: true });
     chain.push(assetId, "mint", 3, { to: h1, amount: u(100) });
@@ -319,9 +340,7 @@ describe("Concord", () => {
   async function expectPagedSync(count: number, calls: number) {
     const code = `PAGE${count}`;
     const asset = await concord.watchAsset({ network: "testnet", asset: `${code}:${issuer}`, fromLedger: 1 });
-    const pushed = Array.from({ length: count }, () =>
-      chain.push(asset.id, "mint", 40, { to: h3, amount: 1n }).id,
-    );
+    const pushed = Array.from({ length: count }, () => chain.push(asset.id, "mint", 40, { to: h3, amount: 1n }).id);
 
     chain.calls = 0;
     expect(await concord.sync(code)).toEqual({ added: count });
@@ -669,6 +688,166 @@ describe("Concord", () => {
     expect(() => concord.diffRegisters("FUND", mine.registerId, 99_999)).toThrow(new NotFound("no register 99999"));
   });
 
+  it("flags a register only once it is older than the asset's registerMaxAgeDays", async () => {
+    const clock = { value: Date.parse("2026-10-10T00:00:00Z") };
+    const ws = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain } }, { now: () => clock.value });
+    const asset = await ws.watchAsset({ network: "testnet", asset: `AGE:${issuer}`, fromLedger: 1, registerMaxAgeDays: 5 });
+    expect(asset.registerMaxAgeDays).toBe(5);
+
+    ws.importRegister("AGE", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: "2026-10-05T00:00:00Z" });
+
+    // Exactly five days old: the limit has not been exceeded, so there is nothing to flag.
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toBeNull();
+
+    // One millisecond more is enough, and the injected clock is what decides it.
+    clock.value += 1;
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toEqual({ ageDays: 5 });
+
+    clock.value = Date.parse("2026-10-12T00:00:00Z");
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toEqual({ ageDays: 7 });
+    expect(ws.overview().assets.find((a) => a.code === "AGE")!.registerStale).toEqual({ ageDays: 7 });
+  });
+
+  it("leaves the stale-register check off by default and lets the limit be changed or cleared", async () => {
+    const clock = { value: Date.parse("2027-01-01T00:00:00Z") };
+    const ws = new Concord(new Db(":memory:"), { testnet: { passphrase: PASSPHRASE, chain } }, { now: () => clock.value });
+    const asset = await ws.watchAsset({ network: "testnet", asset: `AGE:${issuer}`, fromLedger: 1 });
+    expect(asset.registerMaxAgeDays).toBeUndefined();
+    // No register at all cannot be stale, and the check is off besides.
+    expect(ws.assetSummary(asset).registerStale).toBeNull();
+
+    ws.importRegister("AGE", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: "2026-10-05T00:00:00Z" });
+    // Default off: an old register is not flagged until a limit is set.
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toBeNull();
+
+    expect(ws.updateAsset("AGE", { registerMaxAgeDays: 30 }).registerMaxAgeDays).toBe(30);
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toEqual({ ageDays: 88 });
+
+    // null turns the check back off; the stored value stops being reported.
+    expect(ws.updateAsset("AGE", { registerMaxAgeDays: null }).registerMaxAgeDays).toBeUndefined();
+    expect(ws.assetSummary(ws.asset("AGE")).registerStale).toBeNull();
+
+    for (const bad of [0, -1, 1.5, 3651]) {
+      expect(() => ws.updateAsset("AGE", { registerMaxAgeDays: bad }), `limit ${bad}`).toThrow(Invalid);
+    }
+    await expect(
+      ws.watchAsset({ network: "testnet", asset: `BAD:${issuer}`, fromLedger: 1, registerMaxAgeDays: 0 }),
+    ).rejects.toThrow(new Invalid("registerMaxAgeDays must be a whole number of days from 1 to 3650"));
+    // A refused setting leaves no asset behind.
+    expect(ws.assets().map((a) => a.code)).toEqual(["AGE"]);
+  });
+
+  it("keeps the overview's stored figures equal to a full recompute after every kind of change", async () => {
+    /** The overview as served, then as recomputed from scratch with the stored rows gone. */
+    const expectCurrent = (step: string) => {
+      const served = concord.overview();
+      concord.db.write("DELETE FROM asset_stats");
+      expect(served, `after ${step}`).toEqual(concord.overview());
+      return served.assets.find((a) => a.id === assetId)!;
+    };
+
+    await concord.sync("FUND");
+    expect(expectCurrent("first sync")).toMatchObject({ eventCount: 7, holderCount: 3, supply: "1144" });
+    // Served from the row the sync stored, not recomputed.
+    expect(concord.db.get("SELECT event_count FROM asset_stats WHERE asset_id = ?", assetId)).toEqual({
+      event_count: 7,
+    });
+
+    chain.advance(5);
+    await concord.sync("FUND");
+    expectCurrent("a sync that added nothing");
+
+    chain.push(assetId, "mint", 107, { to: h3, amount: u(4) });
+    chain.push(assetId, "set_authorized", 108, { from: h3, authorized: false });
+    chain.advance(5);
+    await concord.sync("FUND");
+    expect(expectCurrent("a sync with new events")).toMatchObject({ eventCount: 9, supply: "1148" });
+
+    // Issued 100 minutes before h2's freeze at ledger 20: inside the default matching window.
+    concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI1,freeze,${h2},,${at(-80)}\n`);
+    const controlsBefore = expectCurrent("an instructions import").openBreaks.controls;
+
+    // A one-hour window no longer pairs I1 with the freeze, so more controls break.
+    concord.updateAsset("FUND", { instructionWindowHours: 1 });
+    expect(expectCurrent("a narrower instruction window").openBreaks.controls).toBeGreaterThan(
+      controlsBefore,
+    );
+    concord.updateAsset("FUND", { instructionWindowHours: 72 });
+    expect(expectCurrent("the window restored").openBreaks.controls).toBe(controlsBefore);
+
+    const reg = concord.importRegister("FUND", {
+      csv: `holder_id,account,units\nA,${h1},90\nB,${h2},50\n`,
+      asOf: at(40),
+    });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    const reconciled = expectCurrent("a reconciliation");
+    expect(reconciled.lastRun).toMatchObject({ id: run.id, status: "breaks" });
+    expect(reconciled.openBreaks.reconciliation).toBe(run.breaks.length);
+
+    const recon = run.breaks[0]!;
+    concord.setNote("FUND", "recon", recon.key, { fingerprint: recon.fingerprint, status: "resolved", note: "ok" });
+    expect(expectCurrent("a reconciliation sign-off").openBreaks.reconciliation).toBe(run.breaks.length - 1);
+
+    const control = concord.controls("FUND").breaks[0]!;
+    concord.setNote("FUND", "controls", control.key, {
+      fingerprint: control.fingerprint,
+      status: "acknowledged",
+      note: "seen",
+    });
+    expect(expectCurrent("a controls sign-off").openBreaks.controls).toBe(controlsBefore - 1);
+
+    const action = await concord.createAction("FUND", { type: "dividend", recordTime: at(5), ratePerUnit: "0.1" });
+    const withAction = expectCurrent("a corporate action");
+    expect(withAction.openBreaks.actions).toBe(action.openBreaks);
+    expect(action.openBreaks).toBeGreaterThan(0);
+    const missing = action.result!.breaks[0]!;
+    concord.setNote("FUND", `action:${action.id}`, missing.key, {
+      fingerprint: missing.fingerprint,
+      status: "resolved",
+      note: "paid off-chain",
+    });
+    expect(expectCurrent("an action sign-off").openBreaks.actions).toBe(action.openBreaks - 1);
+
+    // A scheduled action that the indexer later reconciles on its own.
+    const later = await concord.createAction("FUND", { type: "split", recordTime: at(150), num: "2", den: "1" });
+    expect(later.state).toBe("scheduled");
+    chain.advance(100);
+    await concord.sync("FUND");
+    expect(await concord.reconcileDue()).toBeGreaterThan(0);
+    expectCurrent("an action reconciled after a sync");
+
+    concord.deleteRegister("FUND", reg.registerId);
+    expect(expectCurrent("a deleted register").lastRun).toBeNull();
+
+    await concord.rebuild("FUND", { defer: true }).catch(() => {});
+    expectCurrent("a deferred rebuild");
+    await concord.sync("FUND").catch(() => {});
+    expectCurrent("the sync after a rebuild");
+  });
+
+  it("serves a poll of the overview without reading events, runs, actions or the controls log", async () => {
+    for (let i = 0; i < 10_000; i++) chain.push(assetId, "mint", 40 + (i % 50), { to: h3, amount: 1n });
+    await concord.sync("FUND");
+    concord.overview();
+
+    const statements: string[] = [];
+    const { all, get } = { all: concord.db.all.bind(concord.db), get: concord.db.get.bind(concord.db) };
+    concord.db.all = ((sql: string, ...params: Parameters<Db["all"]>[1][]) => {
+      statements.push(sql);
+      return all(sql, ...params);
+    }) as Db["all"];
+    concord.db.get = ((sql: string, ...params: Parameters<Db["get"]>[1][]) => {
+      statements.push(sql);
+      return get(sql, ...params);
+    }) as Db["get"];
+    const fund = concord.overview().assets.find((a) => a.id === assetId)!;
+    expect(fund.eventCount).toBe(10_007);
+    expect(statements.length).toBeGreaterThan(0);
+    for (const sql of statements) {
+      expect(sql).not.toMatch(/\b(events|runs|actions|instructions|break_notes|openings)\b/);
+    }
+  });
+
   it("rounds holder shares half up to four decimals so two thirds and one third add to 100", async () => {
     const asset = await concord.watchAsset({ network: "testnet", asset: `THIRDS:${key()}`, fromLedger: 1 });
     chain.push(asset.id, "mint", 3, { to: h1, amount: u(2) });
@@ -697,11 +876,21 @@ describe("Concord", () => {
     await concord.sync("FUND");
     const brk = concord.controls("FUND").breaks.find((b) => b.key === "UNEXECUTED_INSTRUCTION:I7")!;
     expect(brk.status).toBe("open");
-    concord.setNote("FUND", "controls", brk.key, { fingerprint: brk.fingerprint, status: "resolved", note: "cancelled off-chain" });
-    expect(concord.controls("FUND").breaks.find((b) => b.key === brk.key)).toMatchObject({ status: "resolved", noteStale: false });
+    concord.setNote("FUND", "controls", brk.key, {
+      fingerprint: brk.fingerprint,
+      status: "resolved",
+      note: "cancelled off-chain",
+    });
+    expect(concord.controls("FUND").breaks.find((b) => b.key === brk.key)).toMatchObject({
+      status: "resolved",
+      noteStale: false,
+    });
     // The same ref is re-imported for a different account: a different instruction, so open again.
     concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI7,freeze,${h1},,${at(19)}\n`);
-    expect(concord.controls("FUND").breaks.find((b) => b.key === brk.key)).toMatchObject({ status: "open", noteStale: true });
+    expect(concord.controls("FUND").breaks.find((b) => b.key === brk.key)).toMatchObject({
+      status: "open",
+      noteStale: true,
+    });
   });
 
   it("keeps every sign-off change, with who and when, and puts it in the audit pack", async () => {
@@ -798,6 +987,46 @@ describe("Concord", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("assigns a break to a member, keeps the owner across runs, and clears it", async () => {
+    const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    const brk = run.breaks[0]!;
+    const ann = { id: "u2", label: "Ann <ann@example.test>" };
+
+    expect(concord.assignBreak("FUND", "recon", brk.key, ann)).toMatchObject({
+      ok: true,
+      assigneeId: "u2",
+      assigneeLabel: "Ann <ann@example.test>",
+    });
+    expect(concord.run(run.id).breaks.find((b) => b.key === brk.key)).toMatchObject({
+      status: "open",
+      assigneeId: "u2",
+      assigneeLabel: "Ann <ann@example.test>",
+    });
+
+    // The same break reported by a later run keeps its owner.
+    const again = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(41) });
+    const next = await concord.reconcile("FUND", again.registerId);
+    expect(next.breaks.find((b) => b.key === brk.key)).toMatchObject({ assigneeId: "u2" });
+
+    // Signing it off neither drops nor moves the owner, and the list can be narrowed by it.
+    concord.setNote("FUND", "recon", brk.key, { fingerprint: brk.fingerprint, status: "resolved", note: "corrected" });
+    expect(concord.breaks("FUND", "u2").map((b) => b.key)).toContain(brk.key);
+    expect(concord.breaks("FUND", "none").map((b) => b.key)).not.toContain(brk.key);
+
+    // Only a break that exists now can be assigned; null clears the owner.
+    expect(() => concord.assignBreak("FUND", "recon", "NOT_A_BREAK:xyz", ann)).toThrow(/no break/);
+    expect(() => concord.assignBreak("FUND", "nope", brk.key, ann)).toThrow(/scope must be recon/);
+    concord.assignBreak("FUND", "recon", brk.key, null);
+    expect(concord.breaks("FUND", "u2").map((b) => b.key)).not.toContain(brk.key);
+    expect(concord.breaks("FUND").find((b) => b.key === brk.key)).toMatchObject({
+      status: "resolved",
+      note: "corrected",
+      assigneeId: null,
+      assigneeLabel: null,
+    });
   });
 
   it("narrows the whole controls section of an audit pack to the period, not just its records", async () => {
@@ -916,7 +1145,9 @@ describe("Concord", () => {
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
     await concord.watchAsset({ network: "testnet", asset: `OTHER:${issuer}`, fromLedger: 1 });
 
-    await expect(concord.reconcile("OTHER", reg.registerId)).rejects.toThrow(new NotFound("no register imported for this asset"));
+    await expect(concord.reconcile("OTHER", reg.registerId)).rejects.toThrow(
+      new NotFound("no register imported for this asset"),
+    );
     await expect(concord.reconcile("FUND", 999)).rejects.toThrow(new NotFound("no register imported for this asset"));
   });
 
@@ -929,21 +1160,45 @@ describe("Concord", () => {
 
     const day2 = concord.importRegister("FUND", { csv, asOf: at(25) });
     const run2 = await concord.reconcile("FUND", day2.registerId);
-    expect(run2.breaks.map((b) => b.type).sort()).toEqual(["QUANTITY_MISMATCH", "QUANTITY_MISMATCH", "STATUS_MISMATCH"]);
+    expect(run2.breaks.map((b) => b.type).sort()).toEqual([
+      "QUANTITY_MISMATCH",
+      "QUANTITY_MISMATCH",
+      "STATUS_MISMATCH",
+    ]);
     const b1 = run2.breaks.find((b) => b.address === h1)!;
-    expect(b1).toMatchObject({ chainUnits: "90", registerUnits: "100", difference: "-10", firstSeen: at(25), status: "open" });
+    expect(b1).toMatchObject({
+      chainUnits: "90",
+      registerUnits: "100",
+      difference: "-10",
+      firstSeen: at(25),
+      status: "open",
+    });
 
     // Signed off, the break stays signed off while the numbers hold…
-    concord.setNote("FUND", "recon", b1.key, { fingerprint: b1.fingerprint, status: "acknowledged", note: "T+1 timing" }, { id: "u1", label: "ops" });
+    concord.setNote(
+      "FUND",
+      "recon",
+      b1.key,
+      { fingerprint: b1.fingerprint, status: "acknowledged", note: "T+1 timing" },
+      { id: "u1", label: "ops" },
+    );
     const day3 = concord.importRegister("FUND", { csv, asOf: at(26) });
     const run3 = await concord.reconcile("FUND", day3.registerId);
-    expect(run3.breaks.find((b) => b.address === h1)).toMatchObject({ status: "acknowledged", firstSeen: at(25), note: "T+1 timing", noteAuthor: "ops" });
+    expect(run3.breaks.find((b) => b.address === h1)).toMatchObject({
+      status: "acknowledged",
+      firstSeen: at(25),
+      note: "T+1 timing",
+      noteAuthor: "ops",
+    });
     expect(run3.openBreaks).toBe(2);
 
     // …and reopens when they move.
     const day4 = concord.importRegister("FUND", { csv, asOf: at(40) });
     const run4 = await concord.reconcile("FUND", day4.registerId);
-    expect(run4.breaks.find((b) => b.address === h2 && b.type === "QUANTITY_MISMATCH")).toMatchObject({ chainUnits: "55", firstSeen: at(25) });
+    expect(run4.breaks.find((b) => b.address === h2 && b.type === "QUANTITY_MISMATCH")).toMatchObject({
+      chainUnits: "55",
+      firstSeen: at(25),
+    });
     chain.latest = 200;
     chain.push(assetId, "transfer", 150, { from: h1, to: h2, amount: u(1) });
     const day5 = concord.importRegister("FUND", { csv, asOf: at(160) });
@@ -1211,7 +1466,10 @@ describe("Concord", () => {
       expect(assetRows()).toBe(before);
     }
     // It is the request for opening balances that is refused, not the token.
-    expect(await concord.watchAsset({ ...watch, baseline: false })).toMatchObject({ id: contractId, startMode: "window" });
+    expect(await concord.watchAsset({ ...watch, baseline: false })).toMatchObject({
+      id: contractId,
+      startMode: "window",
+    });
 
     // The suite sets no baselineResult, so an opt-out that still asked for opening balances would
     // fail with "no baseline" instead of landing in window mode.
@@ -1224,7 +1482,10 @@ describe("Concord", () => {
   it("does not flag an instruction from before a baseline asset's indexed history as never executed", async () => {
     const other = key();
     chain.latest = 200;
-    chain.baselineResult = { ledger: 150, openings: new Map([[h1, { amount: u(70), authorized: true, asOfLedger: 150 }]]) };
+    chain.baselineResult = {
+      ledger: 150,
+      openings: new Map([[h1, { amount: u(70), authorized: true, asOfLedger: 150 }]]),
+    };
     await concord.watchAsset({ network: "testnet", asset: `OLD:${other}` });
     // Issued long before the watch started: its window ended before Concord could have seen it.
     concord.importInstructions("OLD", `ref,type,account,issued_at\nI-OLD,freeze,${h1},2025-01-01T00:00:00Z\n`);
@@ -1469,7 +1730,9 @@ describe("Concord", () => {
       payer: silentPayer,
     });
     expect(action.result!.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining(`Payer ${silentPayer} has no recorded flows in the action window`)]),
+      expect.arrayContaining([
+        expect.stringContaining(`Payer ${silentPayer} has no recorded flows in the action window`),
+      ]),
     );
   });
 
@@ -1505,9 +1768,7 @@ describe("Concord", () => {
     expect(action.snapshot).toBeNull();
     expect(action.state).toBe("scheduled");
     expect(action.result).not.toBeNull();
-    expect(action.result!.warnings).toEqual([
-      expect.stringContaining("earlier than history start"),
-    ]);
+    expect(action.result!.warnings).toEqual([expect.stringContaining("earlier than history start")]);
 
     // reconcile() on OLD with asOf earlier than history start (e.g. at(5)) carries warning
     const regEarly = concord.importRegister("OLD", {
@@ -1515,16 +1776,12 @@ describe("Concord", () => {
       asOf: at(5),
     });
     const runEarly = await concord.reconcile("OLD", regEarly.registerId);
-    expect(runEarly.warnings).toEqual([
-      expect.stringContaining("earlier than history start"),
-    ]);
+    expect(runEarly.warnings).toEqual([expect.stringContaining("earlier than history start")]);
 
     // holdings() on OLD with asOf earlier than history start carries beforeHistory flag and warning
     const holdingsEarly = concord.holdings("OLD", at(5));
     expect(holdingsEarly.beforeHistory).toBe(true);
-    expect(holdingsEarly.warnings).toEqual([
-      expect.stringContaining("earlier than history start"),
-    ]);
+    expect(holdingsEarly.warnings).toEqual([expect.stringContaining("earlier than history start")]);
 
     // holdings() with asOf after history start has beforeHistory: false and empty warnings
     const holdingsNormal = concord.holdings("OLD", at(160));
@@ -1702,6 +1959,8 @@ describe("Concord", () => {
         "controls.asOf",
         "controls.breaks[]",
         "controls.breaks[].address",
+        "controls.breaks[].assigneeId",
+        "controls.breaks[].assigneeLabel",
         "controls.breaks[].eventId",
         "controls.breaks[].fingerprint",
         "controls.breaks[].history[]",
@@ -1762,6 +2021,8 @@ describe("Concord", () => {
         "corporateActions[].recordTime",
         "corporateActions[].result.breaks[]",
         "corporateActions[].result.breaks[].address",
+        "corporateActions[].result.breaks[].assigneeId",
+        "corporateActions[].result.breaks[].assigneeLabel",
         "corporateActions[].result.breaks[].difference",
         "corporateActions[].result.breaks[].expected",
         "corporateActions[].result.breaks[].fingerprint",
@@ -1838,6 +2099,8 @@ describe("Concord", () => {
         "reconciliations[].assetId",
         "reconciliations[].breaks[]",
         "reconciliations[].breaks[].address",
+        "reconciliations[].breaks[].assigneeId",
+        "reconciliations[].breaks[].assigneeLabel",
         "reconciliations[].breaks[].chainUnits",
         "reconciliations[].breaks[].difference",
         "reconciliations[].breaks[].fingerprint",
@@ -2157,16 +2420,30 @@ describe("Concord", () => {
 
   it("maps SQLite busy and full errors to distinct user-facing messages (#534)", () => {
     const errBusyCode = Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
-    const errBusyNum = Object.assign(new Error("database is locked"), { code: "ERR_SQLITE_ERROR", errcode: 5, errstr: "busy" });
-    const errLocked = Object.assign(new Error("database table is locked"), { code: "ERR_SQLITE_ERROR", errcode: 6, errstr: "database table is locked" });
+    const errBusyNum = Object.assign(new Error("database is locked"), {
+      code: "ERR_SQLITE_ERROR",
+      errcode: 5,
+      errstr: "busy",
+    });
+    const errLocked = Object.assign(new Error("database table is locked"), {
+      code: "ERR_SQLITE_ERROR",
+      errcode: 6,
+      errstr: "database table is locked",
+    });
     const errFullCode = Object.assign(new Error("SQLITE_FULL: database or disk is full"), { code: "SQLITE_FULL" });
-    const errFullNum = Object.assign(new Error("database or disk is full"), { code: "ERR_SQLITE_ERROR", errcode: 13, errstr: "database or disk is full" });
+    const errFullNum = Object.assign(new Error("database or disk is full"), {
+      code: "ERR_SQLITE_ERROR",
+      errcode: 13,
+      errstr: "database or disk is full",
+    });
     const errEnospc = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
     const errGeneric = new Error("something unexpected failed");
 
     const logged: unknown[] = [];
     const origError = console.error;
-    console.error = (...args: unknown[]) => { logged.push(args[0]); };
+    console.error = (...args: unknown[]) => {
+      logged.push(args[0]);
+    };
     try {
       expect(describeFailure(errBusyCode)).toBe("[db_locked] Database is locked.");
       expect(describeFailure(errBusyNum)).toBe("[db_locked] Database is locked.");
@@ -2207,9 +2484,9 @@ describe("Concord", () => {
   it("rejects watching an asset outside known when known is set (#509)", async () => {
     chain.known = new Set();
     const badIssuer = key();
-    await expect(
-      concord.watchAsset({ network: "testnet", asset: `FUND:${badIssuer}`, fromLedger: 1 }),
-    ).rejects.toThrow("testnet has no asset FUND from that issuer");
+    await expect(concord.watchAsset({ network: "testnet", asset: `FUND:${badIssuer}`, fromLedger: 1 })).rejects.toThrow(
+      "testnet has no asset FUND from that issuer",
+    );
     chain.known = undefined;
   });
 
@@ -2247,10 +2524,20 @@ describe("Concord", () => {
     concord.importJournal("FUND", `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\n`);
     concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI1,freeze,${h2},,${at(19)}\n`);
     const action = await concord.createAction("FUND", { type: "split", recordTime: at(35), num: "2", den: "1" });
-    concord.setNote("FUND", "recon", run.breaks[0]!.key, { fingerprint: run.breaks[0]!.fingerprint, status: "resolved", note: "x" });
+    concord.setNote("FUND", "recon", run.breaks[0]!.key, {
+      fingerprint: run.breaks[0]!.fingerprint,
+      status: "resolved",
+      note: "x",
+    });
     const actionBreak = action.result!.breaks[0]!;
-    concord.setNote("FUND", `action:${action.id}`, actionBreak.key, { fingerprint: actionBreak.fingerprint, status: "resolved", note: "x" });
-    expect(() => concord.setNote("FUND", "action:999", "k", { fingerprint: "f", status: "resolved", note: "x" })).toThrow(/scope/);
+    concord.setNote("FUND", `action:${action.id}`, actionBreak.key, {
+      fingerprint: actionBreak.fingerprint,
+      status: "resolved",
+      note: "x",
+    });
+    expect(() =>
+      concord.setNote("FUND", "action:999", "k", { fingerprint: "f", status: "resolved", note: "x" }),
+    ).toThrow(/scope/);
 
     concord.deleteRegister("FUND", reg.registerId);
     expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM register_positions")!.n).toBe(0);
@@ -2258,11 +2545,27 @@ describe("Concord", () => {
 
     await concord.unwatchAsset("FUND");
     const tables = concord.db
-      .all<{ name: string }>("SELECT m.name FROM sqlite_master m JOIN pragma_table_info(m.name) c ON c.name = 'asset_id' WHERE m.type = 'table'")
+      .all<{ name: string }>(
+        "SELECT m.name FROM sqlite_master m JOIN pragma_table_info(m.name) c ON c.name = 'asset_id' WHERE m.type = 'table'",
+      )
       .map((t) => t.name);
-    expect(tables).toEqual(expect.arrayContaining(["events", "openings", "registers", "journal", "instructions", "runs", "actions", "break_notes"]));
+    expect(tables).toEqual(
+      expect.arrayContaining([
+        "events",
+        "openings",
+        "registers",
+        "journal",
+        "instructions",
+        "runs",
+        "actions",
+        "break_notes",
+      ]),
+    );
     for (const table of tables) {
-      expect(concord.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE asset_id = ?`, assetId)!.n, table).toBe(0);
+      expect(
+        concord.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE asset_id = ?`, assetId)!.n,
+        table,
+      ).toBe(0);
     }
     expect(() => concord.asset("FUND")).toThrow(/not watched/);
     // The same asset can be watched again from scratch.
@@ -2345,7 +2648,12 @@ describe("Concord", () => {
   });
 
   it("rebuild moves an asset watched from a named ledger over to opening balances", async () => {
-    expect(startColumns(assetId)).toEqual({ start_mode: "ledger", start_ledger: 1, baseline_ledger: null, state: "ready" });
+    expect(startColumns(assetId)).toEqual({
+      start_mode: "ledger",
+      start_ledger: 1,
+      baseline_ledger: null,
+      state: "ready",
+    });
     chain.latest = 300;
     chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
     await concord.rebuild("FUND");
@@ -2360,7 +2668,12 @@ describe("Concord", () => {
   it("rebuild gives a contract token a fresh window, and never opening balances", async () => {
     const contractId = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
     await concord.watchAsset({ network: "testnet", asset: contractId, decimals: 7, fromLedger: 5 });
-    expect(startColumns(contractId)).toEqual({ start_mode: "ledger", start_ledger: 5, baseline_ledger: null, state: "ready" });
+    expect(startColumns(contractId)).toEqual({
+      start_mode: "ledger",
+      start_ledger: 5,
+      baseline_ledger: null,
+      state: "ready",
+    });
     // Opening balances are on offer, and are not for this asset: it has no issuer to ask about.
     chain.baselineResult = { ledger: 250, openings: new Map([[h1, { amount: u(42), asOfLedger: 250 }]]) };
     chain.oldest = 100;
@@ -2373,7 +2686,9 @@ describe("Concord", () => {
       baseline_ledger: null,
       state: "ready",
     });
-    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM openings WHERE asset_id = ?", contractId)!.n).toBe(0);
+    expect(concord.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM openings WHERE asset_id = ?", contractId)!.n).toBe(
+      0,
+    );
   });
 
   it("a deferred rebuild clears the indexed history and its error at once, and keeps every book", async () => {
@@ -2386,18 +2701,38 @@ describe("Concord", () => {
     // Every kind of book against it (reconciling indexes the transfer), and a failure on record.
     const reg = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(315) });
     const run = await concord.reconcile("FUND", reg.registerId);
-    concord.importJournal("FUND", `ref,date,type,from_account,to_account,units\nJ1,${at(310)},transfer,${h1},${h2},2\n`);
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(310)},transfer,${h1},${h2},2\n`,
+    );
     concord.importInstructions("FUND", `ref,type,account,units,issued_at\nI1,freeze,${h2},,${at(312)}\n`);
     await concord.createAction("FUND", { type: "split", recordTime: at(312), num: "2", den: "1" });
     const brk = run.breaks[0]!;
     concord.setNote("FUND", "recon", brk.key, { fingerprint: brk.fingerprint, status: "resolved", note: "x" });
-    concord.db.write("UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?", "connection reset", at(316), assetId);
+    concord.db.write(
+      "UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?",
+      "connection reset",
+      at(316),
+      assetId,
+    );
 
     const rows = (table: string) => concord.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`)!.n;
-    const books = ["registers", "register_positions", "journal", "instructions", "runs", "actions", "break_notes", "break_note_history"];
+    const books = [
+      "registers",
+      "register_positions",
+      "journal",
+      "instructions",
+      "runs",
+      "actions",
+      "break_notes",
+      "break_note_history",
+    ];
     const bookRows = () => Object.fromEntries(books.map((table) => [table, rows(table)]));
     const before = bookRows();
-    expect(Object.values(before).every((n) => n > 0), JSON.stringify(before)).toBe(true);
+    expect(
+      Object.values(before).every((n) => n > 0),
+      JSON.stringify(before),
+    ).toBe(true);
     expect([rows("events"), rows("openings")]).toEqual([1, 1]);
     expect(concord.asset("FUND")).toMatchObject({
       cursor: expect.any(String),
@@ -2450,7 +2785,12 @@ describe("Concord", () => {
     // Let the deferred pass go and wait for it: sync() hands back the pass already in flight.
     release();
     await concord.sync("FUND");
-    expect(startColumns(assetId)).toEqual({ start_mode: "baseline", start_ledger: 319, baseline_ledger: 318, state: "ready" });
+    expect(startColumns(assetId)).toEqual({
+      start_mode: "baseline",
+      start_ledger: 319,
+      baseline_ledger: 318,
+      state: "ready",
+    });
     expect(concord.asset("FUND")).toMatchObject({ syncedLedger: 320, cursor: expect.any(String) });
     expect(concord.asset("FUND").syncError).toBeUndefined();
     expect([rows("events"), rows("openings")]).toEqual([0, 2]);
@@ -2638,6 +2978,183 @@ describe("Concord", () => {
     expect(text.split("\n").filter((line: string) => line.includes(`split ${actionId}`))).toEqual([]);
   });
 
+  it("edits the terms of a scheduled corporate action before its snapshot is taken", async () => {
+    const actor = { id: "user_123", label: "operator@example.com" };
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(500),
+      ratePerUnit: "0.1",
+    });
+    expect(action.state).toBe("scheduled");
+    expect(action.snapshot).toBeNull();
+    expect(action.label).toBe("Dividend 0.1 per unit");
+
+    // Update rate and execution window
+    const updated = await concord.updateAction(
+      action.id,
+      {
+        ratePerUnit: "0.25",
+        windowTo: at(600),
+        windowFromLedger: 450,
+        windowToLedger: 550,
+      },
+      actor,
+    );
+
+    expect(updated.state).toBe("scheduled");
+    expect(updated.label).toBe("Dividend 0.25 per unit");
+    expect(updated.params).toMatchObject({
+      ratePerUnit: "0.25",
+      windowTo: at(600),
+      windowFromLedger: 450,
+      windowToLedger: 550,
+    });
+
+    // Change log verification
+    const history = concord.actionHistory(action.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({
+      actionId: action.id,
+      author: actor.label,
+      authorId: actor.id,
+      label: "Dividend 0.25 per unit",
+    });
+    expect(concord.actionChanges(action.id)).toEqual(history);
+
+    // Update with custom label
+    const custom = await concord.updateAction(action.id, { label: "Special Interim Dividend" }, actor);
+    expect(custom.label).toBe("Special Interim Dividend");
+
+    // Subsequent term update preserves custom label
+    const preserved = await concord.updateAction(action.id, { ratePerUnit: "0.35" });
+    expect(preserved.label).toBe("Special Interim Dividend");
+    expect(preserved.params).toMatchObject({ ratePerUnit: "0.35" });
+
+    const updatedHistory = concord.actionHistory(action.id);
+    expect(updatedHistory).toHaveLength(3);
+  });
+
+  it("edits the ratio of a scheduled split or redemption", async () => {
+    const split = await concord.createAction("FUND", {
+      type: "split",
+      recordTime: at(500),
+      num: "2",
+      den: "1",
+    });
+    expect(split.state).toBe("scheduled");
+    expect(split.label).toBe("Split 2:1");
+
+    const updatedSplit = await concord.updateAction(split.id, { num: "3", den: "2" });
+    expect(updatedSplit.label).toBe("Split 3:2");
+    expect(updatedSplit.params).toMatchObject({ num: "3", den: "2" });
+
+    const redemption = await concord.createAction("FUND", {
+      type: "redemption",
+      recordTime: at(500),
+      num: "1",
+      den: "5",
+    });
+    expect(redemption.state).toBe("scheduled");
+    expect(redemption.label).toBe("Redemption 1/5");
+
+    const updatedRedemption = await concord.updateAction(redemption.id, { num: "2", den: "5" });
+    expect(updatedRedemption.label).toBe("Redemption 2/5");
+    expect(updatedRedemption.params).toMatchObject({ num: "2", den: "5" });
+  });
+
+  it("throws Invalid('already snapshotted') when updating an action whose snapshot has been taken", async () => {
+    // Action created with recordTime in the past is snapshotted immediately
+    const pastAction = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(5),
+      ratePerUnit: "0.1",
+    });
+    expect(pastAction.snapshot).not.toBeNull();
+
+    await expect(concord.updateAction(pastAction.id, { ratePerUnit: "0.2" })).rejects.toThrow(
+      new Invalid("already snapshotted"),
+    );
+
+    // Action scheduled in future gets snapshotted once chain passes its recordTime
+    const scheduled = await concord.createAction("FUND", {
+      type: "split",
+      recordTime: at(500),
+      num: "2",
+      den: "1",
+    });
+    expect(scheduled.snapshot).toBeNull();
+
+    // Editable before snapshot
+    await expect(concord.updateAction(scheduled.id, { num: "3", den: "1" })).resolves.toBeDefined();
+
+    // Advance chain past recordTime and reconcile
+    chain.latest = 600;
+    await concord.sync("FUND");
+    await concord.reconcileDue();
+
+    const checked = concord.action(scheduled.id);
+    expect(checked.snapshot).not.toBeNull();
+
+    // After snapshot, update throws Invalid('already snapshotted')
+    await expect(concord.updateAction(scheduled.id, { num: "4", den: "1" })).rejects.toThrow(
+      new Invalid("already snapshotted"),
+    );
+  });
+
+  it("enforces the same validation rules on updateAction as createAction", async () => {
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(500),
+      ratePerUnit: "0.1",
+    });
+
+    await expect(concord.updateAction(action.id, { ratePerUnit: "abc" })).rejects.toThrow(
+      new Invalid("dividend needs ratePerUnit as a decimal"),
+    );
+    await expect(concord.updateAction(action.id, { windowFromLedger: 0 })).rejects.toThrow(
+      new Invalid("windowFromLedger must be a positive ledger sequence number"),
+    );
+    await expect(concord.updateAction(action.id, { windowToLedger: -1 })).rejects.toThrow(
+      new Invalid("windowToLedger must be a positive ledger sequence number"),
+    );
+    await expect(concord.updateAction(action.id, { windowTo: "garbage" })).rejects.toThrow(
+      /windowTo is not a valid date/,
+    );
+    await expect(concord.updateAction(action.id, { exclude: ["not-an-address"] })).rejects.toThrow(
+      /exclude contains an invalid Stellar address/,
+    );
+    await expect(concord.updateAction(action.id, { rounding: "random" as unknown as "floor" })).rejects.toThrow(
+      new Invalid("rounding must be floor or half-up"),
+    );
+
+    const split = await concord.createAction("FUND", {
+      type: "split",
+      recordTime: at(500),
+      num: "2",
+      den: "1",
+    });
+    await expect(concord.updateAction(split.id, { num: "0" })).rejects.toThrow(
+      new Invalid("num and den must be positive"),
+    );
+    await expect(concord.updateAction(split.id, { num: "abc" })).rejects.toThrow(
+      new Invalid("split needs whole-number num and den"),
+    );
+
+    const redemption = await concord.createAction("FUND", {
+      type: "redemption",
+      recordTime: at(500),
+      num: "1",
+      den: "5",
+    });
+    await expect(concord.updateAction(redemption.id, { num: "10", den: "5" })).rejects.toThrow(
+      new Invalid("a redemption cannot exceed the holding"),
+    );
+
+    await expect(concord.updateAction(999999, { ratePerUnit: "0.5" })).rejects.toThrow(
+      new NotFound("corporate action 999999 not found"),
+    );
+  });
+
   it("refuses a code shared by two watched assets and a pay asset from another network", async () => {
     await concord.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
     expect(() => concord.asset("FUND")).toThrow(/more than one/);
@@ -2710,7 +3227,12 @@ describe("Concord", () => {
     ).rejects.toThrow(new Invalid("classic assets always carry 7 decimals"));
 
     // Classic asset accepts decimals === 7 and undefined
-    const c1 = await concord.watchAsset({ network: "testnet", asset: `OK1:${classicIssuer}`, decimals: 7, fromLedger: 1 });
+    const c1 = await concord.watchAsset({
+      network: "testnet",
+      asset: `OK1:${classicIssuer}`,
+      decimals: 7,
+      fromLedger: 1,
+    });
     expect(c1.decimals).toBe(7);
     const c2 = await concord.watchAsset({ network: "testnet", asset: `OK2:${classicIssuer}`, fromLedger: 1 });
     expect(c2.decimals).toBe(7);
@@ -2789,7 +3311,12 @@ describe("Concord", () => {
     ).rejects.toThrow(`ignore contains an invalid Stellar address: "${invalidAddr}"`);
 
     // watchAsset accepts valid G and C addresses
-    const watched = await concord.watchAsset({ network: "testnet", asset: `GOOD:${key()}`, fromLedger: 1, ignore: [validG, validC] });
+    const watched = await concord.watchAsset({
+      network: "testnet",
+      asset: `GOOD:${key()}`,
+      fromLedger: 1,
+      ignore: [validG, validC],
+    });
     expect(watched.ignore).toEqual([validG, validC]);
 
     // updateAsset rejects invalid address and names it
@@ -2875,7 +3402,12 @@ describe("Concord", () => {
     await ws.sync("FUND");
     expect(ws.asset("FUND")).toMatchObject({ state: "ready", baselineLedger: 50 });
     await ws.unwatchAsset("FUND");
-    const asset = await ws.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1, ignore: [treasury] });
+    const asset = await ws.watchAsset({
+      network: "testnet",
+      asset: `FUND:${issuer}`,
+      fromLedger: 1,
+      ignore: [treasury],
+    });
     h.chain.push(asset.id, "mint", 3, { to: h1, amount: u(100) });
     h.chain.push(asset.id, "mint", 3, { to: h2, amount: u(50) });
 
@@ -2893,7 +3425,14 @@ describe("Concord", () => {
 
     const noted = await client.call("/api/assets/FUND/notes", {
       method: "PUT",
-      body: { scope: "recon", key: run.breaks[0]!.key, fingerprint: run.breaks[0]!.fingerprint, status: "resolved", note: "register corrected", author: "CEO" },
+      body: {
+        scope: "recon",
+        key: run.breaks[0]!.key,
+        fingerprint: run.breaks[0]!.fingerprint,
+        status: "resolved",
+        note: "register corrected",
+        author: "CEO",
+      },
     });
     expect(noted.status).toBe(200);
     const trail = await client.json<Array<{ key: string; status: string; note: string }>>(
@@ -2909,6 +3448,31 @@ describe("Concord", () => {
     expect(reportHtml).toContain("Concord reconciliation report");
     expect(reportHtml).toContain(`Run ${run.id}`);
     expect((await client.call("/api/reconciliations/999/report")).status).toBe(404);
+
+    const brk = run.breaks[0]!;
+    const assigned = await client.call("/api/assets/FUND/notes/assignee", {
+      method: "PUT",
+      body: { scope: "recon", key: brk.key, assigneeId: client.userId },
+    });
+    expect(assigned.status).toBe(200);
+    expect(await assigned.json()).toMatchObject({
+      assigneeId: client.userId,
+      assigneeLabel: "Test User <ops@example.test>",
+    });
+    // The assignee has to be someone in this workspace, not an id the caller made up.
+    const stranger = await client.call("/api/assets/FUND/notes/assignee", {
+      method: "PUT",
+      body: { scope: "recon", key: brk.key, assigneeId: "not-a-member" },
+    });
+    expect(stranger.status).toBe(400);
+    const mine = await client.json<Array<{ key: string; assigneeId: string | null }>>(
+      `/api/assets/FUND/breaks?assignee=${client.userId}`,
+    );
+    expect(mine.find((b) => b.key === brk.key)).toMatchObject({ assigneeId: client.userId });
+    const unowned = await client.json<Array<{ key: string }>>("/api/assets/FUND/breaks?assignee=none");
+    expect(unowned.map((b) => b.key)).not.toContain(brk.key);
+    const breakCsv = await client.call("/api/assets/FUND/export?section=breaks");
+    expect(await breakCsv.text()).toContain("Test User <ops@example.test>");
     const overview = await client.json<{ networks: string[]; assets: Array<{ code: string; openBreaks: { reconciliation: number } }> }>("/api/overview");
     expect(overview.networks).toEqual(["testnet"]);
     expect(overview.assets[0]).toMatchObject({ code: "FUND", openBreaks: { reconciliation: 1 } });
@@ -2936,6 +3500,77 @@ describe("Concord", () => {
     expect(await template.text()).toBe("holder_id,holder_name,account,units,status\n");
   });
 
+  it("enforces the four-eyes rule when requireSecondSigner is enabled (#539)", async () => {
+    const userA = { id: "user_a", label: "Alice <alice@example.test>" };
+    const userB = { id: "user_b", label: "Bob <bob@example.test>" };
+
+    // 1. By default, setting is off and importer can resolve their own break
+    expect(concord.requireSecondSigner).toBe(false);
+    expect(concord.settings()).toEqual({ requireSecondSigner: false });
+
+    const csv1 = `holder_id,account,units\nA,${h1},90\n`;
+    const reg1 = concord.importRegister("FUND", { csv: csv1, asOf: at(40) }, userA);
+    const run1 = await concord.reconcile("FUND", reg1.registerId, userA);
+    const break1 = run1.breaks[0]!;
+
+    // Importer resolving with setting off succeeds
+    expect(
+      concord.setNote("FUND", "recon", break1.key, {
+        fingerprint: break1.fingerprint,
+        status: "resolved",
+        note: "verified and resolved by importer",
+      }, userA),
+    ).toEqual({ ok: true });
+
+    // 2. Enable requireSecondSigner
+    concord.setRequireSecondSigner(true);
+    expect(concord.requireSecondSigner).toBe(true);
+    expect(concord.settings()).toEqual({ requireSecondSigner: true });
+
+    // Import a new register and reconcile to create a new break
+    const csv2 = `holder_id,account,units\nA,${h1},80\n`;
+    const reg2 = concord.importRegister("FUND", { csv: csv2, asOf: at(45) }, userA);
+    const run2 = await concord.reconcile("FUND", reg2.registerId, userA);
+    const break2 = run2.breaks[0]!;
+
+    // Same user (importer) trying to resolve is rejected
+    expect(() =>
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "attempted resolve by importer",
+      }, userA),
+    ).toThrow(/four-eyes/i);
+
+    // Second user (userB) can acknowledge the break
+    expect(
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "acknowledged",
+        note: "acknowledged by Bob",
+      }, userB),
+    ).toEqual({ ok: true });
+
+    // UserB who acknowledged cannot now resolve it (needs a different second signer)
+    expect(() =>
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "attempted resolve by same acknowledging user",
+      }, userB),
+    ).toThrow(/four-eyes/i);
+
+    // UserC can resolve the acknowledged break
+    const userC = { id: "user_c", label: "Charlie <charlie@example.test>" };
+    expect(
+      concord.setNote("FUND", "recon", break2.key, {
+        fingerprint: break2.fingerprint,
+        status: "resolved",
+        note: "verified and resolved by Charlie",
+      }, userC),
+    ).toEqual({ ok: true });
+  });
+
   it("imports journal in merge mode by default, updating and adding entries (#540)", () => {
     // Initial import: J1, J2
     const res1 = concord.importJournal(
@@ -2952,7 +3587,10 @@ describe("Concord", () => {
     );
     expect(res2).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 0 });
 
-    const rows = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    const rows = concord.db.all<{ ref: string; units: string }>(
+      "SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref",
+      assetId,
+    );
     expect(rows).toEqual([
       { ref: "J1", units: "1000000000" },
       { ref: "J2", units: "700000000" },
@@ -2975,7 +3613,10 @@ describe("Concord", () => {
     );
     expect(res).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 2 });
 
-    const rows = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    const rows = concord.db.all<{ ref: string; units: string }>(
+      "SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref",
+      assetId,
+    );
     expect(rows).toEqual([
       { ref: "J2", units: "800000000" },
       { ref: "J4", units: "300000000" },
@@ -2994,7 +3635,10 @@ describe("Concord", () => {
     // Without allowPartial: throws and does NOT wipe existing rows
     expect(() => concord.importJournal("FUND", badCsv, { mode: "replace" })).toThrow(/parse error/i);
 
-    const rowsAfterFail = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
+    const rowsAfterFail = concord.db.all<{ ref: string; units: string }>(
+      "SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref",
+      assetId,
+    );
     expect(rowsAfterFail).toEqual([
       { ref: "J2", units: "800000000" },
       { ref: "J4", units: "300000000" },
@@ -3007,10 +3651,11 @@ describe("Concord", () => {
     expect(resPartial.replaced).toBe(1);
     expect(resPartial.removed).toBe(1);
 
-    const rowsAfterPartial = concord.db.all<{ ref: string; units: string }>("SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref", assetId);
-    expect(rowsAfterPartial).toEqual([
-      { ref: "J2", units: "990000000" },
-    ]);
+    const rowsAfterPartial = concord.db.all<{ ref: string; units: string }>(
+      "SELECT ref, units FROM journal WHERE asset_id = ? ORDER BY ref",
+      assetId,
+    );
+    expect(rowsAfterPartial).toEqual([{ ref: "J2", units: "990000000" }]);
   });
 
   it("handles replace via API endpoint /assets/:id/journal (#540)", async () => {
@@ -3021,20 +3666,26 @@ describe("Concord", () => {
     const id = asset.id;
 
     // Initial import
-    const res1 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(`/api/assets/${id}/journal`, {
-      body: {
-        csv: `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},10\nJ2,${at(3)},issue,,${h2},20\n`,
+    const res1 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(
+      `/api/assets/${id}/journal`,
+      {
+        body: {
+          csv: `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},10\nJ2,${at(3)},issue,,${h2},20\n`,
+        },
       },
-    });
+    );
     expect(res1).toMatchObject({ entries: 2, added: 2, replaced: 0, removed: 0 });
 
     // Replace via API
-    const res2 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(`/api/assets/${id}/journal`, {
-      body: {
-        csv: `ref,date,type,from_account,to_account,units\nJ2,${at(3)},issue,,${h2},25\nJ3,${at(4)},issue,,${h1},30\n`,
-        mode: "replace",
+    const res2 = await client.json<{ entries: number; added: number; replaced: number; removed: number }>(
+      `/api/assets/${id}/journal`,
+      {
+        body: {
+          csv: `ref,date,type,from_account,to_account,units\nJ2,${at(3)},issue,,${h2},25\nJ3,${at(4)},issue,,${h1},30\n`,
+          mode: "replace",
+        },
       },
-    });
+    );
     expect(res2).toMatchObject({ entries: 2, added: 1, replaced: 1, removed: 1 });
   });
 
@@ -3427,7 +4078,7 @@ describe("Concord", () => {
       events: "id,ledger,closedAt,kind,from,to,units,authorized,txHash",
       controls: "closedAt,ledger,type,account,units,txHash,instructionRef,approvedBy,reason",
       breaks:
-        "source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor,history",
+        "source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor,assigneeId,assigneeLabel,history",
     };
 
     for (const section of ["holdings", "events", "controls", "breaks"] as const) {
@@ -3534,7 +4185,11 @@ describe("streamed events export", () => {
       }
     });
 
-    if (global.gc) global.gc();
+    // Measure what the stream keeps alive, not garbage the collector has not reached yet: without a
+    // collection before each sample the figure swings with GC timing and the bound flakes.
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    gc();
     const initialHeap = process.memoryUsage().heapUsed;
     let peakGrowth = 0;
     let rowCount = 0;
@@ -3543,6 +4198,7 @@ describe("streamed events export", () => {
     for (const _chunk of concord.exportEvents("BIG", {}, "csv")) {
       rowCount++;
       if (rowCount % 20_000 === 0) {
+        gc();
         const growth = process.memoryUsage().heapUsed - initialHeap;
         if (growth > peakGrowth) peakGrowth = growth;
       }
@@ -3621,6 +4277,145 @@ describe("streamed events export", () => {
     // Test invalid format returns 400
     const resBad = await client.call(`/api/assets/${watched.code}/export?section=events&format=xml`);
     expect(resBad.status).toBe(400);
+  });
+
+  it("handles requireSecondSigner via API endpoints (#539)", async () => {
+    const h = harness();
+    const owner = await new Client(h.app).signUp("owner@example.test", "FourEyes Org", "Alice");
+    const member = new Client(h.app);
+    // Invite member
+    const inviteRes = await owner.json<{ link: string }>("/api/org/invites", {
+      body: { email: "bob@example.test", role: "member" },
+    });
+    const token = inviteRes.link.split("/#/invite/")[1]!;
+    await member.json("/api/auth/invites/accept", {
+      body: { token, name: "Bob", password: "correct horse battery" },
+    });
+
+    const asset = await owner.json<{ id: string }>("/api/assets", {
+      body: { network: "testnet", asset: `FOUREYES:${key()}`, fromLedger: 1 },
+    });
+    const id = asset.id;
+
+    // Default settings: false
+    expect(await owner.json("/api/org/settings")).toEqual({ requireSecondSigner: false });
+
+    // Enable requireSecondSigner
+    const patched = await owner.json<{ requireSecondSigner: boolean }>("/api/org/settings", {
+      method: "PATCH",
+      body: { requireSecondSigner: true },
+    });
+    expect(patched).toEqual({ requireSecondSigner: true });
+
+    // Alice (owner) imports register
+    const regRes = await owner.json<{ registerId: number; run: { id: number; breaks: Array<{ key: string; fingerprint: string }> } }>(
+      `/api/assets/${id}/registers`,
+      {
+        body: {
+          csv: `holder_id,account,units\nA,${h1},90\n`,
+          asOf: at(40),
+        },
+      },
+    );
+    const breakItem = regRes.run.breaks[0]!;
+
+    // Alice tries to resolve -> 400
+    const failRes = await owner.call(`/api/assets/${id}/notes`, {
+      method: "PUT",
+      body: {
+        scope: "recon",
+        key: breakItem.key,
+        fingerprint: breakItem.fingerprint,
+        status: "resolved",
+        note: "trying to self-resolve",
+      },
+    });
+    expect(failRes.status).toBe(400);
+    expect(await failRes.text()).toContain("four-eyes");
+
+    // Bob resolves -> 200
+    const okRes = await member.call(`/api/assets/${id}/notes`, {
+      method: "PUT",
+      body: {
+        scope: "recon",
+        key: breakItem.key,
+        fingerprint: breakItem.fingerprint,
+        status: "resolved",
+        note: "approved by second signer",
+      },
+    });
+    expect(okRes.status).toBe(200);
+  });
+
+  it("auto-watches unwatched dividend payAsset as hidden flow-only, indexes it, excludes it from overview/limits, and removes it when deleted", async () => {
+    const h = harness({ maxAssetsPerOrg: 1 });
+    const client = await new Client(h.app).signUp("divpay@example.test", "Div Pay");
+    const issuer = key();
+    const h1 = key();
+    const payer = key();
+    const concord = h.tenants.forOrg(client.orgId);
+
+    const fund = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+    h.chain.push(fund.id, "mint", 2, { to: h1, amount: u(100) });
+    await concord.sync(fund.id);
+
+    // Provide describe metadata for an unwatched SEP-41 contract payAsset.
+    const payContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+    h.chain.describe = async (candidate) =>
+      candidate.id === payContract ? { decimals: 7, code: "USDC", name: "USD Coin" } : { decimals: 7 };
+    h.chain.push(payContract, "transfer", 10, { from: payer, to: h1, amount: u(25), txHash: "tx-div" });
+
+    // Even with maxAssetsPerOrg=1 already filled by FUND, creating a dividend in an unwatched contract payAsset succeeds.
+    const action = await concord.createAction("FUND", {
+      type: "dividend",
+      recordTime: at(5),
+      ratePerUnit: "0.25",
+      payAsset: payContract,
+      payer,
+    });
+    expect(action.state).toBe("clean");
+    expect(action.result?.flowAsset).toEqual({ id: payContract, code: "USDC" });
+    expect(action.result?.summary.expectedTotal).toBe("25");
+    expect(action.result?.summary.observedTotal).toBe("25");
+
+    // Excluded from overview and asset limit, yet present via concord.asset() and indexed in syncAll().
+    expect(concord.overview().assets.map((a) => a.id)).toEqual([fund.id]);
+    expect(concord.asset(payContract).flowOnly).toBe(true);
+
+    // Deleting the action removes the flow-only pay asset.
+    const delRes = await client.call(`/api/actions/${action.id}`, { method: "DELETE" });
+    expect(delRes.status).toBe(200);
+    expect(() => concord.asset(payContract)).toThrow(/not watched/);
+  });
+
+  it("promotes a flow-only pay asset to a watched asset with the matching windows it was watched with", async () => {
+    const h = harness();
+    const client = await new Client(h.app).signUp("promote@example.test", "Promote Pay");
+    const issuer = key();
+    const h1 = key();
+    const payer = key();
+    const concord = h.tenants.forOrg(client.orgId);
+
+    const fund = await concord.watchAsset({ network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 });
+    h.chain.push(fund.id, "mint", 2, { to: h1, amount: u(100) });
+    await concord.sync(fund.id);
+
+    const payContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+    h.chain.describe = async (candidate) =>
+      candidate.id === payContract ? { decimals: 7, code: "USDC", name: "USD Coin" } : { decimals: 7 };
+    await concord.createAction("FUND", { type: "dividend", recordTime: at(5), ratePerUnit: "0.25", payAsset: payContract, payer });
+    expect(concord.asset(payContract).flowOnly).toBe(true);
+
+    const promoted = await concord.watchAsset({
+      network: "testnet",
+      asset: payContract,
+      fromLedger: 1,
+      instructionWindowHours: 6,
+      movementWindowHours: 3,
+    });
+    expect(promoted.flowOnly).toBeUndefined();
+    expect(promoted).toMatchObject({ instructionWindowHours: 6, movementWindowHours: 3 });
+    expect(concord.overview().assets.map((a) => a.id).sort()).toEqual([fund.id, payContract].sort());
   });
 });
 
@@ -3707,7 +4502,9 @@ describe("README CLI examples", () => {
   it("names every flag the README examples pass", () => {
     for (const line of examples) {
       for (const flag of line.match(/--[\w-]+/g) ?? []) {
-        expect(usageFlags.has(flag), `README example passes "${flag}", but the CLI usage text does not name it`).toBe(true);
+        expect(usageFlags.has(flag), `README example passes "${flag}", but the CLI usage text does not name it`).toBe(
+          true,
+        );
       }
     }
   });
@@ -3883,7 +4680,8 @@ describe("holdings checkpoints", () => {
     };
     chain.advance(1);
     await concord.sync(asset.id);
-    expect(checkpoints(concord, asset.id).every((l) => l < 50)).toBe(true);
+    // The sync drops every checkpoint from ledger 50 on; the overview figures it then refreshes
+    // write fresh ones that include the late event, so what matters is that every replay is exact.
     expectExact(chain, concord, asset.id, 300);
   });
 
@@ -3901,8 +4699,12 @@ describe("holdings checkpoints", () => {
       ledger: 200,
       openings: new Map([[holders[0]!, { amount: 500n, authorized: true, asOfLedger: 200 }]]),
     };
+    const before = checkpoints(concord, asset.id);
     await concord.rebuild(asset.id);
-    expect(checkpoints(concord, asset.id)).toEqual([]);
+    // The old checkpoints folded in the old opening balances; none may survive the rebuild (any
+    // present now were written afresh by the overview refresh, from the new baseline at 200).
+    expect(checkpoints(concord, asset.id).every((l) => l > 200)).toBe(true);
+    expect(checkpoints(concord, asset.id)).not.toEqual(before);
     expectExact(chain, concord, asset.id, 300);
     expect(checkpoints(concord, asset.id).length).toBeGreaterThan(0);
   });

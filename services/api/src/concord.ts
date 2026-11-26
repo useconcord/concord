@@ -87,6 +87,9 @@ export interface AssetRecord {
   tolerance?: string;
   instructionWindowHours: number;
   movementWindowHours: number;
+  flowOnly?: boolean;
+  /** Flag the latest register once it is older than this many days. Unset means the check is off. */
+  registerMaxAgeDays?: number;
   createdAt: string;
 }
 
@@ -105,6 +108,8 @@ export interface WatchInput {
   ignore?: string[];
   instructionWindowHours?: number;
   movementWindowHours?: number;
+  /** Flag the latest register once it is older than this many days. Omitted means the check is off. */
+  registerMaxAgeDays?: number;
 }
 
 export type ActionType = "dividend" | "split" | "redemption";
@@ -142,6 +147,8 @@ export interface ActionInput {
     payer?: string;
   };
 }
+
+export type ActionPatch = Partial<ActionInput>;
 
 export interface NoteInput {
   fingerprint: string;
@@ -376,6 +383,15 @@ export const EXPORT_CSV_SECTIONS = [
 export const EXPORT_CSV_SECTION_ERROR =
   "section must be holdings, events, controls, breaks, action, positions, runs, actions, journal or instructions";
 export type ExportCsvSection = (typeof EXPORT_CSV_SECTIONS)[number];
+const DAY_MS = 86_400_000;
+
+/** A register freshness limit: whole days, long enough to be meaningful and short enough to be sane. */
+function maxAgeDays(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 3650) {
+    throw new Invalid("registerMaxAgeDays must be a whole number of days from 1 to 3650");
+  }
+  return value;
+}
 
 function isoTime(input: string, field: string): string {
   const t = Date.parse(input);
@@ -476,6 +492,9 @@ function toAsset(row: Row): AssetRecord {
     movementWindowHours: Number(row.movement_window_hours ?? DEFAULT_MOVEMENT_WINDOW_HOURS),
     createdAt: String(row.created_at),
   };
+  if (row.register_max_age_days !== null && row.register_max_age_days !== undefined) {
+    asset.registerMaxAgeDays = Number(row.register_max_age_days);
+  }
   if (row.issuer) asset.issuer = String(row.issuer);
   if (row.start_ledger !== null) asset.startLedger = Number(row.start_ledger);
   if (row.baseline_ledger !== null) asset.baselineLedger = Number(row.baseline_ledger);
@@ -486,6 +505,7 @@ function toAsset(row: Row): AssetRecord {
   if (row.sync_error) asset.syncError = String(row.sync_error);
   if (row.sync_error_at) asset.syncErrorAt = String(row.sync_error_at);
   if (row.tolerance) asset.tolerance = String(row.tolerance);
+  if (row.flow_only) asset.flowOnly = true;
   return asset;
 }
 
@@ -585,6 +605,31 @@ function resume(
   return state;
 }
 
+/** An asset's headline figures, as the overview shows them and `asset_stats` stores them. */
+interface AssetStats {
+  supply: string;
+  holderCount: number;
+  eventCount: number;
+  incomplete: boolean;
+  lastRun: { id: number; asOf: string; status: "clean" | "breaks"; openBreaks: number } | null;
+  openBreaks: { reconciliation: number; controls: number; actions: number };
+}
+
+function statsFromRow(row: Row): AssetStats {
+  return {
+    supply: String(row.supply),
+    holderCount: Number(row.holder_count),
+    eventCount: Number(row.event_count),
+    incomplete: Number(row.incomplete) === 1,
+    lastRun: row.last_run ? (JSON.parse(String(row.last_run)) as AssetStats["lastRun"]) : null,
+    openBreaks: {
+      reconciliation: Number(row.open_reconciliation),
+      controls: Number(row.open_controls),
+      actions: Number(row.open_actions),
+    },
+  };
+}
+
 /**
  * One workspace: every operation the API and the CLI expose over a single database.
  * Reads the chain, never writes it.
@@ -630,6 +675,10 @@ export class Concord {
     if (!Number.isFinite(budget) || budget < 0) throw new Error("syncAssetBudgetMs must be zero or more");
     this.syncAssetBudgetMs = budget;
     this.clock = options.now ?? Date.now;
+  }
+
+  private nowMs(): number {
+    return (this.options.now ?? Date.now)();
   }
 
   /** Forget cached holdings for an asset this instance just changed. */
@@ -719,11 +768,15 @@ export class Concord {
     return toAsset(byCode[0]);
   }
 
-  assets(network?: NetworkName): AssetRecord[] {
-    const rows = network
-      ? this.db.all("SELECT * FROM assets WHERE network = ? ORDER BY created_at", network)
-      : this.db.all("SELECT * FROM assets ORDER BY created_at");
-    return rows.map(toAsset);
+  assets(network?: NetworkName, options: { includeFlowOnly?: boolean } = {}): AssetRecord[] {
+    const where = options.includeFlowOnly ? [] : ["flow_only = 0"];
+    const params: string[] = [];
+    if (network) {
+      where.push("network = ?");
+      params.push(network);
+    }
+    const clause = where.length ? `WHERE ${where.join(" AND ")} ` : "";
+    return this.db.all(`SELECT * FROM assets ${clause}ORDER BY created_at`, ...params).map(toAsset);
   }
 
   /**
@@ -765,7 +818,7 @@ export class Concord {
    * Start watching an asset. With `defer`, the call returns once the asset is recorded and the
    * opening balances and first pass happen in the background; otherwise it waits for them.
    */
-  async watchAsset(input: WatchInput, options: { defer?: boolean; actor?: Actor } = {}): Promise<AssetRecord> {
+  async watchAsset(input: WatchInput, options: { defer?: boolean; actor?: Actor; flowOnly?: boolean } = {}): Promise<AssetRecord> {
     const { passphrase } = this.handle(input.network);
     const chain = this.requireChain(input.network);
     let resolved: ResolvedAsset;
@@ -774,12 +827,15 @@ export class Concord {
     } catch (err) {
       throw new Invalid((err as Error).message);
     }
-    if (this.removing.has(resolved.id) || this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
+    const alreadyEarly = this.db.get("SELECT id, flow_only FROM assets WHERE id = ?", resolved.id);
+    if (this.removing.has(resolved.id) || (alreadyEarly && (!alreadyEarly.flow_only || options.flowOnly))) {
       throw new Invalid(`${resolved.code} is already watched`);
     }
     const ignore = addresses(input.ignore, "ignore");
     const instructionWindowHours = windowHours(input.instructionWindowHours, "instructionWindowHours", DEFAULT_INSTRUCTION_WINDOW_HOURS);
     const movementWindowHours = windowHours(input.movementWindowHours, "movementWindowHours", DEFAULT_MOVEMENT_WINDOW_HOURS);
+    const registerMaxAge =
+      input.registerMaxAgeDays === undefined ? undefined : maxAgeDays(input.registerMaxAgeDays);
     let name = label(input.name, "name");
     let decimals = input.decimals;
     if (input.fromLedger !== undefined && (!Number.isInteger(input.fromLedger) || input.fromLedger < 1)) {
@@ -818,13 +874,27 @@ export class Concord {
 
     // The check above ran before the awaits on the chain; another request may have watched the
     // same asset since. Nothing awaits between this check and the insert.
-    if (this.removing.has(resolved.id) || this.db.get("SELECT id FROM assets WHERE id = ?", resolved.id)) {
+    const removing = this.removing.has(resolved.id);
+    const existingAsset = this.db.get("SELECT id, flow_only FROM assets WHERE id = ?", resolved.id);
+    if (removing || existingAsset) {
+      if (!removing && existingAsset?.flow_only && !options.flowOnly) {
+        this.db.write(
+          "UPDATE assets SET flow_only = 0, name = ?, ignore_addresses = ?, instruction_window_hours = ?, movement_window_hours = ? WHERE id = ?",
+          name ?? resolved.code,
+          JSON.stringify(ignore),
+          instructionWindowHours,
+          movementWindowHours,
+          resolved.id,
+        );
+        this.touch(resolved.id);
+        return this.asset(resolved.id);
+      }
       throw new Invalid(`${resolved.code} is already watched`);
     }
     try {
       this.db.insert(
-        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, start_ledger, ignore_addresses, instruction_window_hours, movement_window_hours, flow_only, register_max_age_days, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'indexing', ?, ?, ?, ?, ?, ?, ?, ?)`,
         resolved.id,
         input.network,
         resolved.code,
@@ -836,6 +906,8 @@ export class Concord {
         JSON.stringify(ignore),
         instructionWindowHours,
         movementWindowHours,
+        options.flowOnly ? 1 : 0,
+        registerMaxAge ?? null,
         options.actor?.label ?? null,
         now(),
       );
@@ -911,7 +983,14 @@ export class Concord {
 
   updateAsset(
     ref: string,
-    patch: { name?: string; ignore?: string[]; tolerance?: string | null; instructionWindowHours?: number; movementWindowHours?: number },
+    patch: {
+      name?: string;
+      ignore?: string[];
+      tolerance?: string | null;
+      instructionWindowHours?: number;
+      movementWindowHours?: number;
+      registerMaxAgeDays?: number | null;
+    },
   ): AssetRecord {
     const asset = this.asset(ref);
     const name = label(patch.name, "name");
@@ -932,15 +1011,21 @@ export class Concord {
       asset.instructionWindowHours,
     );
     const movementWindowHours = windowHours(patch.movementWindowHours, "movementWindowHours", asset.movementWindowHours);
+    let registerMaxAge = asset.registerMaxAgeDays ?? null;
+    if (patch.registerMaxAgeDays === null) registerMaxAge = null;
+    else if (patch.registerMaxAgeDays !== undefined) registerMaxAge = maxAgeDays(patch.registerMaxAgeDays);
     this.db.write(
-      "UPDATE assets SET name = ?, ignore_addresses = ?, tolerance = ?, instruction_window_hours = ?, movement_window_hours = ? WHERE id = ?",
+      "UPDATE assets SET name = ?, ignore_addresses = ?, tolerance = ?, instruction_window_hours = ?, movement_window_hours = ?, register_max_age_days = ? WHERE id = ?",
       name ?? asset.name,
       JSON.stringify(patch.ignore === undefined ? asset.ignore : addresses(patch.ignore, "ignore")),
       tolerance,
       instructionWindowHours,
       movementWindowHours,
+      registerMaxAge,
       asset.id,
     );
+    // The matching windows decide which controls break, and so the stored open-break count.
+    this.refreshStats(asset.id);
     return this.asset(asset.id);
   }
 
@@ -956,6 +1041,7 @@ export class Concord {
     } finally {
       this.removing.delete(asset.id);
     }
+    await this.pruneUnusedFlowOnlyAssets();
   }
 
   /**
@@ -981,6 +1067,8 @@ export class Concord {
       );
     });
     this.touch(asset.id);
+    // The history is gone until the next pass; a deferred rebuild must not keep showing it.
+    this.refreshStats(asset.id);
     if (options.defer) void this.sync(asset.id).catch(() => {});
     else await this.sync(asset.id);
     return this.asset(asset.id);
@@ -1014,7 +1102,7 @@ export class Concord {
     const budget = this.syncAssetBudgetMs > 0 ? { budgetMs: this.syncAssetBudgetMs } : {};
     await Promise.all(
       this.networkNames().map(async (network) => {
-        const assets = this.assets(network);
+        const assets = this.assets(network, { includeFlowOnly: true });
         if (assets.length === 0) return;
         // One look at the chain's range serves every asset on the network.
         const head = await this.networks[network]?.chain?.latestLedger().catch(() => undefined);
@@ -1067,10 +1155,18 @@ export class Concord {
       if (asset.syncError) {
         this.db.write("UPDATE assets SET sync_error = NULL, sync_error_at = NULL WHERE id = ?", asset.id);
       }
+      // Even a pass that added nothing moved the read-through time the controls log runs to.
+      this.refreshStats(asset.id);
       return out;
     } catch (err) {
       if (this.removing.has(asset.id)) throw err;
       const failure = describeFailure(err);
+      // Pages written before the failure are committed; the figures must include them.
+      try {
+        this.refreshStats(asset.id);
+      } catch {
+        // The sync failure below is the one to report.
+      }
       this.db.write(
         "UPDATE assets SET sync_error = ?, sync_error_at = ? WHERE id = ?",
         failure,
@@ -1432,17 +1528,24 @@ export class Concord {
       sha256(input.csv),
     );
     if (existing) {
-      return { registerId: existing.id, asOf, positions: parsed.positions.length, issues: parsed.issues, duplicate: true };
+      return {
+        registerId: existing.id,
+        asOf,
+        positions: parsed.positions.length,
+        issues: parsed.issues,
+        duplicate: true,
+      };
     }
     const registerId = this.db.tx(() => {
       const id = this.db.insert(
-        "INSERT INTO registers (asset_id, as_of, source, sha256, issues, imported_by, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO registers (asset_id, as_of, source, sha256, issues, imported_by, imported_by_id, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         asset.id,
         asOf,
         label(input.source, "source", 200) ?? "upload",
         sha256(input.csv),
         JSON.stringify(parsed.issues),
         actor?.label ?? null,
+        actor?.id ?? null,
         now(),
       );
       for (const p of parsed.positions) {
@@ -1492,6 +1595,8 @@ export class Concord {
       )?.count ?? 0;
     const removed = this.db.write("DELETE FROM registers WHERE id = ? AND asset_id = ?", registerId, asset.id);
     if (removed === 0) throw new NotFound("no such register for this asset");
+    // Its runs went with it, and the latest run may have been one of them.
+    this.refreshStats(asset.id);
     return { runs };
   }
 
@@ -1584,11 +1689,7 @@ export class Concord {
     });
   }
 
-  importJournal(
-    ref: string,
-    csv: string,
-    options?: { mode?: "merge" | "replace"; allowPartial?: boolean },
-  ) {
+  importJournal(ref: string, csv: string, options?: { mode?: "merge" | "replace"; allowPartial?: boolean }) {
     const mode = options?.mode ?? "merge";
     const allowPartial = options?.allowPartial ?? false;
     if (mode !== "merge" && mode !== "replace") {
@@ -1602,7 +1703,9 @@ export class Concord {
       throw new Invalid((err as Error).message);
     }
     if (mode === "replace" && parsed.issues.length > 0 && !allowPartial) {
-      throw new Invalid(`cannot replace journal: CSV contains ${parsed.issues.length} parse errors and allowPartial is false`);
+      throw new Invalid(
+        `cannot replace journal: CSV contains ${parsed.issues.length} parse errors and allowPartial is false`,
+      );
     }
 
     const existing = this.db.all<{ ref: string }>("SELECT ref FROM journal WHERE asset_id = ?", asset.id);
@@ -1794,6 +1897,7 @@ export class Concord {
         }
       }
     });
+    this.refreshStats(asset.id);
     return { instructions: parsed.instructions.length, added, replaced, removed, issues: parsed.issues };
   }
 
@@ -1992,6 +2096,7 @@ export class Concord {
     if (breaks.length > 0) {
       this.alert("run.breaks", asset, breaks.length, `/#/a/${asset.id}/reconciliation`);
     }
+    this.refreshStats(asset.id);
     return this.run(id);
   }
 
@@ -2252,7 +2357,10 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   /** The newest reconciliation of one register, if it has been reconciled. */
   latestRunForRegister(registerId: number) {
-    const row = this.db.get<{ id: number }>("SELECT id FROM runs WHERE register_id = ? ORDER BY id DESC LIMIT 1", registerId);
+    const row = this.db.get<{ id: number }>(
+      "SELECT id FROM runs WHERE register_id = ? ORDER BY id DESC LIMIT 1",
+      registerId,
+    );
     return row ? this.run(row.id) : null;
   }
 
@@ -2303,6 +2411,8 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         noteAt: n ? String(n.updated_at) : null,
         noteStale: n !== undefined && !current,
         history: histories.get(b.key) ?? [],
+        assigneeId: n?.assignee_id ? String(n.assignee_id) : null,
+        assigneeLabel: n?.assignee_label ? String(n.assignee_label) : null,
       };
     });
   }
@@ -2322,26 +2432,61 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     ) {
       throw new Invalid("key and fingerprint must be short text");
     }
-    if (scope !== "recon" && scope !== "controls") {
-      const action = /^action:(\d+)$/.exec(String(scope));
-      const owned =
-        action && this.db.get("SELECT id FROM actions WHERE id = ? AND asset_id = ?", Number(action[1]), asset.id);
-      if (!owned) throw new Invalid("scope must be recon, controls or an action of this asset");
-    }
     // Only a break that exists now can be signed off: a typo or a stale tab would otherwise leave
     // an orphan row for a later break with the same key to inherit.
-    const current =
-      scope === "recon"
-        ? this.latestRun(asset.id)?.breaks
-        : scope === "controls"
-          ? this.controls(asset.id).breaks
-          : this.action(Number(scope.slice("action:".length))).result?.breaks;
+    const current = this.currentBreaks(asset.id, scope);
     if (!current?.some((b) => b.key === key)) throw new NotFound(`no break ${key} in the current ${scope.split(":")[0]} results`);
+
+    if (this.requireSecondSigner && input.status === "resolved") {
+      const actorId = actor?.id;
+      const actorLabel = actor?.label;
+      if (actorId || actorLabel) {
+        const existingNote = this.db.get<{ status: string; author: string | null; author_id: string | null }>(
+          "SELECT status, author, author_id FROM break_notes WHERE asset_id = ? AND scope = ? AND key = ?",
+          asset.id,
+          scope,
+          key,
+        );
+        if (existingNote && existingNote.status === "acknowledged") {
+          const sameId = actorId && existingNote.author_id && existingNote.author_id === actorId;
+          const sameLabel = actorLabel && existingNote.author && existingNote.author === actorLabel;
+          if (sameId || sameLabel) {
+            throw new Invalid("four-eyes rule: the resolver cannot be the same user who acknowledged the break");
+          }
+        }
+
+        if (scope === "recon") {
+          const run = this.latestRun(asset.id);
+          if (run) {
+            const reg = this.db.get<{ imported_by: string | null; imported_by_id: string | null }>(
+              "SELECT imported_by, imported_by_id FROM registers WHERE id = ?",
+              run.registerId,
+            );
+            if (reg) {
+              const sameId = actorId && reg.imported_by_id && reg.imported_by_id === actorId;
+              const sameLabel = actorLabel && reg.imported_by && reg.imported_by === actorLabel;
+              if (sameId || sameLabel) {
+                throw new Invalid("four-eyes rule: the person who signs off a break cannot be the one who imported the books");
+              }
+            }
+          }
+        }
+      }
+    }
+
     const at = now();
     this.db.tx(() => {
+      // An upsert, not a replace: a replace would drop the break's owner when it is signed off.
       this.db.insert(
-        `INSERT OR REPLACE INTO break_notes (asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO break_notes (asset_id, scope, key, fingerprint, status, note, author, author_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (asset_id, scope, key) DO UPDATE SET
+           fingerprint = excluded.fingerprint,
+           status = excluded.status,
+           note = excluded.note,
+           author = excluded.author,
+           author_id = excluded.author_id,
+           updated_at = excluded.updated_at`,
         asset.id,
         scope,
         key,
@@ -2368,6 +2513,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       // A sign-off moves a break out of the open count the runs list reads from a column.
       if (scope === "recon") this.countOpenBreaks(asset.id);
     });
+    this.refreshStats(asset.id);
     return { ok: true };
   }
 
@@ -2390,6 +2536,67 @@ ul { margin: 6px 0 0; padding-left: 20px; }
        ) WHERE asset_id = ?`,
       assetId,
     );
+  }
+
+  /** The breaks one scope currently produces, or a rejection naming the scopes that exist. */
+  private currentBreaks(assetId: string, scope: string) {
+    if (scope === "recon") return this.latestRun(assetId)?.breaks;
+    if (scope === "controls") return this.controls(assetId).breaks;
+    const action = /^action:(\d+)$/.exec(String(scope));
+    const owned =
+      action && this.db.get("SELECT id FROM actions WHERE id = ? AND asset_id = ?", Number(action[1]), assetId);
+    if (!owned) throw new Invalid("scope must be recon, controls or an action of this asset");
+    return this.action(Number(action![1])).result?.breaks;
+  }
+
+  /**
+   * Give a break an owner, or clear it with null. The caller checks that the person is a member of
+   * the workspace; this only records them beside the note, where every payload and the CSV read it.
+   */
+  assignBreak(ref: string, scope: string, key: string, assignee: Actor | null) {
+    const asset = this.asset(ref);
+    if (typeof key !== "string" || !key.trim() || key.length > 500) throw new Invalid("key must be short text");
+    const brk = this.currentBreaks(asset.id, scope)?.find((b) => b.key === key);
+    if (!brk) throw new NotFound(`no break ${key} in the current ${scope.split(":")[0]} results`);
+    if (assignee !== null && (!assignee.id || !assignee.label)) {
+      throw new Invalid("an assignee needs a member id and a label");
+    }
+    // The row is the same one the sign-off lives in, so an owner survives re-runs and a sign-off
+    // does not remove them. Only the assignment columns change; the note keeps its own timestamp.
+    this.db.insert(
+      `INSERT INTO break_notes (asset_id, scope, key, fingerprint, status, note, assignee_id, assignee_label, updated_at)
+       VALUES (?, ?, ?, ?, 'open', '', ?, ?, ?)
+       ON CONFLICT (asset_id, scope, key) DO UPDATE SET
+         assignee_id = excluded.assignee_id,
+         assignee_label = excluded.assignee_label`,
+      asset.id,
+      scope,
+      key,
+      brk.fingerprint,
+      assignee?.id ?? null,
+      assignee?.label ?? null,
+      now(),
+    );
+    return { ok: true, scope, key, assigneeId: assignee?.id ?? null, assigneeLabel: assignee?.label ?? null };
+  }
+
+  /**
+   * Current breaks across every scope, with their sign-off and owner. An assignee id narrows the
+   * list to that member's breaks; "none" (or "unassigned") narrows it to the unowned ones.
+   */
+  breaks(ref: string, assignee?: string) {
+    const asset = this.asset(ref);
+    const all = [
+      ...(this.latestRun(asset.id)?.breaks ?? []),
+      ...this.controls(asset.id).breaks,
+      // A voided action is in the trail, but its breaks are not current.
+      ...this.actions(asset.id)
+        .filter((a) => a.voidedAt === null)
+        .flatMap((a) => a.result?.breaks ?? []),
+    ];
+    if (assignee === undefined) return all;
+    const unassigned = assignee === "none" || assignee === "unassigned";
+    return all.filter((b) => (unassigned ? b.assigneeId === null : b.assigneeId === assignee));
   }
 
   /** Every sign-off change for one break, oldest first: who, when, what status, and the note. */
@@ -2421,8 +2628,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
 
   // ── corporate actions ─────────────────────────────────────────────────────
 
-  async createAction(ref: string, input: ActionInput, actor?: Actor) {
-    const asset = this.asset(ref);
+  private async validateAction(asset: AssetRecord, input: ActionInput, actor?: Actor) {
     const recordTime = isoTime(String(input.recordTime ?? ""), "recordTime");
     const params: Record<string, unknown> = { exclude: addresses(input.exclude, "exclude") };
     if (input.windowTo) params.windowTo = isoTime(input.windowTo, "windowTo");
@@ -2443,9 +2649,6 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         throw new Invalid("dividend needs ratePerUnit as a decimal");
       }
       params.ratePerUnit = input.ratePerUnit;
-      const pay = input.payAsset ? this.asset(String(input.payAsset)) : asset;
-      if (pay.network !== asset.network) throw new Invalid("the pay asset must be on the same network");
-      params.payAsset = pay.id;
       const payer = address(input.payer, "payer");
       if (payer) params.payer = payer;
       if (input.rounding !== undefined && input.rounding !== "floor" && input.rounding !== "half-up") {
@@ -2473,6 +2676,42 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         }
         params.withholdingOverrides = overrides;
       }
+
+      let pay: AssetRecord;
+      if (!input.payAsset) {
+        pay = asset;
+      } else {
+        const rawPay = String(input.payAsset).trim();
+        const byId = this.db.get("SELECT * FROM assets WHERE id = ?", rawPay);
+        if (byId) {
+          pay = toAsset(byId);
+        } else {
+          const byCode = this.db.all("SELECT * FROM assets WHERE code = ? COLLATE NOCASE LIMIT 2", rawPay);
+          if (byCode.length > 1) throw new Invalid(`more than one watched asset is called ${rawPay}; use its contract id`);
+          if (byCode[0]) {
+            pay = toAsset(byCode[0]);
+          } else {
+            let resolved: ResolvedAsset;
+            try {
+              resolved = resolveAsset(rawPay, this.handle(asset.network).passphrase);
+            } catch (err) {
+              throw new Invalid((err as Error).message);
+            }
+            const existing = this.db.get("SELECT * FROM assets WHERE id = ?", resolved.id);
+            if (existing) {
+              pay = toAsset(existing);
+            } else {
+              const head = await this.requireChain(asset.network).latestLedger();
+              pay = await this.watchAsset(
+                { network: asset.network, asset: rawPay, baseline: false, fromLedger: head.oldest },
+                { actor, flowOnly: true },
+              );
+            }
+          }
+        }
+        if (pay.network !== asset.network) throw new Invalid("the pay asset must be on the same network");
+      }
+      params.payAsset = pay.id;
     } else if (input.type === "split" || input.type === "redemption") {
       if (!input.num || !input.den || !/^\d+$/.test(input.num) || !/^\d+$/.test(input.den)) {
         throw new Invalid(`${input.type} needs whole-number num and den`);
@@ -2503,13 +2742,19 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     if (input.cashInLieu && input.type !== "split") {
       throw new Invalid("cashInLieu is only valid for split actions");
     }
-    const title =
-      label(input.label, "label") ??
-      (input.type === "dividend"
+    const defaultTitle =
+      input.type === "dividend"
         ? `Dividend ${input.ratePerUnit} per unit`
         : input.type === "split"
           ? `Split ${input.num}:${input.den}`
-          : `Redemption ${input.num}/${input.den}`);
+          : `Redemption ${input.num}/${input.den}`;
+    return { recordTime, params, defaultTitle };
+  }
+
+  async createAction(ref: string, input: ActionInput, actor?: Actor) {
+    const asset = this.asset(ref);
+    const { recordTime, params, defaultTitle } = await this.validateAction(asset, input, actor);
+    const title = label(input.label, "label") ?? defaultTitle;
     const id = this.db.insert(
       "INSERT INTO actions (asset_id, type, label, record_time, params, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       asset.id,
@@ -2521,6 +2766,128 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       now(),
     );
     return this.reconcileAction(id);
+  }
+
+  async updateAction(id: number, patch: ActionPatch, actor?: Actor) {
+    const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
+    if (!row) throw new NotFound(`corporate action ${id} not found`);
+    if (row.snapshot) {
+      throw new Invalid("already snapshotted");
+    }
+    const asset = this.asset(String(row.asset_id));
+    const existingParams = JSON.parse(String(row.params)) as Record<string, unknown>;
+    const oldType = String(row.type) as ActionType;
+    const effectiveType = patch.type ?? oldType;
+
+    const pick = <T>(patchVal: T | undefined, existingVal: T | undefined): T | undefined => {
+      if (patchVal === null) return undefined;
+      return patchVal !== undefined ? patchVal : existingVal;
+    };
+
+    const isSameType = effectiveType === oldType;
+
+    const mergedInput: ActionInput = {
+      type: effectiveType,
+      recordTime: patch.recordTime ?? String(row.record_time),
+      exclude: pick(patch.exclude, existingParams.exclude as string[] | undefined),
+      windowTo: pick(patch.windowTo, existingParams.windowTo as string | undefined),
+      windowFromLedger: pick(patch.windowFromLedger, existingParams.windowFromLedger as number | undefined),
+      windowToLedger: pick(patch.windowToLedger, existingParams.windowToLedger as number | undefined),
+      ratePerUnit: pick(patch.ratePerUnit, isSameType ? (existingParams.ratePerUnit as string | undefined) : undefined),
+      payAsset: pick(patch.payAsset, isSameType ? (existingParams.payAsset as string | undefined) : undefined),
+      payer: pick(patch.payer, isSameType ? (existingParams.payer as string | undefined) : undefined),
+      rounding: pick(patch.rounding, isSameType ? (existingParams.rounding as Rounding | undefined) : undefined),
+      num: pick(patch.num, isSameType ? (existingParams.num as string | undefined) : undefined),
+      den: pick(patch.den, isSameType ? (existingParams.den as string | undefined) : undefined),
+      label: patch.label,
+    };
+
+    const { recordTime, params, defaultTitle } = await this.validateAction(asset, mergedInput, actor);
+
+    const oldDefaultTitle =
+      oldType === "dividend"
+        ? `Dividend ${existingParams.ratePerUnit} per unit`
+        : oldType === "split"
+          ? `Split ${existingParams.num}:${existingParams.den}`
+          : `Redemption ${existingParams.num}/${existingParams.den}`;
+
+    const title =
+      patch.label !== undefined
+        ? (label(patch.label, "label") ?? defaultTitle)
+        : String(row.label) === oldDefaultTitle
+          ? defaultTitle
+          : String(row.label);
+
+    const at = now();
+    const paramsJson = JSON.stringify(params);
+
+    this.db.tx(() => {
+      this.db.write(
+        "UPDATE actions SET type = ?, label = ?, record_time = ?, params = ?, result = NULL, reconciled_at = NULL WHERE id = ?",
+        effectiveType,
+        title,
+        recordTime,
+        paramsJson,
+        id,
+      );
+      this.db.insert(
+        `INSERT INTO action_history (action_id, asset_id, label, record_time, params, author, author_id, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        asset.id,
+        title,
+        recordTime,
+        paramsJson,
+        actor?.label ?? null,
+        actor?.id ?? null,
+        at,
+      );
+    });
+
+    return this.reconcileAction(id);
+  }
+
+  actionHistory(refOrId: string | number, actionId?: number) {
+    let aid: number | undefined;
+    let assetId: string | undefined;
+    if (typeof refOrId === "number") {
+      aid = refOrId;
+    } else if (actionId !== undefined) {
+      assetId = this.asset(refOrId).id;
+      aid = actionId;
+    } else if (/^\d+$/.test(refOrId)) {
+      aid = Number(refOrId);
+    } else {
+      assetId = this.asset(refOrId).id;
+    }
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (aid !== undefined) {
+      where.push("action_id = ?");
+      params.push(aid);
+    }
+    if (assetId !== undefined) {
+      where.push("asset_id = ?");
+      params.push(assetId);
+    }
+    const sql = `SELECT id, action_id, asset_id, label, record_time, params, author, author_id, at FROM action_history${
+      where.length ? " WHERE " + where.join(" AND ") : ""
+    } ORDER BY id`;
+    return this.db.all(sql, ...params).map((r) => ({
+      id: Number(r.id),
+      actionId: Number(r.action_id),
+      assetId: String(r.asset_id),
+      label: String(r.label),
+      recordTime: String(r.record_time),
+      params: JSON.parse(String(r.params)) as Record<string, unknown>,
+      author: r.author ? String(r.author) : null,
+      authorId: r.author_id ? String(r.author_id) : null,
+      at: String(r.at),
+    }));
+  }
+
+  actionChanges(refOrId: string | number, actionId?: number) {
+    return this.actionHistory(refOrId, actionId);
   }
 
   /** Establish where the asset's indexed history begins. */
@@ -2616,6 +2983,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
         coverage: this.coverage(asset, recordTime),
       };
       this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
+      this.refreshStats(asset.id);
       return this.action(id);
     }
 
@@ -2807,6 +3175,7 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     if (result.breaks.length > 0) {
       this.alert("action.breaks", asset, result.breaks.length, `/#/a/${asset.id}/actions`);
     }
+    this.refreshStats(asset.id);
     return this.action(id);
   }
 
@@ -2855,6 +3224,34 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       .map(({ id }) => this.action(id));
   }
 
+  /** Delete or void a corporate action and remove any flow-only pay asset no longer referenced. */
+  async deleteAction(id: number): Promise<void> {
+    const row = this.db.get<{ id: number; asset_id: string }>("SELECT id, asset_id FROM actions WHERE id = ?", id);
+    if (!row) throw new NotFound(`corporate action ${id} not found`);
+    this.db.tx(() => {
+      this.db.write("DELETE FROM break_notes WHERE asset_id = ? AND scope = ?", String(row.asset_id), `action:${id}`);
+      this.db.write("DELETE FROM actions WHERE id = ?", id);
+    });
+    this.refreshStats(String(row.asset_id));
+    await this.pruneUnusedFlowOnlyAssets();
+  }
+
+  private async pruneUnusedFlowOnlyAssets(): Promise<void> {
+    const referenced = new Set(
+      this.db
+        .all<{ params: string }>("SELECT params FROM actions WHERE type = 'dividend'")
+        .map((r) => (JSON.parse(r.params) as { payAsset?: string }).payAsset)
+        .filter((v): v is string => typeof v === "string"),
+    );
+    const hidden = this.db.all<{ id: string }>("SELECT id FROM assets WHERE flow_only = 1");
+    for (const h of hidden) {
+      if (!referenced.has(h.id)) {
+        this.db.write("DELETE FROM assets WHERE id = ?", String(h.id));
+        this.touch(String(h.id));
+      }
+    }
+  }
+
   /**
    * Cancel an action entered in error, keeping it in the audit trail. Nothing is deleted: the
    * record keeps its snapshot, its result and its breaks, gains who voided it and why, and stops
@@ -2876,6 +3273,8 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       text,
       id,
     );
+    // A voided action's breaks stop counting as open in the stored overview figures.
+    this.refreshStats(String(row.asset_id));
     return this.action(id);
   }
 
@@ -3055,15 +3454,36 @@ ul { margin: 6px 0 0; padding-left: 20px; }
     };
   }
 
-  /** One asset with the headline figures the dashboard lists. */
+  /**
+   * One asset with the headline figures the dashboard lists. The figures come from the
+   * asset's `asset_stats` row, which every change that can move them rewrites (`refreshStats`),
+   * so a poll reads one row however long the history is.
+   */
   assetSummary(asset: AssetRecord) {
+    // Never indexed: the controls log runs up to the clock, and there is nothing to replay.
+    const row = asset.syncedAt ? this.db.get("SELECT * FROM asset_stats WHERE asset_id = ?", asset.id) : undefined;
+    const stats = row ? statsFromRow(row) : this.refreshStats(asset.id);
+    // Not stored with the figures: a register's age grows with the clock, not with any write.
+    const latestRegister = this.db.get<{ as_of: string }>(
+      "SELECT as_of FROM registers WHERE asset_id = ? ORDER BY as_of DESC, id DESC LIMIT 1",
+      asset.id,
+    );
+    // A register nobody has refreshed is the attention item a timer-free service cannot raise itself.
+    const registerStale =
+      asset.registerMaxAgeDays === undefined || !latestRegister
+        ? null
+        : this.registerAge(latestRegister.as_of, asset.registerMaxAgeDays);
+    return { ...asset, ...stats, registerStale };
+  }
+
+  /** The headline figures recomputed from the data, ignoring any stored row. */
+  private computeStats(asset: AssetRecord): AssetStats {
     const state = this.state(asset);
     const run = this.latestRun(asset.id);
     const controls = this.controls(asset.id);
     const actions = this.actions(asset.id);
     const events = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE asset_id = ?", asset.id)!.n;
     return {
-      ...asset,
       supply: formatUnits(state.supply, asset.decimals),
       holderCount: state.balances.size,
       eventCount: events,
@@ -3083,6 +3503,38 @@ ul { margin: 6px 0 0; padding-left: 20px; }
    */
   isVoided(row: Row): boolean {
     return row.voided_at !== null && row.voided_at !== undefined;
+  }
+
+  /** How far past its limit a register is, or null while it is still fresh enough. */
+  private registerAge(asOf: string, limitDays: number): { ageDays: number } | null {
+    const ageMs = this.nowMs() - Date.parse(asOf);
+    if (!(ageMs > limitDays * DAY_MS)) return null;
+    return { ageDays: Math.floor(ageMs / DAY_MS) };
+  }
+
+  /**
+   * Recompute and store an asset's headline figures. Called at the end of every change that can
+   * move them: a sync pass, a rebuild, a reconciliation or a deleted register, a sign-off, an
+   * instructions import and a corporate action's reconciliation.
+   */
+  private refreshStats(assetId: string): AssetStats {
+    const asset = this.asset(assetId);
+    const stats = this.computeStats(asset);
+    this.db.write(
+      `INSERT OR REPLACE INTO asset_stats (asset_id, supply, holder_count, event_count, incomplete, last_run,
+         open_reconciliation, open_controls, open_actions, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      asset.id,
+      stats.supply,
+      stats.holderCount,
+      stats.eventCount,
+      stats.incomplete ? 1 : 0,
+      stats.lastRun ? JSON.stringify(stats.lastRun) : null,
+      stats.openBreaks.reconciliation,
+      stats.openBreaks.controls,
+      stats.openBreaks.actions,
+      now(),
+    );
+    return stats;
   }
 
   /** Everything an auditor needs for a period, with a digest over the content. */
@@ -3317,6 +3769,8 @@ ul { margin: 6px 0 0; padding-left: 20px; }
             "status",
             "note",
             "noteAuthor",
+            "assigneeId",
+            "assigneeLabel",
             "history",
           ],
           rows.map((r) => ({
@@ -3447,6 +3901,30 @@ ul { margin: 6px 0 0; padding-left: 20px; }
       default:
         throw new Invalid(EXPORT_CSV_SECTION_ERROR);
     }
+  }
+
+  get requireSecondSigner(): boolean {
+    const row = this.db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'require_second_signer'");
+    return row?.value === "true";
+  }
+
+  setRequireSecondSigner(enabled: boolean): void {
+    this.db.write(
+      "INSERT INTO meta (key, value) VALUES ('require_second_signer', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      String(enabled),
+    );
+  }
+
+  settings(): { requireSecondSigner: boolean } {
+    return { requireSecondSigner: this.requireSecondSigner };
+  }
+
+  updateSettings(patch: { requireSecondSigner?: boolean }): { requireSecondSigner: boolean } {
+    if (patch.requireSecondSigner !== undefined) {
+      if (typeof patch.requireSecondSigner !== "boolean") throw new Invalid("requireSecondSigner must be a boolean");
+      this.setRequireSecondSigner(patch.requireSecondSigner);
+    }
+    return this.settings();
   }
 }
 

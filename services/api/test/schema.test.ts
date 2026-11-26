@@ -77,6 +77,10 @@ describe("schema cascade deletion", () => {
       VALUES (1, 'A', 'type', 'label', '2026-01-01', '{}', '2026-01-01'),
              (2, 'B', 'type', 'label', '2026-01-01', '{}', '2026-01-01');
 
+      INSERT INTO action_history (id, action_id, asset_id, label, record_time, params, at)
+      VALUES (1, 1, 'A', 'label', '2026-01-01', '{}', '2026-01-01'),
+             (2, 2, 'B', 'label', '2026-01-01', '{}', '2026-01-01');
+
       INSERT INTO break_notes (asset_id, scope, key, fingerprint, status, note, updated_at)
       VALUES ('A', 'scope', 'kA', 'fp', 'open', 'note', '2026-01-01'),
              ('B', 'scope', 'kB', 'fp', 'open', 'note', '2026-01-01');
@@ -88,6 +92,11 @@ describe("schema cascade deletion", () => {
       INSERT INTO holdings_checkpoints (asset_id, ledger, closed_at, state, created_at)
       VALUES ('A', 1, '2026-01-01', '{}', '2026-01-01'),
              ('B', 1, '2026-01-01', '{}', '2026-01-01');
+
+      INSERT INTO asset_stats (asset_id, supply, holder_count, event_count, incomplete, open_reconciliation,
+        open_controls, open_actions, updated_at)
+      VALUES ('A', '100', 1, 1, 0, 0, 0, 0, '2026-01-01'),
+             ('B', '100', 1, 1, 0, 0, 0, 0, '2026-01-01');
     `);
 
     // Verify before deletion: each child table has 2 rows (one for A, one for B)

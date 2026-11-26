@@ -190,6 +190,13 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json({ ok: true });
   });
 
+  priv.get("/org/settings", (c) => c.json(c.var.ws.settings()));
+  priv.patch("/org/settings", async (c) => {
+    owner(c);
+    const input = await jsonBody<{ requireSecondSigner?: boolean }>(c);
+    return c.json(c.var.ws.updateSettings(input));
+  });
+
   // ── assets ────────────────────────────────────────────────────────────────
 
   priv.get("/overview", (c) => {
@@ -219,6 +226,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
       fromLedger?: number;
       instructionWindowHours?: number;
       movementWindowHours?: number;
+      registerMaxAgeDays?: number;
     }>(c);
     if (!isNetworkName(input.network)) throw new Invalid("network must be mainnet or testnet");
     // Without fromLedger the service works out where to start. With one it replays from there, as
@@ -233,6 +241,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
         ...(input.fromLedger !== undefined ? { fromLedger: input.fromLedger } : {}),
         ...(input.instructionWindowHours !== undefined ? { instructionWindowHours: input.instructionWindowHours } : {}),
         ...(input.movementWindowHours !== undefined ? { movementWindowHours: input.movementWindowHours } : {}),
+        ...(input.registerMaxAgeDays !== undefined ? { registerMaxAgeDays: input.registerMaxAgeDays } : {}),
       },
       { defer: true, actor },
     );
@@ -240,7 +249,18 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
   });
   priv.get("/assets/:id", (c) => c.json(c.var.ws.assetSummary(c.var.ws.asset(id(c)))));
   priv.patch("/assets/:id", async (c) =>
-    c.json(c.var.ws.updateAsset(id(c), await jsonBody<{ name?: string; ignore?: string[]; instructionWindowHours?: number; movementWindowHours?: number }>(c))),
+    c.json(
+      c.var.ws.updateAsset(
+        id(c),
+        await jsonBody<{
+          name?: string;
+          ignore?: string[];
+          instructionWindowHours?: number;
+          movementWindowHours?: number;
+          registerMaxAgeDays?: number | null;
+        }>(c),
+      ),
+    ),
   );
   priv.delete("/assets/:id", async (c) => {
     owner(c);
@@ -354,6 +374,10 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     return c.json(await c.var.ws.createAction(id(c), await jsonBody<ActionInput>(c), c.var.actor), 201);
   });
   priv.get("/actions/:id", (c) => c.json(c.var.ws.action(numeric(c, "id"))));
+  priv.delete("/actions/:id", async (c) => {
+    await c.var.ws.deleteAction(numeric(c, "id"));
+    return c.json({ ok: true });
+  });
   priv.post("/actions/:id/reconcile", async (c) => {
     throttle(c, "reconcile", 20, 10 * 60_000);
     return c.json(await c.var.ws.reconcileAction(numeric(c, "id")));
@@ -379,6 +403,28 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     // Only these three fields are taken from the caller. Who signed is the session's user.
     const note: NoteInput = { fingerprint: input.fingerprint, status: input.status, note: input.note };
     return c.json(c.var.ws.setNote(id(c), input.scope, input.key, note, c.var.actor));
+  });
+
+  // Current breaks from every scope, with their sign-off and owner. `assignee` takes a member id,
+  // or "none" for the breaks nobody owns.
+  priv.get("/assets/:id/breaks", (c) => c.json(c.var.ws.breaks(id(c), c.req.query("assignee") || undefined)));
+
+  priv.put("/assets/:id/notes/assignee", async (c) => {
+    const { ws, session } = c.var;
+    // Resolve the asset first: another workspace's id is a 404, never a hint about its members.
+    const asset = ws.asset(id(c));
+    const input = await jsonBody<{ scope: string; key: string; assigneeId?: string | null }>(c);
+    if (!input.scope || typeof input.key !== "string" || !input.key) throw new Invalid("scope and key are required");
+    // The assignee is a member of this workspace or nobody: the route never trusts a label or a
+    // user from elsewhere, and null clears the assignment.
+    let assignee: Actor | null = null;
+    if (input.assigneeId !== undefined && input.assigneeId !== null) {
+      const member =
+        typeof input.assigneeId === "string" ? auth.members(session.org.id).find((m) => m.id === input.assigneeId) : undefined;
+      if (!member) throw new Invalid("assignee must be a member of this workspace");
+      assignee = { id: member.id, label: `${member.name} <${member.email}>` };
+    }
+    return c.json(ws.assignBreak(asset.id, input.scope, input.key, assignee));
   });
 
   priv.get("/assets/:id/notes/history", (c) => {

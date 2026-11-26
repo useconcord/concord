@@ -31,6 +31,12 @@ const ORG_MIGRATION_DIGESTS = [
   "a4ad7e98aa4e92355d44afc19bae0ab7a8ea76063398f5f4f56eadc7b7690073",
   "41bc0d0c1c9a8c84109f284734b7f2892ddf93606c878a7fe4985355344bc6b2",
   "0182ab60eee2caac4eaf616ae083065f7e05b8e2d68980514545950eb56cd80f",
+  "598b1578ce4051f043832d5b91d0df06043afb64e1c6a0fad190a2a733174155",
+  "c4f44d594aab43a45f28af28cd2085455394f0eb77e0bea99bc19aa0456d8b0f",
+  "269164d28b84cd2d70564ca514e63c810698cb87363163119a5c9dabea296a6f",
+  "bfad9e965fbd1e940f1a21f1f4834b7e8601bf0a891bb945cec734c3f642b994",
+  "106dfc93f9440067a3f7b9045ce7389ea7409440490d9c059e00f90f596e1db5",
+  "28743caac6abe8fc9008e045261e93007d585bfe550744169f8ee906c9f722fa",
 ];
 const CONTROL_MIGRATION_DIGESTS = ["ba25bc5419cfcc376d2e7ff027845b2da4b789d9c7e966424b70cdfbbb90a422"];
 
@@ -98,6 +104,8 @@ function probes(s: Seeded): Record<string, Probe> {
     "PATCH /api/org": p("PATCH", "/api/org", { name: "Beta Partners" }),
     "DELETE /api/org": p("DELETE", "/api/org", { confirm: "Alpha Capital" }),
     "GET /api/org/webhook": p("GET", "/api/org/webhook"),
+    "GET /api/org/settings": p("GET", "/api/org/settings"),
+    "PATCH /api/org/settings": p("PATCH", "/api/org/settings", { requireSecondSigner: true }),
     "PUT /api/org/webhook": p("PUT", "/api/org/webhook", { url: "https://hooks.example.com/concord" }),
     "GET /api/overview": p("GET", "/api/overview"),
     "GET /api/lookup": p("GET", "/api/lookup?network=testnet&code=FUND"),
@@ -124,11 +132,14 @@ function probes(s: Seeded): Record<string, Probe> {
     "GET /api/assets/:id/actions": p("GET", `/api/assets/${id}/actions`),
     "POST /api/assets/:id/actions": p("POST", `/api/assets/${id}/actions`, { type: "split", recordTime: at(1), num: "2", den: "1" }),
     "GET /api/actions/:id": p("GET", `/api/actions/${s.actionId}`),
+    "DELETE /api/actions/:id": p("DELETE", `/api/actions/${s.actionId}`),
     "POST /api/actions/:id/reconcile": p("POST", `/api/actions/${s.actionId}/reconcile`),
     "POST /api/actions/:id/void": p("POST", `/api/actions/${s.actionId}/void`, { reason: "tenancy probe" }),
     "GET /api/assets/:id/controls": p("GET", `/api/assets/${id}/controls`),
     "PUT /api/assets/:id/notes": p("PUT", `/api/assets/${id}/notes`, { scope: "recon", key: "k", fingerprint: "f", status: "resolved", note: "n" }),
     "GET /api/assets/:id/notes/history": p("GET", `/api/assets/${id}/notes/history`),
+    "PUT /api/assets/:id/notes/assignee": p("PUT", `/api/assets/${id}/notes/assignee`, { scope: "recon", key: "k", assigneeId: s.a.userId }),
+    "GET /api/assets/:id/breaks": p("GET", `/api/assets/${id}/breaks`),
     "GET /api/assets/:id/export": p("GET", `/api/assets/${id}/export`),
   };
 }
@@ -185,6 +196,8 @@ describe("workspace isolation", () => {
     const members = await s.a.json<{ members: Array<{ email: string; role: string }> }>("/api/org/members");
     expect(members.members).toEqual([expect.objectContaining({ email: "ann@alpha.test", role: "owner" })]);
     expect((await s.a.json<{ name: string }>(`/api/assets/${s.assetId}`)).name).toBe("FUND");
+    // B's DELETE probe on A's action id must leave A's action in place.
+    expect((await s.a.call(`/api/actions/${s.actionId}`)).status).toBe(200);
   });
 
   it("turns away every workspace route without a session", async () => {
@@ -2394,6 +2407,22 @@ describe("chain endpoints", () => {
     expect((err as Error).message).toContain(accountId.slice(0, 8));
     expect((err as Error).message).toContain(`"${badBalance}"`);
     expect(calls).toHaveLength(1);
+  });
+
+  it("describes a classic asset only when Horizon lists it", async () => {
+    const issuer = key();
+    const url = `https://horizon.example/assets?asset_code=${encodeURIComponent("FUND")}&asset_issuer=${issuer}&limit=200`;
+    const { calls, deps } = scripted({
+      [url]: [
+        () => new Response(JSON.stringify({ _embedded: { records: [{ asset_code: "FUND", asset_issuer: issuer }] } })),
+        () => new Response(JSON.stringify({ _embedded: { records: [] } })),
+      ],
+    });
+    const source = new StellarSource(network(["https://rpc.example"]), deps);
+    const asset = { id: `FUND:${issuer}`, code: "FUND", issuer };
+    expect(await source.describe(asset)).toEqual({ decimals: 7 });
+    expect(await source.describe(asset)).toBeUndefined();
+    expect(calls.map((c) => c.url)).toEqual([url, url]);
   });
 });
 

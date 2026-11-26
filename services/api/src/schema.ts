@@ -215,6 +215,54 @@ ALTER TABLE actions ADD COLUMN voided_at TEXT;
 ALTER TABLE actions ADD COLUMN voided_by TEXT;
 ALTER TABLE actions ADD COLUMN void_reason TEXT;
 `,
+  // v9: a break can be owned by one workspace member; the label is stored beside the id so a payload still names the person after they leave
+  `
+ALTER TABLE break_notes ADD COLUMN assignee_id TEXT;
+ALTER TABLE break_notes ADD COLUMN assignee_label TEXT;
+`,
+  // v10: who imported a register, by user id, so the four-eyes rule can compare it with the person signing off
+  `
+ALTER TABLE registers ADD COLUMN imported_by_id TEXT;
+`,
+  // v11: a dividend's pay asset that nobody watches is watched automatically as a hidden, flow-only asset
+  `
+ALTER TABLE assets ADD COLUMN flow_only INTEGER NOT NULL DEFAULT 0;
+`,
+  // v12: keep a change log of corporate action edits before snapshot
+  `
+CREATE TABLE action_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action_id INTEGER NOT NULL REFERENCES actions (id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  record_time TEXT NOT NULL,
+  params TEXT NOT NULL,
+  author TEXT,
+  author_id TEXT,
+  at TEXT NOT NULL
+);
+CREATE INDEX action_history_action ON action_history (action_id, id);
+CREATE VIEW action_changes AS SELECT * FROM action_history;
+`,
+  // v13: per-asset register freshness limit; NULL means the stale-register check is off
+  `
+ALTER TABLE assets ADD COLUMN register_max_age_days INTEGER;
+`,
+  // v14: each asset's headline figures, so the polled overview reads one row; derived data, recomputed when missing
+  `
+CREATE TABLE asset_stats (
+  asset_id TEXT PRIMARY KEY REFERENCES assets (id) ON DELETE CASCADE,
+  supply TEXT NOT NULL,
+  holder_count INTEGER NOT NULL,
+  event_count INTEGER NOT NULL,
+  incomplete INTEGER NOT NULL,
+  last_run TEXT,
+  open_reconciliation INTEGER NOT NULL,
+  open_controls INTEGER NOT NULL,
+  open_actions INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */
