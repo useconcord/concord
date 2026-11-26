@@ -1162,6 +1162,67 @@ describe("networks", () => {
       expect(loadConfig(env)).toMatchObject(outcome.value);
     }
   });
+
+  it.each([
+    [
+      "host matching a.example",
+      JSON.stringify({ "a.example": { "x-api-key": "a" } }),
+      { headers: [{ "x-api-key": "a" }, undefined] },
+    ],
+    [
+      "host:port matching b.example:8443",
+      JSON.stringify({ "b.example:8443": { "x-api-key": "b-port" } }),
+      { headers: [undefined, { "x-api-key": "b-port" }] },
+    ],
+    [
+      "bare hostname fallback for ported URL b.example after CON-0319",
+      JSON.stringify({ "b.example": { "x-api-key": "b-bare" } }),
+      { headers: [undefined, { "x-api-key": "b-bare" }] },
+    ],
+    [
+      "exact host:port precedence over hostname",
+      JSON.stringify({ "b.example:8443": { "x-api-key": "exact" }, "b.example": { "x-api-key": "fallback" } }),
+      { headers: [undefined, { "x-api-key": "exact" }] },
+    ],
+    [
+      "null after CON-0318",
+      "null",
+      { error: 'CONCORD_RPC_HEADERS must be JSON: {"host": {"header": "value"}}' },
+    ],
+    [
+      "[] after CON-0318",
+      "[]",
+      { error: 'CONCORD_RPC_HEADERS must be JSON: {"host": {"header": "value"}}' },
+    ],
+    [
+      '{"a.example":"b"} after CON-0318',
+      '{"a.example":"b"}',
+      { error: 'CONCORD_RPC_HEADERS must be JSON: {"host": {"header": "value"}}' },
+    ],
+    [
+      '{"a.example":{"k":1}} after CON-0318',
+      '{"a.example":{"k":1}}',
+      { error: 'CONCORD_RPC_HEADERS must be JSON: {"host": {"header": "value"}}' },
+    ],
+    [
+      "invalid JSON verbatim message",
+      "{not-json}",
+      { error: 'CONCORD_RPC_HEADERS must be JSON: {"host": {"header": "value"}}' },
+    ],
+  ])("validates CONCORD_RPC_HEADERS and applies headers: %s", (_name, rpcHeaders, expected) => {
+    const env = {
+      CONCORD_MAINNET_RPC_URLS: "https://a.example, https://b.example:8443",
+      CONCORD_RPC_HEADERS: rpcHeaders,
+    };
+    if ("error" in expected) {
+      expect(() => loadConfig(env)).toThrow(expected.error);
+    } else {
+      const config = loadConfig(env);
+      const rpc = config.networks.mainnet.rpc;
+      expect(rpc[0]?.headers).toEqual(expected.headers[0]);
+      expect(rpc[1]?.headers).toEqual(expected.headers[1]);
+    }
+  });
 });
 
 describe("chain endpoints", () => {
