@@ -5,7 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync, backup } from "node:sqlite";
 import { parseArgs } from "node:util";
-import { NotFound, type ActionInput, type Actor, type Concord, type WatchInput } from "./concord.js";
+import { NotFound, type ActionInput, type Actor, type Concord, type WatchInput, verifyPack } from "./concord.js";
 import { isNetworkName, loadConfig } from "./config.js";
 import { openRuntime, startServer } from "./main.js";
 import { CLI_OPTIONS, USAGE, describeArgsError } from "./cli-usage.js";
@@ -415,7 +415,7 @@ export async function runCli(
       if (values.to) period.to = values.to;
       const text = values.csv
         ? concord.exportCsv(asset, values.csv, period)
-        : JSON.stringify(concord.auditExport(asset, period), null, 2);
+        : JSON.stringify(concord.auditExport(asset, period, config.signingKey ? { signingKey: config.signingKey } : {}), null, 2);
       if (values.out) {
         writeFileSync(values.out, text);
         console.log(`wrote ${values.out}`);
@@ -456,6 +456,30 @@ export async function runCli(
       concord.setNote(asset, scope, key, { fingerprint: brk.fingerprint, status, note }, actor);
       if (values.json) return out({ ok: true, asset, scope, key, status });
       console.log(`signed off: ${key} → ${status.toUpperCase()}`);
+      break;
+    }
+    case "verify-pack": {
+      const file = need(a, "pack file");
+      const raw = readFileSync(resolve(file), "utf8");
+      const pack = JSON.parse(raw);
+      const res = verifyPack(pack, values.key ? resolve(values.key) : undefined);
+      if (values.json) {
+        out(res);
+      } else {
+        if (!res.digestValid) {
+          console.error(`FAIL: digest mismatch (expected ${res.expectedDigest}, got ${res.digest})`);
+          process.exitCode = 1;
+        } else if (res.signatureChecked && !res.signatureValid) {
+          console.error(`FAIL: signature verification failed: ${res.error ?? "invalid signature"}`);
+          process.exitCode = 1;
+        } else if (res.signatureChecked && res.signatureValid) {
+          console.log(`OK: digest verified (${res.digest}), signature valid (key: ${res.keyId})`);
+        } else if (res.signed) {
+          console.log(`OK: digest verified (${res.digest}), pack is signed (key: ${res.keyId})`);
+        } else {
+          console.log(`OK: digest verified (${res.digest})`);
+        }
+      }
       break;
     }
     default:
