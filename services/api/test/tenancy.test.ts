@@ -111,6 +111,8 @@ function probes(s: Seeded): Record<string, Probe> {
     "DELETE /api/assets/:id/registers/:registerId": p("DELETE", `/api/assets/${id}/registers/${s.registerId}`),
     "POST /api/assets/:id/journal": p("POST", `/api/assets/${id}/journal`, { csv: "ref,date,type,units\n" }),
     "POST /api/assets/:id/instructions": p("POST", `/api/assets/${id}/instructions`, { csv: "ref,type,account,issued_at\n" }),
+    "DELETE /api/assets/:id/journal/:entryRef": p("DELETE", `/api/assets/${id}/journal/J-ALPHA`),
+    "DELETE /api/assets/:id/instructions/:instructionRef": p("DELETE", `/api/assets/${id}/instructions/I-ALPHA`),
     "GET /api/assets/:id/reconciliations": p("GET", `/api/assets/${id}/reconciliations`),
     "POST /api/assets/:id/reconciliations": p("POST", `/api/assets/${id}/reconciliations`, { registerId: s.registerId }),
     "GET /api/reconciliations/:id": p("GET", `/api/reconciliations/${s.runId}`),
