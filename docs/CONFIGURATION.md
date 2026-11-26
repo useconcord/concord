@@ -34,6 +34,7 @@ value.
 | `CONCORD_TRUST_PROXY` | `0` | A whole number of proxy hops, 0 to 10 | Not a whole number, below 0, or above 10 |
 | `CONCORD_WEB_DIR` | `<repo>/apps/web/dist` | A directory holding the built dashboard. A relative path is resolved against the repository root, not the working directory | Not checked |
 | `CONCORD_DATA_DIR` | `<repo>/data` | A directory on a local disk. A relative path is resolved against the repository root, not the working directory | Not checked |
+| `CONCORD_SQLITE_SYNCHRONOUS` | `normal` | `normal` (fast writes; WAL keeps the database consistent, a power cut can lose the last commits) or `full` (syncs every commit) | Anything else, including an empty value |
 | `CONCORD_EPHEMERAL` | Off | `1`, `true`, `yes` or `on` turns it on; `0`, `false`, `no` or `off` turns it off (case-insensitive) | Anything else |
 | `CONCORD_SIGNUP` | `open` | `open` or `code` | Anything else, including an empty value |
 | `CONCORD_MAX_ASSETS` | `10` | A whole number, 1 to 1000 | Not a whole number, below 1, or above 1000 |

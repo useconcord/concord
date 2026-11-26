@@ -5,6 +5,7 @@ import { ORG_MIGRATIONS } from "./schema.js";
 
 export type Row = Record<string, string | number | null>;
 type Param = string | number | bigint | null;
+export type SqliteSynchronous = "normal" | "full";
 
 /** Thin wrapper over node:sqlite. Amounts are stored as decimal strings of the smallest unit. */
 export class Db {
@@ -13,6 +14,7 @@ export class Db {
   constructor(
     readonly path: string,
     migrations: readonly string[] = ORG_MIGRATIONS,
+    synchronous: SqliteSynchronous = "normal",
   ) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.raw = new DatabaseSync(path);
@@ -20,6 +22,7 @@ export class Db {
       // The CLI and the server may hold the same file; wait for the other rather than fail.
       // The timeout comes first: switching to WAL takes a lock of its own and would otherwise fail at once.
       this.raw.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
+      this.raw.exec(`PRAGMA synchronous = ${synchronous === "full" ? "FULL" : "NORMAL"}`);
       this.migrate(migrations);
       this.raw.exec("PRAGMA foreign_keys = ON;");
     } catch (err) {
